@@ -538,6 +538,71 @@ const tools = [
   }
 ];
 
+
+// -----------------------------------------------------------------------------
+// SAFE HISTORY TRIMMING
+// -----------------------------------------------------------------------------
+function trimHistory(history, max) {
+  if (history.length <= max) return history;
+
+  const head = history.slice(0, 2); // keep system + user
+  let tail = history.slice(-(max - 2));
+
+  // ensure history never starts with a tool message
+  while (tail.length && tail[0].role === "tool") {
+    tail.shift();
+  }
+
+  return [...head, ...tail];
+}
+
+// -----------------------------------------------------------------------------
+// HISTORY VALIDATION (prevents OpenAI tool ordering errors)
+// -----------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
+// ROBUST HISTORY VALIDATION (final production version)
+// -----------------------------------------------------------------------------
+function validateHistory(history) {
+  for (let i = 0; i < history.length; i++) {
+    const msg = history[i];
+
+    // Only tool messages need validation
+    if (msg.role !== "tool") continue;
+
+    const prev = history[i - 1];
+
+    // If no previous message → invalid
+    if (!prev) {
+      throw new Error("Tool message cannot be first message.");
+    }
+
+    // PREV MUST be assistant
+    if (prev.role !== "assistant") {
+      throw new Error(
+        "Tool message must come immediately after an assistant message."
+      );
+    }
+
+    // PREV MUST contain tool_calls
+    if (!prev.tool_calls || prev.tool_calls.length === 0) {
+      throw new Error(
+        "Tool message appears but assistant message had no tool_calls."
+      );
+    }
+
+    // Tool MUST match one of the assistant tool_call ids
+    const matches = prev.tool_calls.some(tc => tc.id === msg.tool_call_id);
+
+    if (!matches) {
+      throw new Error(
+        `Tool message tool_call_id=${msg.tool_call_id} does not match any assistant tool_calls.`
+      );
+    }
+  }
+}
+
+
+
 // -----------------------------------------------------------------------------
 // MAIN LOOP — ⭐ FIXED VERSION ⭐
 // -----------------------------------------------------------------------------
@@ -565,6 +630,7 @@ async function run() {
     for (let step = 1; step <= MAX_STEPS; step++) {
       console.log(`\n🌀 Step ${step} / ${MAX_STEPS}`);
 
+      validateHistory(history);
       const completion = await client.chat.completions.create({
         model: "gpt-4o",
         messages: history,
@@ -626,13 +692,8 @@ async function run() {
       }
 
       // Trim history safely (never remove the system or initial user message)
-      if (history.length > MAX_HISTORY) {
-        history = [
-          history[0], // system
-          history[1], // user
-          ...history.slice(-MAX_HISTORY + 2)
-        ];
-      }
+ history = trimHistory(history, MAX_HISTORY);
+
     }
   } catch (err) {
     console.error("❌ Agent crashed:", err);
