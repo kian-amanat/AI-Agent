@@ -1,3 +1,4 @@
+
 // agent.js — AUTONOMOUS PIXEL‑PERFECT SELF‑HEALING AGENT
 
 import OpenAI from "openai";
@@ -24,7 +25,9 @@ dotenv.config();
 // OPENAI CLIENT
 // -----------------------------------------------------------------------------
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || "sk-KYVx0aFzK7YxQ9Y1E6IvRFDfyfx2G3brRW6wJYNyJ7o9AWAx",
+  apiKey:
+    process.env.OPENAI_API_KEY ||
+    "sk-4oGPVdjGtLULH50wJ0LktJORGTksNn4XjjHliQaL9F0HbElz",
   baseURL: process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1"
 });
 
@@ -35,10 +38,13 @@ const APP_NAME = "login-app";
 const APP_ROOT = path.join(WORKSPACE_ROOT, APP_NAME);
 const DEV_PORT = 5173;
 const DEV_URL = `http://localhost:${DEV_PORT}`;
-
-const MAX_STEPS = 40;
+const BOOTSTRAP_FLAG = path.join(WORKSPACE_ROOT, ".bootstrap_done");
+const BOOTSTRAP_OUTPUT_DIR = path.join(WORKSPACE_ROOT, "bootstrap-output");
+const MAX_STEPS = 1000;
 const MAX_HISTORY = 25;
 const DIFF_THRESHOLD_PERCENT = 0.2;
+
+const PRIMARY_REFERENCE_IMAGE = "reference_ui.png";
 
 // -----------------------------------------------------------------------------
 // ENV FIX
@@ -53,6 +59,27 @@ const TOOL_ENV = {
   ...process.env,
   PATH: `${NODE_BIN_DIR}:${process.env.PATH}`
 };
+
+// -----------------------------------------------------------------------------
+// MINIMAL FALLBACK APP (برای مواقعی که bootstrap یا edits خراب می‌شود)
+// -----------------------------------------------------------------------------
+const minimalValidAppJsx = `import React from "react";
+
+export default function App() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-slate-100">
+      <div className="p-8 bg-white shadow rounded-lg">
+        <h1 className="text-xl font-semibold text-slate-900">
+          Bootstrap UI ready
+        </h1>
+        <p className="mt-2 text-sm text-slate-600">
+          This is a fallback App.jsx used when generated code fails to build.
+        </p>
+      </div>
+    </div>
+  );
+}
+`;
 
 // -----------------------------------------------------------------------------
 // PROJECT CREATION
@@ -135,17 +162,10 @@ ReactDOM.createRoot(document.getElementById("root")).render(
 );`
   );
 
+  // Placeholder اولیه
   fs.writeFileSync(
     path.join(APP_ROOT, "src/App.jsx"),
-    `import React from "react";
-export default function App() {
-  return (
-    <div className="p-4 max-w-xl mx-auto">
-      <h1 className="text-3xl font-bold mb-4">Login App</h1>
-      <p>Welcome to the automated Vite React + TailwindCSS app!</p>
-    </div>
-  );
-}`
+    minimalValidAppJsx // ✅ از همون fallback استفاده می‌کنیم
   );
 
   fs.writeFileSync(
@@ -237,6 +257,80 @@ function listFiles(relPath) {
   return fs.readdirSync(fullPath);
 }
 
+// -----------------------------------------------------------------------------
+// SAFE EDIT + BUILD VALIDATION
+// -----------------------------------------------------------------------------
+async function runBuild() {
+  console.log("🔎 Running build validation (npm run build)...");
+  const result = await runCommand({
+    cwd: APP_NAME,
+    cmd: "npm run build",
+    env: TOOL_ENV
+  });
+  return result.success;
+}
+
+// فقط برای فایل‌هایی مثل src/App.jsx از این استفاده می‌کنیم
+async function safeEditFileWithValidation(relPath, newContent) {
+  const { fullPath } = resolveWorkspacePath(normalizeWorkspacePath(relPath));
+  const dir = path.dirname(fullPath);
+
+  fs.mkdirSync(dir, { recursive: true });
+
+  let originalContent = "";
+  if (fs.existsSync(fullPath)) {
+    originalContent = fs.readFileSync(fullPath, "utf8");
+    fs.writeFileSync(fullPath + ".bak", originalContent, "utf8");
+  }
+
+  fs.writeFileSync(fullPath, newContent, "utf8");
+
+  const ok = await runBuild();
+
+  if (!ok) {
+    console.error(
+      `❌ Edit broke the build for ${relPath}. Reverting to previous version.`
+    );
+    if (originalContent) {
+      fs.writeFileSync(fullPath, originalContent, "utf8");
+    } else {
+      // اگر فایل جدید بود و قبلاً وجود نداشت
+      fs.unlinkSync(fullPath);
+    }
+    return false;
+  }
+
+  console.log(`✅ Edit for ${relPath} passed build validation.`);
+  return true;
+}
+
+// بعد از bootstrap، اگر build fail شد، fallback بنویس
+async function ensureAppJsxBuildable() {
+  const ok = await runBuild();
+  if (ok) {
+    console.log("✅ Bootstrap App.jsx passed build check.");
+    return;
+  }
+
+  console.error(
+    "❌ Bootstrap App.jsx failed build. Writing minimal fallback App.jsx..."
+  );
+  const relPath = "login-app/src/App.jsx";
+  safeWrite(relPath, minimalValidAppJsx);
+
+  const ok2 = await runBuild();
+  if (!ok2) {
+    console.error(
+      "❌ Even fallback App.jsx failed build. Something is fundamentally wrong with the project."
+    );
+  } else {
+    console.log("✅ Fallback App.jsx build succeeded.");
+  }
+}
+
+// -----------------------------------------------------------------------------
+// FIND RELEVANT FILES
+// -----------------------------------------------------------------------------
 function findRelevantFilesHeuristic(diffText) {
   const SRC_ROOT = path.join(APP_ROOT, "src");
   const results = [];
@@ -259,20 +353,146 @@ function findRelevantFilesHeuristic(diffText) {
 
   if (fs.existsSync(SRC_ROOT)) walk(SRC_ROOT);
 
-  return results.map((abs) =>
-    path.relative(WORKSPACE_ROOT, abs).replace(/\\/g, "/")
-  );
+  return results
+    .map(abs => path.relative(WORKSPACE_ROOT, abs).replace(/\\/g, "/"));
 }
 
+// -----------------------------------------------------------------------------
+// BOOTSTRAP FROM IMAGE (فاز صفر)
+// -----------------------------------------------------------------------------
+async function bootstrapUIFromImage() {
+  const imagePath = path.join(WORKSPACE_ROOT, PRIMARY_REFERENCE_IMAGE);
+
+  // اگر قبلاً bootstrap انجام شده، دوباره انجام نده
+  if (fs.existsSync(BOOTSTRAP_FLAG)) {
+    console.log(
+      "⚠️ Bootstrap already done (flag file exists). Skipping bootstrap phase."
+    );
+    return;
+  }
+
+  if (!fs.existsSync(imagePath)) {
+    console.log(
+      `⚠️ No primary reference image found at ${imagePath}. Skipping bootstrap phase.`
+    );
+    return;
+  }
+
+  console.log(
+    `🎬 Bootstrapping initial UI from reference image: ${PRIMARY_REFERENCE_IMAGE}`
+  );
+
+  try {
+    const imageBuffer = fs.readFileSync(imagePath);
+    const imageBase64 = imageBuffer.toString("base64");
+    const dataUrl = `data:image/png;base64,${imageBase64}`;
+
+const systemPrompt = `
+You are an expert frontend engineer and UI implementer.
+You are given a reference UI design as an image.
+Your job is to generate a complete React + TailwindCSS implementation
+for the main application entry (App.jsx), matching the layout and visual
+hierarchy as closely as possible.
+
+Rules:
+- Use React functional components.
+- Use TailwindCSS utility classes for all styling.
+- Use only valid Tailwind classes from the official docs (e.g. bg-blue-500, text-gray-700, hover:bg-blue-600, focus:outline-none, focus:ring-2).
+- Do NOT invent classes like "hover-gl", "focus:hocusing", or incomplete classes like "focus:outline-", "bg", "text-gray", "border-", "shadow-".
+- Always include a shade for gray colors (e.g. text-gray-700, not text-gray).
+- All JSX must be syntactically valid, use a single default export React component, and have a single root element.
+- Do NOT include any additional text explaining the code.
+- Output ONLY the contents of App.jsx (no backticks, no extra commentary).
+- Assume this file lives in src/App.jsx and is used by src/main.jsx.
+
+CRITICAL Tool Usage Rules:
+- You MUST call at most ONE tool per assistant turn.
+- NEVER call multiple tools in the same assistant message.
+- If multiple tools are needed, call them SEQUENTIALLY:
+  one assistant message → one tool call → wait for result → next assistant message → next tool call.
+- Parallel or batch tool calls in a single message are NOT allowed in this environment.
+- Strictly follow these tool usage constraints to avoid runtime errors and ensure agent stability.
+
+`.trim();
 
 
 
+    const completion = await client.chat.completions.create({
+      model: "gpt-5.2",
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: [
+            {
+              type: "text",
+              text:
+                "Generate the full content of src/App.jsx that implements this screen using React and TailwindCSS."
+            },
+            {
+              type: "image_url",
+              image_url: {
+                url: dataUrl
+              }
+            }
+          ]
+        }
+      ],
+      temperature: 0.2,
+      max_tokens: 2000
+    });
+
+    let appCode = completion.choices[0]?.message?.content ?? "";
+
+    if (!appCode.trim()) {
+      console.log(
+        "⚠️ Bootstrap model returned empty App.jsx. Skipping overwrite."
+      );
+      return;
+    }
+
+
+    appCode = appCode.replace(/^```[a-zA-Z]*\s*/, "").replace(/```$/, "").trim();
+
+    // ذخیره نسخه‌ی خام برای دیباگ
+    fs.mkdirSync(BOOTSTRAP_OUTPUT_DIR, { recursive: true });
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const rawFile = path.join(
+      BOOTSTRAP_OUTPUT_DIR,
+      `App-bootstrap-${timestamp}.jsx`
+    );
+    fs.writeFileSync(rawFile, appCode, "utf8");
+    console.log(`📝 Saved raw bootstrap App.jsx to ${rawFile}`);
+
+    // نوشتن فایل اصلی
+    safeWrite("login-app/src/App.jsx", appCode);
+    console.log("✅ Bootstrapped src/App.jsx from reference image.");
+
+    // ✅ Validation بعد از bootstrap
+    await ensureAppJsxBuildable();
+
+    // فلگ بساز که دوباره bootstrap انجام نشود
+    fs.writeFileSync(
+      BOOTSTRAP_FLAG,
+      `bootstrap done at ${new Date().toISOString()}\n`,
+      "utf8"
+    );
+  } catch (err) {
+    console.error("❌ Bootstrap from image failed:", err);
+    // اگر bootstrap شکست خورد، حداقل مطمئن شو fallback وجود داره
+    await ensureAppJsxBuildable();
+  }
+}
+
+// -----------------------------------------------------------------------------
+// ENFORCE TOOL CALL
+// -----------------------------------------------------------------------------
 function enforceToolCall(message, lastDiff) {
-  // If workflow hasn't reached success condition,
-  // ANY assistant message without tool_calls is INVALID
   if (!message.tool_calls) {
     if (lastDiff === null || lastDiff > DIFF_THRESHOLD_PERCENT) {
-      console.log("❌ Invalid assistant message — missing tool_calls. Forcing continue...");
+      console.log(
+        "❌ Invalid assistant message — missing tool_calls. Forcing continue..."
+      );
       return {
         role: "assistant",
         content: "",
@@ -292,8 +512,6 @@ function enforceToolCall(message, lastDiff) {
 
   return message;
 }
-
-
 
 // -----------------------------------------------------------------------------
 // TOOL EXECUTOR
@@ -333,10 +551,46 @@ async function executeTool(call) {
         return JSON.stringify({ visionAnalysis: out }, null, 2);
       }
 
-      case "create_file":
-      case "edit_file":
+      case "create_file": {
+        // برای هر فایلی به‌صورت عادی بنویس، ولی اگر App.jsx بود، بعدش build check کن
         safeWrite(call.arguments.path, call.arguments.content);
+        if (
+          call.arguments.path === "login-app/src/App.jsx" ||
+          call.arguments.path.endsWith("/src/App.jsx")
+        ) {
+          await ensureAppJsxBuildable();
+        }
         return JSON.stringify({ status: "ok", action: call.name }, null, 2);
+      }
+
+      case "edit_file": {
+        // ✅ برای App.jsx حتماً از safeEditFileWithValidation استفاده کن
+        if (
+          call.arguments.path === "login-app/src/App.jsx" ||
+          call.arguments.path.endsWith("/src/App.jsx")
+        ) {
+          const ok = await safeEditFileWithValidation(
+            call.arguments.path,
+            call.arguments.content
+          );
+          return JSON.stringify(
+            {
+              status: ok ? "ok" : "reverted",
+              action: call.name
+            },
+            null,
+            2
+          );
+        } else {
+          // سایر فایل‌ها: فعلاً ساده، اما می‌تونی بعداً برای آنها هم همان منطق را بگذاری
+          safeWrite(call.arguments.path, call.arguments.content);
+          return JSON.stringify(
+            { status: "ok", action: call.name },
+            null,
+            2
+          );
+        }
+      }
 
       case "read_file":
         return JSON.stringify({ content: safeRead(call.arguments.path) });
@@ -347,6 +601,15 @@ async function executeTool(call) {
       case "find_relevant_files": {
         const files = findRelevantFilesHeuristic(call.arguments.description);
         return JSON.stringify({ matchedFiles: files }, null, 2);
+      }
+
+      case "bootstrap_ui_from_image": {
+        await bootstrapUIFromImage();
+        return JSON.stringify(
+          { status: "ok", action: "bootstrap_ui_from_image" },
+          null,
+          2
+        );
       }
     }
   } catch (err) {
@@ -360,7 +623,19 @@ async function executeTool(call) {
 const SYSTEM = `
 You are an autonomous frontend engineer.
 
-Your behavior is always TWO PHASES:
+Your behavior is always THREE PHASES:
+
+PHASE 0 — IMAGE-BASED BOOTSTRAP (NEW)
+---------------------------------
+If a reference UI image exists in the workspace (e.g. ${PRIMARY_REFERENCE_IMAGE}),
+you MUST FIRST call the tool "bootstrap_ui_from_image" exactly once.
+This tool will generate the initial src/App.jsx based on the design image.
+Only after this bootstrap is complete, continue with Phase 1.
+
+Important Tailwind rules:
+- Use only valid Tailwind utility classes.
+- Never invent classes like "hover-gl", "bg" alone, "focus:hocusing", or incomplete classes like "focus:outline-".
+- Always include a shade for gray colors (e.g. text-gray-700, not text-gray).
 
 PHASE 1 — UI CREATION
 ---------------------------------
@@ -390,11 +665,11 @@ Rules:
 You are not allowed to end the workflow until Phase 2 finishes successfully.
 `;
 
-
-
-
 const TASK = `
-Your goal is twofold:
+Your goal is threefold:
+
+PHASE 0 — If a reference UI image exists, bootstrap the initial App.jsx from it
+by calling "bootstrap_ui_from_image" once at the very beginning.
 
 PHASE 1 — Implement the user's requested UI or functionality.
 Make sure the UI exists in the project and behaves as requested.
@@ -414,12 +689,9 @@ Loop:
    - stop with a normal assistant message (no tool calls)
 
 BEGIN NOW.
-If UI does not exist yet, start with Phase 1.
+If UI does not exist yet, start with Phase 0 (if image present) then Phase 1.
 If UI exists, jump directly to Phase 2.
 `;
-
-
-
 
 // -----------------------------------------------------------------------------
 // TOOL SCHEMA
@@ -535,9 +807,21 @@ const tools = [
         required: ["description"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "bootstrap_ui_from_image",
+      description:
+        "Generate the initial src/App.jsx based on the primary reference UI image (e.g. reference_ui.png). Must be called at most once at the beginning if the image exists.",
+      parameters: {
+        type: "object",
+        properties: {},
+        required: []
+      }
+    }
   }
 ];
-
 
 // -----------------------------------------------------------------------------
 // SAFE HISTORY TRIMMING
@@ -548,7 +832,6 @@ function trimHistory(history, max) {
   const head = history.slice(0, 2); // keep system + user
   let tail = history.slice(-(max - 2));
 
-  // ensure history never starts with a tool message
   while (tail.length && tail[0].role === "tool") {
     tail.shift();
   }
@@ -557,40 +840,32 @@ function trimHistory(history, max) {
 }
 
 // -----------------------------------------------------------------------------
-// HISTORY VALIDATION (prevents OpenAI tool ordering errors)
-// -----------------------------------------------------------------------------
-// -----------------------------------------------------------------------------
-// ROBUST HISTORY VALIDATION (final production version)
+// HISTORY VALIDATION
 // -----------------------------------------------------------------------------
 function validateHistory(history) {
   for (let i = 0; i < history.length; i++) {
     const msg = history[i];
 
-    // Only tool messages need validation
     if (msg.role !== "tool") continue;
 
     const prev = history[i - 1];
 
-    // If no previous message → invalid
     if (!prev) {
       throw new Error("Tool message cannot be first message.");
     }
 
-    // PREV MUST be assistant
     if (prev.role !== "assistant") {
       throw new Error(
         "Tool message must come immediately after an assistant message."
       );
     }
 
-    // PREV MUST contain tool_calls
     if (!prev.tool_calls || prev.tool_calls.length === 0) {
       throw new Error(
         "Tool message appears but assistant message had no tool_calls."
       );
     }
 
-    // Tool MUST match one of the assistant tool_call ids
     const matches = prev.tool_calls.some(tc => tc.id === msg.tool_call_id);
 
     if (!matches) {
@@ -601,13 +876,8 @@ function validateHistory(history) {
   }
 }
 
-
-
 // -----------------------------------------------------------------------------
-// MAIN LOOP — ⭐ FIXED VERSION ⭐
-// -----------------------------------------------------------------------------
-// -----------------------------------------------------------------------------
-// MAIN LOOP — ⭐ FULLY FIXED VERSION ⭐
+// MAIN LOOP
 // -----------------------------------------------------------------------------
 async function run() {
   let serverProc;
@@ -620,6 +890,9 @@ async function run() {
     await waitForServer(DEV_URL);
     console.log(`🚀 Dev server ready at ${DEV_URL}`);
 
+    // Phase 0: Bootstrap (idempotent)
+    await bootstrapUIFromImage();
+
     let history = [
       { role: "system", content: SYSTEM },
       { role: "user", content: TASK }
@@ -630,7 +903,10 @@ async function run() {
     for (let step = 1; step <= MAX_STEPS; step++) {
       console.log(`\n🌀 Step ${step} / ${MAX_STEPS}`);
 
+      // Validate history before sending
       validateHistory(history);
+
+      // MODEL CALL
       const completion = await client.chat.completions.create({
         model: "gpt-4o",
         messages: history,
@@ -640,60 +916,60 @@ async function run() {
 
       let msg = completion.choices[0].message;
 
-      // Force tool-calls if needed
+      // If model failed policy, enforce a tool call
       msg = enforceToolCall(msg, lastDiff);
 
-      // Store assistant message WITH tool_calls
       history.push(msg);
 
-      // If no tool calls → done
+      // If there is no tool call, agent believes job is done
       if (!msg.tool_calls || msg.tool_calls.length === 0) {
         console.log("🏁 Assistant ended the workflow.");
         break;
       }
 
-      // Execute tools in correct order
-      for (const call of msg.tool_calls) {
-        console.log(`⚙️ Running tool: ${call.function.name}`);
+      // IMPORTANT FIX:
+      // Only run ONE tool per assistant turn
+      const call = msg.tool_calls[0];
 
-        const args = call.function.arguments
-          ? JSON.parse(call.function.arguments)
-          : {};
+      console.log(`⚙️ Running tool: ${call.function.name}`);
 
-        const result = await executeTool({
-          name: call.function.name,
-          arguments: args
-        });
+      // Parse args
+      const args = call.function.arguments
+        ? JSON.parse(call.function.arguments)
+        : {};
 
-        // Special diff tracking
-        if (call.function.name === "diff_ui") {
-          try {
-            lastDiff = JSON.parse(result);
-          } catch {}
+      // Execute tool
+      const result = await executeTool({
+        name: call.function.name,
+        arguments: args
+      });
+
+      // Update diff if tool was diff_ui
+      if (call.function.name === "diff_ui") {
+        try {
+          lastDiff = JSON.parse(result);
+        } catch {
+          /* ignore parse errors */
         }
-
-        // Push tool response EXACTLY AFTER tool_calls
-        history.push({
-          role: "tool",
-          tool_call_id: call.id,
-          content: result
-        });
-
-        // ❌ DO NOT push any assistant messages here
-        // The next assistant message must come from the model itself
       }
 
-      // Stop if diff small
+      // Push tool result to history
+      history.push({
+        role: "tool",
+        tool_call_id: call.id,
+        content: result
+      });
+
+      // If diff small enough, stop
       if (lastDiff && lastDiff.diffPercent <= DIFF_THRESHOLD_PERCENT) {
         console.log(
-          `🎉 Pixel diff ${lastDiff.diffPercent}% is under threshold. Finished.`
+          `🎉 Pixel diff ${lastDiff.diffP}% is under threshold. Finished.`
         );
         break;
       }
 
-      // Trim history safely (never remove the system or initial user message)
- history = trimHistory(history, MAX_HISTORY);
-
+      // Trim history to avoid overflow
+      history = trimHistory(history, MAX_HISTORY);
     }
   } catch (err) {
     console.error("❌ Agent crashed:", err);
@@ -703,6 +979,5 @@ async function run() {
   }
 }
 
+
 run();
-
-
