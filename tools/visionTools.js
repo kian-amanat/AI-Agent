@@ -4,7 +4,7 @@ import fs from "fs";
 import path from "path";
 
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || "YOUR_API_KEY_HERE",
+  apiKey: process.env.OPENAI_API_KEY || "***REMOVED-SECRET***",
   baseURL: process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1",
 });
 
