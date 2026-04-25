@@ -1,4 +1,3 @@
-
 // agent.js — AUTONOMOUS PIXEL‑PERFECT SELF‑HEALING AGENT
 
 import OpenAI from "openai";
@@ -40,7 +39,14 @@ const DEV_PORT = 5173;
 const DEV_URL = `http://localhost:${DEV_PORT}`;
 const BOOTSTRAP_FLAG = path.join(WORKSPACE_ROOT, ".bootstrap_done");
 const BOOTSTRAP_OUTPUT_DIR = path.join(WORKSPACE_ROOT, "bootstrap-output");
-const MAX_STEPS = 1000;
+const HARD_MAX_STEPS =
+  Number(process.env.AGENT_MAX_STEPS) ||
+  Number(
+    (process.argv.find(arg => arg.startsWith("--max-steps=")) || "")
+      .split("=")[1]
+  ) ||
+  60; // مقدار پیش‌فرض
+
 const MAX_HISTORY = 25;
 const DIFF_THRESHOLD_PERCENT = 0.2;
 
@@ -387,7 +393,7 @@ async function bootstrapUIFromImage() {
     const imageBase64 = imageBuffer.toString("base64");
     const dataUrl = `data:image/png;base64,${imageBase64}`;
 
-const systemPrompt = `
+    const systemPrompt = `
 You are an expert frontend engineer and UI implementer.
 You are given a reference UI design as an image.
 Your job is to generate a complete React + TailwindCSS implementation
@@ -405,6 +411,12 @@ Rules:
 - Output ONLY the contents of App.jsx (no backticks, no extra commentary).
 - Assume this file lives in src/App.jsx and is used by src/main.jsx.
 
+CRITICAL OUTPUT RULES:
+- You MUST NEVER return an empty response.
+- If you are unsure, you MUST still produce a best-effort App.jsx.
+- If the image is unclear, produce a reasonable skeleton UI that matches a typical login screen.
+- Do NOT say "I cannot", "I am unsure", or any apology. Just output React code.
+
 CRITICAL Tool Usage Rules:
 - You MUST call at most ONE tool per assistant turn.
 - NEVER call multiple tools in the same assistant message.
@@ -412,10 +424,7 @@ CRITICAL Tool Usage Rules:
   one assistant message → one tool call → wait for result → next assistant message → next tool call.
 - Parallel or batch tool calls in a single message are NOT allowed in this environment.
 - Strictly follow these tool usage constraints to avoid runtime errors and ensure agent stability.
-
 `.trim();
-
-
 
     const completion = await client.chat.completions.create({
       model: "gpt-5.2",
@@ -442,45 +451,125 @@ CRITICAL Tool Usage Rules:
       max_tokens: 2000
     });
 
-    let appCode = completion.choices[0]?.message?.content ?? "";
+    const choice = completion?.choices?.[0];
+    console.log(
+      "🔍 Bootstrap raw choice:",
+      JSON.stringify(choice, null, 2)
+    );
 
+    let appCode = choice?.message?.content ?? "";
+
+    // اگر خالی بود، به جای skip، skeleton وارد کن
     if (!appCode.trim()) {
       console.log(
-        "⚠️ Bootstrap model returned empty App.jsx. Skipping overwrite."
+        "⚠️ Bootstrap model returned empty App.jsx. Falling back to skeleton login UI."
       );
-      return;
+
+      appCode = `import React from "react";
+
+export default function App() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-black">
+      <div className="w-full max-w-md mx-auto px-4">
+        <div className="flex justify-center mb-10">
+          {/* Placeholder for small triangle logo */}
+          <div className="w-4 h-4 border-l-8 border-b-8 border-white rotate-45" />
+        </div>
+
+        <div className="bg-black/40 border border-zinc-800 rounded-2xl px-6 py-8 shadow-[0_0_0_1px_rgba(255,255,255,0.03)]">
+          <h1 className="text-center text-2xl font-medium text-white">
+            Log in to Vercel
+          </h1>
+
+          <div className="mt-6 space-y-3">
+            <input
+              type="email"
+              placeholder="Email Address"
+              className="w-full rounded-xl border border-zinc-800 bg-black px-3 py-2.5 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-zinc-500"
+            />
+
+            <button
+              className="w-full rounded-xl bg-white py-2.5 text-sm font-medium text-black hover:bg-zinc-100 transition"
+            >
+              Continue with Email
+            </button>
+          </div>
+
+          <div className="mt-6 space-y-3">
+            <button className="w-full flex items-center justify-center gap-2 rounded-xl border border-zinc-800 bg-black py-2.5 text-sm text-white hover:bg-zinc-900 transition">
+              <span>Continue with GitHub</span>
+              <span className="ml-auto mr-1 rounded-full bg-zinc-800 px-2 py-0.5 text-[10px] uppercase tracking-wide text-zinc-300">
+                Last Used
+              </span>
+            </button>
+            <button className="w-full rounded-xl border border-zinc-800 bg-black py-2.5 text-sm text白 hover:bg-zinc-900 transition">
+              Continue with Google
+            </button>
+            <button className="w-full rounded-xl border border-zinc-800 bg-black py-2.5 text-sm text白 hover:bg-zinc-900 transition">
+              Continue with Apple
+            </button>
+            <button className="w-full rounded-xl border border-zinc-800 bg-black py-2.5 text-sm text白 hover:bg-zinc-900 transition">
+              Continue with SAML SSO
+            </button>
+            <button className="w-full rounded-xl border border-zinc-800 bg-black py-2.5 text-sm text白 hover:bg-zinc-900 transition">
+              Continue with Passkey
+            </button>
+          </div>
+
+          <button className="mt-6 w-full text-center text-xs text-zinc-400 hover:text-zinc-200">
+            Show other options
+          </button>
+
+          <p className="mt-4 text-center text-xs text-zinc-400">
+            Don&apos;t have an account?{" "}
+            <button className="text-zinc-100 underline-offset-2 hover:underline">
+              Sign Up
+            </button>
+          </p>
+        </div>
+
+        <div className="mt-8 flex justify-center gap-4 text-[10px] text-zinc-500">
+          <button className="hover:text-zinc-300">Terms</button>
+          <button className="hover:text-zinc-300">Privacy Policy</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+`;
     }
 
+    // حذف
 
-    appCode = appCode.replace(/^```[a-zA-Z]*\s*/, "").replace(/```$/, "").trim();
+appCode = appCode.replace(/^```[a-zA-Z]*\s*/, "").replace(/```$/, "").trim();
 
-    // ذخیره نسخه‌ی خام برای دیباگ
-    fs.mkdirSync(BOOTSTRAP_OUTPUT_DIR, { recursive: true });
-    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-    const rawFile = path.join(
-      BOOTSTRAP_OUTPUT_DIR,
-      `App-bootstrap-${timestamp}.jsx`
-    );
-    fs.writeFileSync(rawFile, appCode, "utf8");
-    console.log(`📝 Saved raw bootstrap App.jsx to ${rawFile}`);
+// ذخیره نسخه‌ی خام برای دیباگ
+fs.mkdirSync(BOOTSTRAP_OUTPUT_DIR, { recursive: true });
+const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+const rawFile = path.join(
+BOOTSTRAP_OUTPUT_DIR,
+`App-bootstrap-${timestamp}.jsx`
+);
+fs.writeFileSync(rawFile, appCode, "utf8");
+console.log(`📝 Saved raw bootstrap App.jsx to ${rawFile}`);
 
-    // نوشتن فایل اصلی
-    safeWrite("login-app/src/App.jsx", appCode);
-    console.log("✅ Bootstrapped src/App.jsx from reference image.");
+// نوشتن فایل اصلی
+safeWrite("login-app/src/App.jsx", appCode);
+console.log("✅ Bootstrapped src/App.jsx from reference image.");
 
-    // ✅ Validation بعد از bootstrap
-    await ensureAppJsxBuildable();
+// ✅ Validation بعد از bootstrap
+await ensureAppJsxBuildable();
 
-    // فلگ بساز که دوباره bootstrap انجام نشود
-    fs.writeFileSync(
-      BOOTSTRAP_FLAG,
-      `bootstrap done at ${new Date().toISOString()}\n`,
-      "utf8"
-    );
+// فلگ بساز که دوباره bootstrap انجام نشود
+fs.writeFileSync(
+BOOTSTRAP_FLAG,
+`bootstrap done at ${new Date().toISOString()}\n`,
+"utf8"
+);
   } catch (err) {
-    console.error("❌ Bootstrap from image failed:", err);
-    // اگر bootstrap شکست خورد، حداقل مطمئن شو fallback وجود داره
-    await ensureAppJsxBuildable();
+console.error("❌ Bootstrap from image failed:", err);
+// اگر bootstrap شکست خورد، حداقل مطمئن شو fallback وجود داره
+await ensureAppJsxBuildable();
   }
 }
 
@@ -489,28 +578,95 @@ CRITICAL Tool Usage Rules:
 // -----------------------------------------------------------------------------
 function enforceToolCall(message, lastDiff) {
   if (!message.tool_calls) {
-    if (lastDiff === null || lastDiff > DIFF_THRESHOLD_PERCENT) {
-      console.log(
-        "❌ Invalid assistant message — missing tool_calls. Forcing continue..."
-      );
-      return {
-        role: "assistant",
-        content: "",
-        tool_calls: [
-          {
-            id: `force_retry_${Date.now()}`,
-            type: "function",
-            function: {
-              name: "capture_ui",
-              arguments: JSON.stringify({ url: DEV_URL })
-            }
-          }
-        ]
-      };
-    }
+if (lastDiff === null || lastDiff > DIFF_THRESHOLD_PERCENT) {
+console.log(
+"❌ Invalid assistant message — missing tool_calls. Forcing continue..."
+);
+return {
+role: "assistant",
+content: "",
+tool_calls: [
+{
+id: `force_retry_${Date.now()}`,
+type: "function",
+function: {
+name: "capture_ui",
+arguments: JSON.stringify({ url: DEV_URL })
+}
+}
+]
+};
+}
   }
 
   return message;
+}
+
+// -----------------------------------------------------------------------------
+// PLANNING HELPER
+// -----------------------------------------------------------------------------
+async function generatePlanWithModel(contextText) {
+  const systemPrompt = `
+You are a senior frontend engineer acting as a PLANNER (not a coder) for a UI refinement agent.
+
+Your job:
+- Read the current situation (diff summary, vision analysis, existing files, etc.).
+- Produce a SHORT, STRUCTURED JSON plan for one refinement iteration of the UI.
+- The plan will then be executed by another tool that actually edits files.
+
+Constraints:
+- DO NOT write any code.
+- DO NOT include JSX or Tailwind classes.
+- Focus only on WHAT to change and WHY, at a high level.
+- Keep the plan focused on 1–5 concrete, impactful changes.
+
+Output format (MUST be valid JSON, no comments):
+
+{
+  "step_summary": "short human-readable description of this iteration's focus",
+  "ready_for_user_review": false,
+  "estimated_visual_gain": 0.0,
+  "changes": [
+{
+"target_files": ["login-app/src/App.jsx"],
+"reason": "why this change is needed",
+"actions": [
+"what to change conceptually, not code (e.g. 'make primary button match reference color and shape')"
+]
+}
+  ]
+}
+  `.trim();
+
+  const completion = await client.chat.completions.create({
+model: "gpt-4o",
+messages: [
+{ role: "system", content: systemPrompt },
+{
+role: "user",
+content: contextText
+}
+],
+temperature: 0.2,
+max_tokens: 600
+  });
+
+  const content = completion.choices?.[0]?.message?.content || "{}";
+
+  try {
+const parsed = JSON.parse(content);
+return JSON.stringify(parsed, null, 2);
+  } catch {
+return JSON.stringify(
+{
+parse_warning:
+"Model returned non-JSON; returning raw content in 'raw' field.",
+raw: content
+},
+null,
+2
+);
+  }
 }
 
 // -----------------------------------------------------------------------------
@@ -518,102 +674,107 @@ function enforceToolCall(message, lastDiff) {
 // -----------------------------------------------------------------------------
 async function executeTool(call) {
   try {
-    switch (call.name) {
-      case "capture_ui":
-        return JSON.stringify(
-          await captureUI({ url: call.arguments.url }),
-          null,
-          2
-        );
+switch (call.name) {
+case "capture_ui":
+return JSON.stringify(
+await captureUI({ url: call.arguments.url }),
+null,
+2
+);
 
-      case "diff_ui": {
-        const out = await diffUI({
-          reference: call.arguments.reference,
-          current: call.arguments.current,
-          diffOut: call.arguments.diffOut,
-          threshold: call.arguments.threshold
-        });
-        return JSON.stringify(out, null, 2);
-      }
+case "diff_ui": {
+const out = await diffUI({
+reference: call.arguments.reference,
+current: call.arguments.current,
+diffOut: call.arguments.diffOut,
+threshold: call.arguments.threshold
+});
+return JSON.stringify(out, null, 2);
+}
 
-      case "vision_analyze_ui": {
-        const out = await analyzeUIWithDiff({
-          referencePath: path.join(
-            WORKSPACE_ROOT,
-            call.arguments.referencePath
-          ),
-          currentPath: path.join(
-            WORKSPACE_ROOT,
-            call.arguments.currentPath
-          ),
-          diffPath: path.join(WORKSPACE_ROOT, call.arguments.diffPath)
-        });
-        return JSON.stringify({ visionAnalysis: out }, null, 2);
-      }
+case "vision_analyze_ui": {
+const out = await analyzeUIWithDiff({
+referencePath: path.join(
+WORKSPACE_ROOT,
+call.arguments.referencePath
+),
+currentPath: path.join(
+WORKSPACE_ROOT,
+call.arguments.currentPath
+),
+diffPath: path.join(WORKSPACE_ROOT, call.arguments.diffPath)
+});
+return JSON.stringify({ visionAnalysis: out }, null, 2);
+}
 
-      case "create_file": {
-        // برای هر فایلی به‌صورت عادی بنویس، ولی اگر App.jsx بود، بعدش build check کن
-        safeWrite(call.arguments.path, call.arguments.content);
-        if (
-          call.arguments.path === "login-app/src/App.jsx" ||
-          call.arguments.path.endsWith("/src/App.jsx")
-        ) {
-          await ensureAppJsxBuildable();
-        }
-        return JSON.stringify({ status: "ok", action: call.name }, null, 2);
-      }
+case "create_file": {
+// برای هر فایلی به‌صورت عادی بنویس، ولی اگر App.jsx بود، بعدش build check کن
+safeWrite(call.arguments.path, call.arguments.content);
+if (
+call.arguments.path === "login-app/src/App.jsx" ||
+call.arguments.path.endsWith("/src/App.jsx")
+) {
+await ensureAppJsxBuildable();
+}
+return JSON.stringify({ status: "ok", action: call.name }, null, 2);
+}
 
-      case "edit_file": {
-        // ✅ برای App.jsx حتماً از safeEditFileWithValidation استفاده کن
-        if (
-          call.arguments.path === "login-app/src/App.jsx" ||
-          call.arguments.path.endsWith("/src/App.jsx")
-        ) {
-          const ok = await safeEditFileWithValidation(
-            call.arguments.path,
-            call.arguments.content
-          );
-          return JSON.stringify(
-            {
-              status: ok ? "ok" : "reverted",
-              action: call.name
-            },
-            null,
-            2
-          );
-        } else {
-          // سایر فایل‌ها: فعلاً ساده، اما می‌تونی بعداً برای آنها هم همان منطق را بگذاری
-          safeWrite(call.arguments.path, call.arguments.content);
-          return JSON.stringify(
-            { status: "ok", action: call.name },
-            null,
-            2
-          );
-        }
-      }
+case "edit_file": {
+// ✅ برای App.jsx حتماً از safeEditFileWithValidation استفاده کن
+if (
+call.arguments.path === "login-app/src/App.jsx" ||
+call.arguments.path.endsWith("/src/App.jsx")
+) {
+const ok = await safeEditFileWithValidation(
+call.arguments.path,
+call.arguments.content
+);
+return JSON.stringify(
+{
+status: ok ? "ok" : "reverted",
+action: call.name
+},
+null,
+2
+);
+} else {
+// سایر فایل‌ها: فعلاً ساده، اما می‌تونی بعداً برای آنها هم همان منطق را بگذاری
+safeWrite(call.arguments.path, call.arguments.content);
+return JSON.stringify(
+{ status: "ok", action: call.name },
+null,
+2
+);
+}
+}
 
-      case "read_file":
-        return JSON.stringify({ content: safeRead(call.arguments.path) });
+case "read_file":
+return JSON.stringify({ content: safeRead(call.arguments.path) });
 
-      case "list_files":
-        return JSON.stringify(listFiles(call.arguments.path), null, 2);
+case "list_files":
+return JSON.stringify(listFiles(call.arguments.path), null, 2);
 
-      case "find_relevant_files": {
-        const files = findRelevantFilesHeuristic(call.arguments.description);
-        return JSON.stringify({ matchedFiles: files }, null, 2);
-      }
+case "find_relevant_files": {
+const files = findRelevantFilesHeuristic(call.arguments.description);
+return JSON.stringify({ matchedFiles: files }, null, 2);
+}
 
-      case "bootstrap_ui_from_image": {
-        await bootstrapUIFromImage();
-        return JSON.stringify(
-          { status: "ok", action: "bootstrap_ui_from_image" },
-          null,
-          2
-        );
-      }
-    }
+case "bootstrap_ui_from_image": {
+await bootstrapUIFromImage();
+return JSON.stringify(
+{ status: "ok", action: "bootstrap_ui_from_image" },
+null,
+2
+);
+}
+
+case "plan_ui_step": {
+const planJson = await generatePlanWithModel(call.arguments.context);
+return planJson;
+}
+}
   } catch (err) {
-    return JSON.stringify({ error: err.message });
+return JSON.stringify({ error: err.message });
   }
 }
 
@@ -652,15 +813,28 @@ PHASE 2 — PIXEL RECONSTRUCTION LOOP
 Your mission is to match the UI to reference_ui.png with pixel perfection.
 
 You MUST iterate:
-capture_ui → diff_ui → vision_analyze_ui → find_relevant_files → edit_file → repeat
+capture_ui → diff_ui → vision_analyze_ui → find_relevant_files → plan_ui_step → edit_file → repeat
 until diffPercent <= ${DIFF_THRESHOLD_PERCENT}%.
+
+Detailed loop:
+1. Call capture_ui to grab the current UI.
+2. Call diff_ui to compare it with the reference image.
+3. If diffPercent > ${DIFF_THRESHOLD_PERCENT}%:
+   a. Call vision_analyze_ui to get a visual, semantic description of the differences.
+   b. Call find_relevant_files with a textual description of what needs to change.
+   c. Call plan_ui_step with a rich natural-language context (diff summary + vision analysis + list of relevant files). This MUST produce a JSON plan of what to change and why.
+   d. Based on that plan, call edit_file (or create_file) to apply minimal, focused changes.
+   e. Then repeat from step 1.
+4. If diffPercent <= ${DIFF_THRESHOLD_PERCENT}%:
+   - stop with a normal assistant message (no tool calls).
 
 Rules:
 1. NEVER stop early.
-2. NEVER produce a normal assistant message unless diff <= threshold.
-3. EVERY assistant message MUST contain tool_calls during Phase 2.
-4. After any edit, always repeat capture → diff.
-5. If unsure what to do, continue the loop.
+2. During Phase 2, you MUST always follow the planning pattern:
+   vision_analyze_ui → find_relevant_files → plan_ui_step → edit_file.
+3. NEVER call edit_file without having called plan_ui_step in a recent step with context for this iteration.
+4. EVERY assistant message MUST contain exactly ONE tool_call during Phase 2.
+5. After any edit, always repeat capture → diff.
 
 You are not allowed to end the workflow until Phase 2 finishes successfully.
 `;
@@ -677,13 +851,15 @@ Use create_file, read_file, and edit_file as needed.
 When the UI is functionally correct, transition to Phase 2.
 
 PHASE 2 — Pixel-perfect reconstruction:
+Use a PLAN → APPLY pattern in each iteration:
 Loop:
 1. capture_ui(${DEV_URL})
 2. diff_ui(reference_ui.png vs current_ui.png)
 3. If diff > ${DIFF_THRESHOLD_PERCENT}:
    - run vision_analyze_ui
    - run find_relevant_files
-   - apply minimal edits via edit_file
+   - generate a structured JSON plan via plan_ui_step
+   - apply minimal edits via edit_file based on that plan
    - return to step 1
 4. If diff <= ${DIFF_THRESHOLD_PERCENT}:
    - stop with a normal assistant message (no tool calls)
@@ -698,128 +874,147 @@ If UI exists, jump directly to Phase 2.
 // -----------------------------------------------------------------------------
 const tools = [
   {
-    type: "function",
-    function: {
-      name: "capture_ui",
-      description: "Capture current UI.",
-      parameters: {
-        type: "object",
-        properties: { url: { type: "string" } },
-        required: ["url"]
-      }
-    }
+type: "function",
+function: {
+name: "capture_ui",
+description: "Capture current UI.",
+parameters: {
+type: "object",
+properties: { url: { type: "string" } },
+required: ["url"]
+}
+}
   },
   {
-    type: "function",
-    function: {
-      name: "diff_ui",
-      description: "Compute pixel diff.",
-      parameters: {
-        type: "object",
-        properties: {
-          reference: { type: "string" },
-          current: { type: "string" },
-          diffOut: { type: "string" },
-          threshold: { type: "number" }
-        },
-        required: ["reference", "current", "diffOut", "threshold"]
-      }
-    }
+type: "function",
+function: {
+name: "diff_ui",
+description: "Compute pixel diff.",
+parameters: {
+type: "object",
+properties: {
+reference: { type: "string" },
+current: { type: "string" },
+diffOut: { type: "string" },
+threshold: { type: "number" }
+},
+required: ["reference", "current", "diffOut", "threshold"]
+}
+}
   },
   {
-    type: "function",
-    function: {
-      name: "vision_analyze_ui",
-      description: "Describe visual difference.",
-      parameters: {
-        type: "object",
-        properties: {
-          referencePath: { type: "string" },
-          currentPath: { type: "string" },
-          diffPath: { type: "string" }
-        },
-        required: ["referencePath", "currentPath", "diffPath"]
-      }
-    }
+type: "function",
+function: {
+name: "vision_analyze_ui",
+description: "Describe visual difference.",
+parameters: {
+type: "object",
+properties: {
+referencePath: { type: "string" },
+currentPath: { type: "string" },
+diffPath: { type: "string" }
+},
+required: ["referencePath", "currentPath", "diffPath"]
+}
+}
   },
   {
-    type: "function",
-    function: {
-      name: "create_file",
-      description: "Create a file.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string" },
-          content: { type: "string" }
-        },
-        required: ["path", "content"]
-      }
-    }
+type: "function",
+function: {
+name: "create_file",
+description: "Create a file.",
+parameters: {
+type: "object",
+properties: {
+path: { type: "string" },
+content: { type: "string" }
+},
+required: ["path", "content"]
+}
+}
   },
   {
-    type: "function",
-    function: {
-      name: "edit_file",
-      description: "Edit a file.",
-      parameters: {
-        type: "object",
-        properties: {
-          path: { type: "string" },
-          content: { type: "string" }
-        },
-        required: ["path", "content"]
-      }
-    }
+type: "function",
+function: {
+name: "edit_file",
+description: "Edit a file.",
+parameters: {
+type: "object",
+properties: {
+path: { type: "string" },
+content: { type: "string" }
+},
+required: ["path", "content"]
+}
+}
   },
   {
-    type: "function",
-    function: {
-      name: "read_file",
-      description: "Read a file.",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string" } },
-        required: ["path"]
-      }
-    }
+type: "function",
+function: {
+name: "read_file",
+description: "Read a file.",
+parameters: {
+type: "object",
+properties: { path: { type: "string" } },
+required: ["path"]
+}
+}
   },
   {
-    type: "function",
-    function: {
-      name: "list_files",
-      description: "List files.",
-      parameters: {
-        type: "object",
-        properties: { path: { type: "string" } },
-        required: ["path"]
-      }
-    }
+type: "function",
+function: {
+name: "list_files",
+description: "List files.",
+parameters: {
+type: "object",
+properties: { path: { type: "string" } },
+required: ["path"]
+}
+}
   },
   {
-    type: "function",
-    function: {
-      name: "find_relevant_files",
-      description: "Find likely source files to edit.",
-      parameters: {
-        type: "object",
-        properties: { description: { type: "string" } },
-        required: ["description"]
-      }
-    }
+type: "function",
+function: {
+name: "find_relevant_files",
+description: "Find likely source files to edit.",
+parameters: {
+type: "object",
+properties: { description: { type: "string" } },
+required: ["description"]
+}
+}
   },
   {
-    type: "function",
-    function: {
-      name: "bootstrap_ui_from_image",
-      description:
-        "Generate the initial src/App.jsx based on the primary reference UI image (e.g. reference_ui.png). Must be called at most once at the beginning if the image exists.",
-      parameters: {
-        type: "object",
-        properties: {},
-        required: []
-      }
-    }
+type: "function",
+function: {
+name: "bootstrap_ui_from_image",
+description:
+"Generate the initial src/App.jsx based on the primary reference UI image (e.g. reference_ui.png). Must be called at most once at the beginning if the image exists.",
+parameters: {
+type: "object",
+properties: {},
+required: []
+}
+}
+  },
+  {
+type: "function",
+function: {
+name: "plan_ui_step",
+description:
+"Generate a structured plan for the next UI refinement step before editing files. Returns a JSON plan describing what to change and why. This tool does NOT apply changes itself.",
+parameters: {
+type: "object",
+properties: {
+context: {
+type: "string",
+description:
+"Natural-language description of current UI, diff summary, and goals for this step."
+}
+},
+required: ["context"]
+}
+}
   }
 ];
 
@@ -833,7 +1028,7 @@ function trimHistory(history, max) {
   let tail = history.slice(-(max - 2));
 
   while (tail.length && tail[0].role === "tool") {
-    tail.shift();
+tail.shift();
   }
 
   return [...head, ...tail];
@@ -844,35 +1039,35 @@ function trimHistory(history, max) {
 // -----------------------------------------------------------------------------
 function validateHistory(history) {
   for (let i = 0; i < history.length; i++) {
-    const msg = history[i];
+const msg = history[i];
 
-    if (msg.role !== "tool") continue;
+if (msg.role !== "tool") continue;
 
-    const prev = history[i - 1];
+const prev = history[i - 1];
 
-    if (!prev) {
-      throw new Error("Tool message cannot be first message.");
-    }
+if (!prev) {
+throw new Error("Tool message cannot be first message.");
+}
 
-    if (prev.role !== "assistant") {
-      throw new Error(
-        "Tool message must come immediately after an assistant message."
-      );
-    }
+if (prev.role !== "assistant") {
+throw new Error(
+"Tool message must come immediately after an assistant message."
+);
+}
 
-    if (!prev.tool_calls || prev.tool_calls.length === 0) {
-      throw new Error(
-        "Tool message appears but assistant message had no tool_calls."
-      );
-    }
+if (!prev.tool_calls || prev.tool_calls.length === 0) {
+throw new Error(
+"Tool message appears but assistant message had no tool_calls."
+);
+}
 
-    const matches = prev.tool_calls.some(tc => tc.id === msg.tool_call_id);
+const matches = prev.tool_calls.some(tc => tc.id === msg.tool_call_id);
 
-    if (!matches) {
-      throw new Error(
-        `Tool message tool_call_id=${msg.tool_call_id} does not match any assistant tool_calls.`
-      );
-    }
+if (!matches) {
+throw new Error(
+`Tool message tool_call_id=${msg.tool_call_id} does not match any assistant tool_calls.`
+);
+}
   }
 }
 
@@ -881,103 +1076,142 @@ function validateHistory(history) {
 // -----------------------------------------------------------------------------
 async function run() {
   let serverProc;
+  
+  try {
+await ensureProjectExists();
+await ensureDependenciesInstalled();
+serverProc = startServer();
+
+await waitForServer(DEV_URL);
+console.log(`🚀 Dev server ready at ${DEV_URL}`);
+
+// Phase 0: Bootstrap (idempotent)
+await bootstrapUIFromImage();
+
+let history = [
+{ role: "system", content: SYSTEM },
+{ role: "user", content: TASK }
+];
+
+let lastDiff = null;
+let plannerReadyForReview = false;
+for (let step = 1; step <= HARD_MAX_STEPS; step++) {
+  console.log(`\n🌀 Step ${step} / ${HARD_MAX_STEPS}`);
+
+// Validate history قبل از ارسال
+validateHistory(history);
+
+// MODEL CALL
+const completion = await client.chat.completions.create({
+model: "gpt-4o",
+messages: history,
+tools,
+tool_choice: "auto"
+});
+
+let msg = completion.choices[0].message;
+
+// If model failed policy, enforce a tool call
+msg = enforceToolCall(msg, lastDiff);
+
+// ⚠️ Ensure ONLY ONE tool call is kept
+if (msg.tool_calls && msg.tool_calls.length > 1) {
+console.warn(
+"⚠️ Model returned multiple tool calls. Keeping only the first one."
+);
+msg.tool_calls = [msg.tool_calls[0]];
+}
+
+history.push(msg);
+
+// If there is no tool call, agent believes job is done
+if (!msg.tool_calls || msg.tool_calls.length === 0) {
+console.log("🏁 Assistant ended the workflow.");
+break;
+}
+
+// IMPORTANT FIX:
+// Only run ONE tool per assistant turn
+const call = msg.tool_calls[0];
+
+console.log(`⚙️ Running tool: ${call.function.name}`);
+
+// Parse args
+const args = call.function.arguments
+? JSON.parse(call.function.arguments)
+: {};
+
+// Execute tool
+const result = await executeTool({
+name: call.function.name,
+arguments: args
+});
+
+if (call.function.name === "plan_ui_step") {
+  console.log("🧠 Planning step JSON:");
+  console.log(result);
 
   try {
-    await ensureProjectExists();
-    await ensureDependenciesInstalled();
-    serverProc = startServer();
-
-    await waitForServer(DEV_URL);
-    console.log(`🚀 Dev server ready at ${DEV_URL}`);
-
-    // Phase 0: Bootstrap (idempotent)
-    await bootstrapUIFromImage();
-
-    let history = [
-      { role: "system", content: SYSTEM },
-      { role: "user", content: TASK }
-    ];
-
-    let lastDiff = null;
-
-    for (let step = 1; step <= MAX_STEPS; step++) {
-      console.log(`\n🌀 Step ${step} / ${MAX_STEPS}`);
-
-      // Validate history before sending
-      validateHistory(history);
-
-      // MODEL CALL
-      const completion = await client.chat.completions.create({
-        model: "gpt-4o",
-        messages: history,
-        tools,
-        tool_choice: "auto"
-      });
-
-      let msg = completion.choices[0].message;
-
-      // If model failed policy, enforce a tool call
-      msg = enforceToolCall(msg, lastDiff);
-
-      history.push(msg);
-
-      // If there is no tool call, agent believes job is done
-      if (!msg.tool_calls || msg.tool_calls.length === 0) {
-        console.log("🏁 Assistant ended the workflow.");
-        break;
-      }
-
-      // IMPORTANT FIX:
-      // Only run ONE tool per assistant turn
-      const call = msg.tool_calls[0];
-
-      console.log(`⚙️ Running tool: ${call.function.name}`);
-
-      // Parse args
-      const args = call.function.arguments
-        ? JSON.parse(call.function.arguments)
-        : {};
-
-      // Execute tool
-      const result = await executeTool({
-        name: call.function.name,
-        arguments: args
-      });
-
-      // Update diff if tool was diff_ui
-      if (call.function.name === "diff_ui") {
-        try {
-          lastDiff = JSON.parse(result);
-        } catch {
-          /* ignore parse errors */
-        }
-      }
-
-      // Push tool result to history
-      history.push({
-        role: "tool",
-        tool_call_id: call.id,
-        content: result
-      });
-
-      // If diff small enough, stop
-      if (lastDiff && lastDiff.diffPercent <= DIFF_THRESHOLD_PERCENT) {
-        console.log(
-          `🎉 Pixel diff ${lastDiff.diffP}% is under threshold. Finished.`
-        );
-        break;
-      }
-
-      // Trim history to avoid overflow
-      history = trimHistory(history, MAX_HISTORY);
+    const parsedPlan = JSON.parse(result);
+    if (typeof parsedPlan.ready_for_user_review === "boolean") {
+      plannerReadyForReview = parsedPlan.ready_for_user_review;
     }
   } catch (err) {
-    console.error("❌ Agent crashed:", err);
-  } finally {
-    console.log("🛑 Stopping dev server...");
-    stopDevServer();
+    console.warn("⚠️ Failed to parse planning JSON:", err.message);
   }
 }
 
+
+// Update diff if tool was diff_ui
+if (call.function.name === "diff_ui") {
+try {
+lastDiff = JSON.parse(result);
+} catch {
+/* ignore parse errors */
+}
+}
+
+// Push tool result to history
+history.push({
+role: "tool",
+tool_call_id: call.id,
+content: result
+});
+
+// If diff small enough, stop
+// If diff small enough, stop
+if (lastDiff && lastDiff.diffPercent <= DIFF_THRESHOLD_PERCENT) {
+  console.log(
+    `🎉 Pixel diff ${lastDiff.diffPercent}% is under threshold (${DIFF_THRESHOLD_PERCENT}). Finished.`
+  );
+  break;
+}
+
+// If planner says it's ready for user review, stop as well
+if (plannerReadyForReview) {
+  console.log(
+    "✅ Planner marked ready_for_user_review = true. Stopping refinement loop."
+  );
+  break;
+}
+
+// Trim history to avoid overflow
+history = trimHistory(history, MAX_HISTORY);
+
+}
+
+if (!plannerReadyForReview && (!lastDiff || lastDiff.diffPercent > DIFF_THRESHOLD_PERCENT)) {
+  console.warn(
+    `⚠️ Reached HARD_MAX_STEPS=${HARD_MAX_STEPS} without meeting diff threshold or plannerReadyForReview=true.`
+  );
+}
+
+  } catch (err) {
+console.error("❌ Agent crashed:", err);
+  } finally {
+console.log("🛑 Stopping dev server...");
+stopDevServer();
+  }
+}
 
 run();
