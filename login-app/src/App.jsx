@@ -1,6 +1,50 @@
-import React from "react";
+import React, { useState } from "react";
 
 export default function App() {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);    // بدون type
+  const [success, setSuccess] = useState(null); // بدون type
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setError(null);
+    setSuccess(null);
+
+    if (!email || !password) {
+      setError("Email و Password را وارد کنید");
+      return;
+    }
+
+    setLoading(true);
+    try {
+const res = await fetch("http://localhost:4000/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, password }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        // backend در صورت خطا { error: "..." } برمی‌گرداند
+        throw new Error(data.error || "Login failed");
+      }
+
+      // login موفق
+      setSuccess(`خوش آمدی ${data.user?.name || data.user?.email || ""}`);
+      console.log("Logged in:", data);
+
+      // اگر خواستی:
+      // localStorage.setItem("token", data.token);
+    } catch (err) {
+      setError(err.message || "Login failed");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-white">
       <main className="min-h-screen flex items-center justify-center px-6">
@@ -35,24 +79,42 @@ export default function App() {
             Welcome Back
           </h1>
 
-          <form className="mt-8 mx-auto w-[320px] space-y-4">
+          {/* پیام خطا / موفقیت */}
+          <div className="mt-4 h-6 text-xs text-center">
+            {error && <div className="text-red-500">{error}</div>}
+            {success && <div className="text-green-600">{success}</div>}
+          </div>
+
+          <form
+            className="mt-4 mx-auto w-[320px] space-y-4"
+            onSubmit={handleLogin}
+          >
             <input
               type="email"
               placeholder="example@gmail.com"
               className="w-full h-11 rounded-md border border-gray-200 bg-white px-4 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
             />
             <input
               type="password"
               placeholder="Password"
               className="w-full h-11 rounded-md border border-gray-200 bg-white px-4 text-sm text-gray-900 placeholder:text-gray-400 shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-200 focus:border-blue-300"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
             />
 
             <button
-              type="button"
-              className="w-full h-11 rounded-md bg-blue-400 text-white text-sm font-medium shadow-sm hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200"
+              type="submit"
+              disabled={loading}
+              className="w-full h-11 rounded-md bg-blue-400 text-white text-sm font-medium shadow-sm hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-200 disabled:opacity-60 disabled:cursor-not-allowed"
             >
-              Log In
+              {loading ? "Logging in..." : "Log In"}
             </button>
+
+            <div className="text-[10px] text-gray-400 text-left mt-1">
+              برای تست: <code>test@example.com</code> / <code>password123</code>
+            </div>
           </form>
         </div>
       </main>
