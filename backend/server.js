@@ -1,23 +1,31 @@
-import express from "express";
-import cors from "cors";
+import sqlite3 from "sqlite3";
+import { open } from "sqlite";
+import { createApp } from "./app.js";
 
-const app = express();
-
-app.use(express.json());
-app.use(cors({ origin: "http://localhost:5173" }));
-
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
+const db = await open({
+  filename: "./database.sqlite",
+  driver: sqlite3.Database,
 });
 
-// TODO: Implement /api/login and /api/refresh endpoints using SQLite.
+await db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT UNIQUE NOT NULL,
+    password TEXT NOT NULL
+  );
 
-const PORT = process.env.PORT || 4000;
+  CREATE TABLE IF NOT EXISTS sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    refresh_token TEXT NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(id)
+  );
+`);
 
-if (process.env.NODE_ENV !== "test") {
-  app.listen(PORT, () => {
-    console.log("Backend server listening on port", PORT);
-  });
-}
+const app = createApp(db);
 
-export default app;
+const PORT = process.env.PORT ?? 3000;
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
