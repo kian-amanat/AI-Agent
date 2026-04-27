@@ -1,60 +1,31 @@
 ```javascript
 import jwt from 'jsonwebtoken';
-import bcrypt from 'bcrypt';
+import { v4 as uuidv4 } from 'uuid';
+import { getUserByUsername, createSession, getSessionByToken } from './db.js';
 
-const JWT_SECRET = 'your_jwt_secret'; // در محیط واقعی، این باید در متغیرهای محیطی ذخیره شود
-const JWT_EXPIRATION = '15m';
-const REFRESH_TOKEN_EXPIRATION = '7d';
+const JWT_SECRET = 'your_jwt_secret'; // Replace with a secure secret in production
+const JWT_EXPIRATION = '1h';
 
-/**
- * Generates an access token for a user.
- * @param {Object} user - The user object.
- * @returns {string} - The generated access token.
- */
-export function generateAccessToken(user) {
-  return jwt.sign({ id: user.id, username: user.username }, JWT_SECRET, {
-    expiresIn: JWT_EXPIRATION,
-  });
+export async function login(username, password) {
+  const user = await getUserByUsername(username);
+  if (!user || user.password !== password) {
+    throw new Error('Invalid username or password');
+  }
+
+  const sessionToken = uuidv4();
+  await createSession(user.id, sessionToken);
+
+  const accessToken = jwt.sign({ userId: user.id }, JWT_SECRET, { expiresIn: JWT_EXPIRATION });
+  return { accessToken, sessionToken };
 }
 
-/**
- * Generates a refresh token for a user.
- * @param {Object} user - The user object.
- * @returns {string} - The generated refresh token.
- */
-export function generateRefreshToken(user) {
-  return jwt.sign({ id: user.id }, JWT_SECRET, {
-    expiresIn: REFRESH_TOKEN_EXPIRATION,
-  });
-}
+export async function refresh(sessionToken) {
+  const session = await getSessionByToken(sessionToken);
+  if (!session) {
+    throw new Error('Invalid session token');
+  }
 
-/**
- * Verifies a token and returns the decoded payload.
- * @param {string} token - The token to verify.
- * @returns {Object} - The decoded payload.
- * @throws {Error} - If the token is invalid or expired.
- */
-export function verifyToken(token) {
-  return jwt.verify(token, JWT_SECRET);
-}
-
-/**
- * Hashes a plain text password.
- * @param {string} password - The plain text password.
- * @returns {Promise<string>} - The hashed password.
- */
-export async function hashPassword(password) {
-  const saltRounds = 10;
-  return bcrypt.hash(password, saltRounds);
-}
-
-/**
- * Compares a plain text password with a hashed password.
- * @param {string} password - The plain text password.
- * @param {string} hashedPassword - The hashed password.
- * @returns {Promise<boolean>} - True if the passwords match, false otherwise.
- */
-export async function comparePasswords(password, hashedPassword) {
-  return bcrypt.compare(password, hashedPassword);
+  const accessToken = jwt.sign({ userId: session.userId }, JWT_SECRET, { expiresIn: JWT_EXPIRATION });
+  return { accessToken };
 }
 ```
