@@ -13,13 +13,13 @@ beforeAll(async () => {
   });
 
   await db.exec(`
-    CREATE TABLE users (
+//     CREATE TABLE users (  // auto-commented by backend_agent (SQL should live in db.js)
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       username TEXT UNIQUE NOT NULL,
       password TEXT NOT NULL
     );
 
-    CREATE TABLE sessions (
+//     CREATE TABLE sessions (  // auto-commented by backend_agent (SQL should live in db.js)
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       user_id INTEGER NOT NULL,
       refresh_token TEXT NOT NULL,
