@@ -1,4 +1,4 @@
-```javascript
+
 import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import { getUserByUsername, createSession, getSessionByToken } from './db.js';
@@ -28,4 +28,3 @@ export async function refresh(sessionToken) {
   const accessToken = jwt.sign({ userId: session.userId }, JWT_SECRET, { expiresIn: JWT_EXPIRATION });
   return { accessToken };
 }
-```
