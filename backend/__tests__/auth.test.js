@@ -15,21 +15,19 @@ beforeAll(async () => {
   await db.exec(`
     CREATE TABLE users (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      username TEXT NOT NULL UNIQUE,
+      username TEXT UNIQUE NOT NULL,
       password TEXT NOT NULL
     );
+
     CREATE TABLE sessions (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
-      userId INTEGER NOT NULL,
-      refreshToken TEXT NOT NULL,
-      FOREIGN KEY (userId) REFERENCES users(id)
+      user_id INTEGER NOT NULL,
+      refresh_token TEXT NOT NULL,
+      FOREIGN KEY (user_id) REFERENCES users (id)
     );
-  `);
 
-  await db.run(
-    `INSERT INTO users (username, password) VALUES (?, ?)`,
-    ['testuser', 'password123']
-  );
+    INSERT INTO users (username, password) VALUES ('testuser', 'password123');
+  `);
 });
 
 afterAll(async () => {
@@ -38,7 +36,7 @@ afterAll(async () => {
 
 describe('Authentication API', () => {
   describe('POST /api/login', () => {
-    it('should login successfully with valid credentials', async () => {
+    it('should return 200 and tokens for valid credentials', async () => {
       const response = await request(app)
         .post('/api/login')
         .send({ username: 'testuser', password: 'password123' });
@@ -48,13 +46,22 @@ describe('Authentication API', () => {
       expect(response.body).toHaveProperty('refreshToken');
     });
 
-    it('should fail to login with invalid credentials', async () => {
+    it('should return 401 for invalid credentials', async () => {
       const response = await request(app)
         .post('/api/login')
         .send({ username: 'testuser', password: 'wrongpassword' });
 
       expect(response.status).toBe(401);
-      expect(response.body).toHaveProperty('error', 'Invalid username or password');
+      expect(response.body).toEqual({ error: 'Invalid username or password' });
+    });
+
+    it('should return 400 if username or password is missing', async () => {
+      const response = await request(app)
+        .post('/api/login')
+        .send({ username: 'testuser' });
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({ error: 'Username and password are required' });
     });
   });
 
@@ -62,30 +69,38 @@ describe('Authentication API', () => {
     let refreshToken;
 
     beforeAll(async () => {
-      const loginResponse = await request(app)
+      const response = await request(app)
         .post('/api/login')
         .send({ username: 'testuser', password: 'password123' });
 
-      refreshToken = loginResponse.body.refreshToken;
+      refreshToken = response.body.refreshToken;
     });
 
-    it('should refresh tokens with a valid refresh token', async () => {
+    it('should return 200 and a new access token for a valid refresh token', async () => {
       const response = await request(app)
         .post('/api/refresh')
         .send({ refreshToken });
 
       expect(response.status).toBe(200);
       expect(response.body).toHaveProperty('accessToken');
-      expect(response.body).toHaveProperty('refreshToken');
     });
 
-    it('should fail to refresh tokens with an invalid refresh token', async () => {
+    it('should return 401 for an invalid refresh token', async () => {
       const response = await request(app)
         .post('/api/refresh')
         .send({ refreshToken: 'invalidtoken' });
 
-      expect(response.status).toBe(403);
-      expect(response.body).toHaveProperty('error', 'Invalid refresh token');
+      expect(response.status).toBe(401);
+      expect(response.body).toEqual({ error: 'Invalid refresh token' });
+    });
+
+    it('should return 400 if refresh token is missing', async () => {
+      const response = await request(app)
+        .post('/api/refresh')
+        .send({});
+
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({ error: 'Refresh token is required' });
     });
   });
 });
