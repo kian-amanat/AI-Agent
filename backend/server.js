@@ -1,31 +1,21 @@
-import sqlite3 from "sqlite3";
-import { open } from "sqlite";
-import { createApp } from "./app.js";
+import http from "http";
+import app from "./app.js";
+import { initUserModel } from "./models/user.model.js";
+import { initTokenModel } from "./models/token.model.js";
 
-const db = await open({
-  filename: "./database.sqlite",
-  driver: sqlite3.Database,
-});
+initUserModel();
+initTokenModel();
 
-await db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    username TEXT UNIQUE NOT NULL,
-    password TEXT NOT NULL
-  );
+const PORT = process.env.PORT || 4000;
 
-  CREATE TABLE IF NOT EXISTS sessions (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    refresh_token TEXT NOT NULL,
-    FOREIGN KEY (user_id) REFERENCES users(id)
-  );
-`);
+let serverInstance = null;
 
-const app = createApp(db);
+if (process.env.NODE_ENV !== "test") {
+  serverInstance = http.createServer(app);
+  serverInstance.listen(PORT, () => {
+    console.log(`Server listening on port ${PORT}`);
+  });
+}
 
-const PORT = process.env.PORT ?? 3000;
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+export default app;
+export { serverInstance };
