@@ -1,9 +1,12 @@
 import sqlite3 from "sqlite3";
-import { open } from "sqlite";
+import path from "path";
+import { fileURLToPath } from "url";
 
-export async function createDbConnection() {
-  return open({
-    filename: "./database.sqlite",
-    driver: sqlite3.Database,
-  });
-}
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const dbPath = path.join(__dirname, "database.sqlite");
+
+const db = new sqlite3.Database(dbPath);
+
+export default db;

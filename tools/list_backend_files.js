@@ -6,7 +6,7 @@ import path from "path";
 const PROJECT_ROOT = process.cwd();
 
 /**
- * لیست کردن فایل‌ها برای backend.
+ * به صورت بازگشتی همه‌ی فایل‌ها و دایرکتوری‌ها را لیست می‌کند.
  *
  * ورودی:
  *   - dir: مسیر نسبی نسبت به ریشه‌ی پروژه (مثلاً "backend" یا "backend/routes")
@@ -41,19 +41,47 @@ export async function listBackendFiles({ dir, __json_error__ } = {}) {
       baseDir = path.join(PROJECT_ROOT, dir);
     }
 
-    const entries = await fs.readdir(baseDir, { withFileTypes: true });
-
-    const files = entries.map((entry) => {
-      const rel = baseRel
-        ? path.join(baseRel, entry.name)
-        : entry.name;
-
+    // چک کن که دایرکتوری وجود دارد
+    const stat = await fs.stat(baseDir);
+    if (!stat.isDirectory()) {
       return {
-        name: entry.name,
-        path: rel,         // همیشه نسبت به ریشه‌ی پروژه
-        is_dir: entry.isDirectory(),
+        success: false,
+        error: `Path is not a directory: ${baseRel || "."}`,
+        files: [],
+        stdout: "",
+        stderr: "",
       };
-    });
+    }
+
+    const files = [];
+
+    // تابع بازگشتی برای پیمایش
+    async function walk(currentAbsDir, currentRelDir) {
+      const entries = await fs.readdir(currentAbsDir, { withFileTypes: true });
+
+      for (const entry of entries) {
+        if (entry.name === "node_modules" || entry.name === ".git") {
+          continue;
+        }
+
+        const entryAbs = path.join(currentAbsDir, entry.name);
+        const entryRel = currentRelDir
+          ? path.join(currentRelDir, entry.name)
+          : entry.name;
+
+        files.push({
+          name: entry.name,
+          path: entryRel.replace(/\\/g, "/"),
+          is_dir: entry.isDirectory(),
+        });
+
+        if (entry.isDirectory()) {
+          await walk(entryAbs, entryRel);
+        }
+      }
+    }
+
+    await walk(baseDir, baseRel);
 
     return {
       success: true,
@@ -64,7 +92,7 @@ export async function listBackendFiles({ dir, __json_error__ } = {}) {
   } catch (err) {
     return {
       success: false,
-      error: err.message,
+      error: err?.message || String(err),
       files: [],
       stdout: "",
       stderr: "",

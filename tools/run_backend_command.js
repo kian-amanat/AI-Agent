@@ -29,34 +29,38 @@ export async function runBackendCommand({ cmd, cwd, timeout_ms, __json_error__ }
         });
       }
 
-      // -----------------------------
-      // Resolve working directory
-      // -----------------------------
-      let execCwd = process.cwd(); // ریشه پروژه
+      // Determine working directory
+      let execCwd = process.cwd();
       if (cwd && cwd.trim() !== "") {
-        // اگر cwd نسبی بود نسبت به ریشه پروژه resolve می‌کنیم
-        execCwd = path.isAbsolute(cwd)
-          ? cwd
-          : path.join(process.cwd(), cwd);
+        execCwd = path.isAbsolute(cwd) ? cwd : path.join(process.cwd(), cwd);
       }
 
-      // -----------------------------
-      // Split command into [bin, ...args]
-      // -----------------------------
-      const parts = cmd.split(" ").filter(Boolean);
-      const bin = parts.shift();
-      const args = parts;
+      // ----------------------------------------------------
+      // Decide if this command requires a shell
+      // ----------------------------------------------------
+      const mustUseShell =
+        cmd.includes("=") ||    // env=key
+        cmd.includes(">") ||    // redirect
+        cmd.includes("|") ||    // pipes
+        cmd.includes("&");      // background
 
-      // -----------------------------
-      // Spawn (WITHOUT shell)
-      // -----------------------------
+      let bin, args;
+
+      if (!mustUseShell) {
+        // Regular binary + args split
+        const parts = cmd.split(" ").filter(Boolean);
+        bin = parts.shift();
+        args = parts;
+      } else {
+        // Let shell interpret everything
+        bin = cmd;
+        args = [];
+      }
+
       const proc = spawn(bin, args, {
         cwd: execCwd,
-        shell: false,
-        env: {
-          ...process.env,
-          PATH: process.env.PATH,
-        },
+        shell: mustUseShell,  // <-- magic fix!!!
+        env: { ...process.env },
       });
 
       let stdout = "";
@@ -97,3 +101,4 @@ export async function runBackendCommand({ cmd, cwd, timeout_ms, __json_error__ }
     }
   });
 }
+
