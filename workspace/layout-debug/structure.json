@@ -1,0 +1,6 @@
+{
+  "has_right_sidebar": true,
+  "sidebar_width_ratio": 0.28,
+  "has_bottom_input": true,
+  "notes": "A distinct right-side panel lists chats; it occupies a bit over a quarter of the screen width. A rounded, bottom-centered message input bar is visible across the main content area."
+}

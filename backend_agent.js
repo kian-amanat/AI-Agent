@@ -1,9 +1,8 @@
-// backend_agent.js (ESM) - Advanced Backend Agent (Auth + Layered Structure)
+// backend_agent.mjs (ESM) - Single-step Backend Agent (Fastify + TS + Drizzle + SQLite + Auth, ESM backend)
 
 import path from "path";
 import fs from "fs";
 import { fileURLToPath } from "url";
-import { execSync } from "child_process";
 
 import OpenAI from "openai";
 
@@ -12,8 +11,6 @@ import { runBackendTests } from "./tools/runBackendTests.js";
 import { readProjectFile as readFile } from "./tools/readProjectFile.js";
 import { editFile } from "./tools/editFile.js";
 import { listBackendFiles } from "./tools/list_backend_files.js";
-
-// OPTIONAL: for reading frontend files (login-app)
 import { readProjectFile as readFrontendFile } from "./tools/readProjectFile.js";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -27,17 +24,19 @@ const BACKEND_ROOT = path.join(
   "backend"
 );
 const BACKEND_CWD_REL = path.relative(process.cwd(), BACKEND_ROOT) || "backend";
-const FRONTEND_ROOT = path.join(process.cwd(), "login-app");
 
-const HARD_MAX_STEPS = Number(process.env.BACKEND_HARD_MAX_STEPS || 45);
+const FRONTEND_AUTH_CONTRACT_PATH = path.join(
+  process.cwd(),
+  "API",
+  "api2.ts"
+);
 
-const FRONTEND_ORIGIN = process.env.FRONTEND_ORIGIN || "http://localhost:5173";
-const APP_URL = process.env.BACKEND_APP_URL || "http://localhost:4000";
+const FRONTEND_ORIGIN =
+  process.env.FRONTEND_ORIGIN || "http://localhost:5173";
+const APP_URL = process.env.BACKEND_APP_URL || "http://localhost:3000";
 
-// Curl is used to simulate frontend calls
 const CURL_BIN = process.env.CURL_BIN || "curl";
 
-// Goal profile: "frontend" یا "quality"
 const GOAL = (process.env.BACKEND_GOAL || "frontend").toLowerCase();
 
 // ---------- LLM Setup ----------
@@ -46,109 +45,127 @@ const openai = new OpenAI({
   baseURL: process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1",
 });
 
-/**
- * IMPORTANT SECURITY NOTE
- * Never commit real API keys into the repository.
- */
-
 // ---------- Structure Spec ----------
 const REQUIRED_BACKEND_FILES = [
-  "app.js",
-  "server.js",
-  "db.js",
-  "config/auth.config.js",
-  "routes/auth.routes.js",
-  "controllers/auth.controller.js",
-  "services/auth.service.js",
-  "models/user.model.js",
-  "models/token.model.js",
-  "middleware/auth.middleware.js",
-  "utils/jwt.js",
+  "package.json",
+  "tsconfig.json",
+  "drizzle.config.ts",
+  "jest.config.cjs",
+  "src/app.ts",
+  "src/config.ts",
+  "src/db/index.ts",
+  "src/db/schema.ts",
+  "src/modules/common/errors.ts",
+  "src/modules/common/security.ts",
+  "src/modules/auth/auth.schemas.ts",
+  "src/modules/auth/auth.repository.ts",
+  "src/modules/auth/auth.service.ts",
+  "src/modules/auth/auth.controller.ts",
+  "tests/auth.login.test.ts",
+  "tests/auth.register.test.ts",
+  "tests/auth.me.test.ts",
 ];
 
 const REQUIRED_BACKEND_DIRS = [
-  "config",
-  "routes",
-  "controllers",
-  "services",
-  "models",
-  "middleware",
-  "utils",
-  "__tests__",
+  "src",
+  "src/db",
+  "src/modules",
+  "src/modules/common",
+  "src/modules/auth",
+  "tests",
 ];
 
 // ---------- System Prompt (Coder) ----------
 const SYSTEM_PROMPT = `
-تو یک Agent ارشد بک‌اند هستی که با Node.js (ESM) + Express + SQLite کار می‌کنی.
+تو یک Agent ارشد بک‌اند هستی که با Node.js + TypeScript + Fastify + Drizzle ORM + SQLite کار می‌کنی.
 
 هدف:
-- پیاده‌سازی سیستم احراز هویت production-quality با دو endpoint:
-  - POST /api/login
-  - POST /api/refresh
-- معماری لایه‌ای و ساختار فایل‌ها دقیقاً باید مطابق این ساختار باشد:
+- بر اساس قرارداد فرانت‌اند (فایل API/api2.ts که شامل توابعی مثل login/register/me و ... است)
+  یک بک‌اند production-grade بساز.
+- استک: Fastify + TypeScript + Zod + Drizzle + SQLite + JWT + bcrypt.
+- امنیت:
+  - استفاده از bcrypt برای hash رمز عبور.
+  - استفاده از JWT برای access token (فعلاً فقط access).
+  - اعتبارسنجی request با Zod.
+  - استفاده از @fastify/helmet برای security headers.
+  - استفاده از @fastify/rate-limit برای rate limiting مخصوصاً روی login.
+  - لاگ‌گیری امن (بدون چاپ password/token در لاگ).
+- معماری لایه‌ای:
   backend/
-  ├── app.js
-  ├── server.js
-  ├── db.js
-  ├── config/
-  │   └── auth.config.js
-  ├── routes/
-  │   └── auth.routes.js
-  ├── controllers/
-  │   └── auth.controller.js
-  ├── services/
-  │   └── auth.service.js
-  ├── models/
-  │   ├── user.model.js
-  │   └── token.model.js
-  ├── middleware/
-  │   └── auth.middleware.js
-  ├── utils/
-  │   └── jwt.js
-  └── __tests__/
+  ├── package.json
+  ├── tsconfig.json
+  ├── drizzle.config.ts
+  ├── jest.config.cjs
+  ├── src/
+  │   ├── app.ts
+  │   ├── config.ts
+  │   ├── db/
+  │   │   ├── index.ts
+  │   │   └── schema.ts
+  │   └── modules/
+  │       ├── common/
+  │       │   ├── errors.ts
+  │       │   └── security.ts
+  │       └── auth/
+  │           ├── auth.schemas.ts
+  │           ├── auth.repository.ts
+  │           ├── auth.service.ts
+  │           └── auth.controller.ts
+  └── tests/
+      ├── auth.login.test.ts
+      ├── auth.register.test.ts
+      └── auth.me.test.ts
 
-الزامات امنیتی:
-- استفاده از bcrypt برای hash رمز عبور.
-- استفاده از JWT برای access token با expiry کوتاه (مثلاً 15m).
-- استفاده از JWT برای refresh token با expiry بلندتر (مثلاً 7d).
-- Refresh token rotation اجباری است:
-  - هر refresh موفق باید refresh token جدید بدهد
-  - refresh token قبلی باید revoke/invalid شود (DB-backed)
-  - reuse کردن refresh token revoked باید با 401 رد شود
-- refresh token ها باید در SQLite ذخیره شوند (session/token table) و قابلیت revoke داشته باشند.
+قرارداد با فرانت‌اند (بر اساس API/api2.ts):
+- BASE_URL از محیط می‌آید، AUTH_BASE = \`\${BASE_URL}/back/api/auth\`
+- endpointها:
+  - POST /back/api/auth/login
+  - GET  /back/api/auth/me
+  - POST /back/api/auth/register
+  - POST /back/api/auth/forgot/request   (اسکلت)
+  - POST /back/api/auth/forgot/verify    (اسکلت)
+  - POST /back/api/auth/forgot/reset     (اسکلت)
+- login:
+  - body: { email: string, password: string }
+  - پاسخ موفق: شامل فیلد token یا access_token برای ذخیره در فرانت‌اند.
+- register:
+  - body: { email, password, first_name?, last_name?, phone_number? }
+  - پاسخ موفق: شامل token/access_token و user.
+- me:
+  - هدر Authorization: Bearer <token>.
+  - پاسخ موفق: اطلاعات یوزر بدون passwordHash.
+- forgot/*:
+  - فعلاً اسکلت با { success: true } کافی است.
 
-الزامات کیفیت:
-- جداسازی concerns: routes/controller/service/model/utils/middleware.
-- error handling مناسب، status codeهای درست، input validation حداقلی.
-- CORS باید برای ${FRONTEND_ORIGIN} تنظیم شود.
-- server.js فقط در صورت NODE_ENV !== "test" گوش بدهد و app را export کند.
-- تست‌ها: Jest + Supertest در backend/__tests__/.
+الزامات کیفی:
+- جداسازی concerns: db/schema, repository, service, controller, validation.
+- error handling مناسب، status code درست، پیام‌های فارسی قابل‌فهم.
+- CORS برای ${FRONTEND_ORIGIN} تنظیم شود.
+- app.ts باید buildApp را export کند تا تست‌ها و curl flow از آن استفاده کنند.
+- npm test باید با Jest + Supertest اجرا شود و تست‌های auth.*.test.ts پاس شوند.
 
-قرارداد با frontend (login-app):
-- Endpoints:
-  - POST http://localhost:4000/api/login
-- Body:
-  - { "email": string, "password": string }
-- روی success:
-  - status code: 200
-  - body JSON:
-    {
-      "user": { "id": number, "email": string, "name"?: string },
-      "accessToken": string,
-      "refreshToken": string
-    }
-- روی خطا:
-  - status code: 4xx
-  - body JSON:
-    { "error": string }  // frontend از این فیلد استفاده می‌کند
-- frontend با credential تست زیر کار می‌کند:
-  - email: "test@example.com"
-  - password: "password123"
-  => باید یک کاربر seed با این credential در DB داشته باشی.
+قرارداد تست:
+- تست‌های Jest:
+  - auth.register.test.ts:
+    - باید بتوانیم کاربر جدید با email "test@example.com" و password "password123" ثبت کنیم و 201 بگیریم و token و user برگردد.
+  - auth.login.test.ts:
+    - باید بتوانیم همین کاربر را login کنیم و 200 بگیریم و token و user برگردد.
+  - auth.me.test.ts:
+    - باید بتوانیم با token دریافتی از login، /back/api/auth/me را بزنیم و 200 بگیریم و user بدون passwordHash را ببینیم.
+- DB: SQLite + Drizzle، جدول users با ستون‌های: id, email, passwordHash, firstName, lastName, phoneNumber, createdAt, updatedAt.
 
-قوانین ویرایش فایل:
-- هر بار فقط محتوای کامل فایل را برگردان (self-contained).
-- هیچ متن اضافه‌ای خارج از کد نده.
+محدودیت‌ها:
+- backend باید ESM باشد:
+  - در package.json: "type": "module"
+  - در tsconfig.json: "module": "NodeNext", "moduleResolution": "NodeNext"
+  - همه import/exportها به صورت ESM (import/export) باشند.
+- Jest + ts-jest برای TypeScript و ESM تنظیم شود.
+- TypeScript:
+  - "target": "ES2020" یا بالاتر.
+  - "types": ["node", "jest"] برای شناخت describe/it/expect.
+- هیچ لوپ agent در runtime ایجاد نکن؛ کد agent باید deterministic باشد.
+
+خروجی برای هر فایل باید یک TypeScript/JS کاملاً self-contained باشد.
 `.trim();
 
 // ---------- Planner Prompt ----------
@@ -172,28 +189,28 @@ const PLANNER_SYSTEM_PROMPT = `
 
 Goal profile: "${GOAL}"
 
+Required backend files (spec):
+${REQUIRED_BACKEND_FILES.map((f) => `- ${f}`).join("\n")}
+
 Definition of Done (frontend profile):
-- ساختار فایل‌ها تا حد لازم برای پیاده‌سازی login/refresh وجود داشته باشد.
-- /api/login و /api/refresh پیاده‌سازی شده باشند.
-- bcrypt + JWT + refresh rotation + DB storage/revocation پیاده‌سازی شده باشد.
+- ساختار فایل‌ها تا حد لازم برای پیاده‌سازی login/register/me وجود داشته باشد.
+- endpointهای زیر پیاده‌سازی شده باشند و با قرارداد API/api2.ts سازگار باشند:
+  - POST /back/api/auth/login
+  - GET  /back/api/auth/me
+  - POST /back/api/auth/register
+- bcrypt + JWT + validation + Drizzle + SQLite پیاده‌سازی شده باشد.
 - CORS برای ${FRONTEND_ORIGIN} تنظیم شده باشد.
-- اجرای curl flow موفق باشد:
-  - login => دریافت accessToken و refreshToken
-  - refresh => دریافت accessToken و refreshToken جدید
-  - reuse refreshToken قبلی => 401 یا 403
 
 Definition of Done (quality profile):
 - همه موارد frontend profile +
-- Jest + Supertest تست‌های login/refresh/security را پاس کنند.
+- تست‌های login/register/me پاس کنند (npm test).
 
 قوانین:
-- در frontend profile:
-  - اگر curl flow موفق بود، می‌توانی ready_for_user_review را true کنی حتی اگر تست‌ها کامل نیستند.
-- در quality profile:
-  - اگر تست‌ها اجرا نمی‌شوند (No tests found / no test specified)، اول زیرساخت تست را درست کن.
-  - ready_for_user_review فقط وقتی true شود که هم تست‌ها و هم curl flow موفق باشند.
-- در هر مرحله حداکثر 2-3 فایل را هدف بگیر (هزینه).
-- اگر ساختار لایه‌ای رعایت نشده، refactor پیشنهاد بده.
+- در هر فراخوانی agent فقط یک بار اجرا می‌شود (هیچ لوپی وجود ندارد).
+- اگر بک‌اند تقریباً خالی است (بیشتر فایل‌های موردنیاز وجود ندارند)، سعی کن در این plan چند فایل پایه‌ای (مثلاً تا 3 فایل) برای نزدیک شدن به ساختار مشخص‌شده بسازی:
+  - اولویت: package.json, tsconfig.json, drizzle.config.ts, jest.config.cjs, src/app.ts.
+- در هر plan حداکثر 2-3 فایل در target_files بگذار.
+- اگر ساختار لایه‌ای رعایت نشده، پیشنهاد refactor به ساختار مشخص‌شده بده.
 `.trim();
 
 // ---------- Utility: JSON safe parse ----------
@@ -207,433 +224,23 @@ function safeJsonParse(text) {
 
 // ---------- Utility: normalize content for diff ----------
 function normalizeContent(str) {
-  return String(str || "")
-    .replace(/\r/g, "")
-    .trim();
+  return String(str || "").replace(/\r/g, "").trim();
 }
 
-// ---------- Create skeletons ONLY IF backend is fresh ----------
-function createBackendSkeletonFiles() {
-  const skeletons = {
-    "app.js": `import express from "express";
-import cors from "cors";
-import authRoutes from "./routes/auth.routes.js";
-
-const app = express();
-
-app.use(cors({
-  origin: "${FRONTEND_ORIGIN}",
-  credentials: true,
-}));
-app.use(express.json());
-
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" });
-});
-
-app.use("/api", authRoutes);
-
-app.use((err, req, res, next) => {
-  console.error(err);
-  const status = err.status || 500;
-  const message = err.message || "Internal server error";
-  res.status(status).json({ error: message });
-});
-
-export default app;
-`,
-
-    "server.js": `import http from "http";
-import app from "./app.js";
-import { initUserModel } from "./models/user.model.js";
-import { initTokenModel } from "./models/token.model.js";
-
-initUserModel();
-initTokenModel();
-
-const PORT = process.env.PORT || 4000;
-
-let serverInstance = null;
-
-if (process.env.NODE_ENV !== "test") {
-  serverInstance = http.createServer(app);
-  serverInstance.listen(PORT, () => {
-    console.log(\`Server listening on port \${PORT}\`);
-  });
-}
-
-export default app;
-export { serverInstance };
-`,
-
-    "db.js": `import sqlite3 from "sqlite3";
-import path from "path";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const dbPath = path.join(__dirname, "database.sqlite");
-
-const db = new sqlite3.Database(dbPath);
-
-export default db;
-`,
-
-    "config/auth.config.js": `export const JWT_ACCESS_SECRET = process.env.JWT_ACCESS_SECRET || "dev_access_secret_change_me";
-export const JWT_REFRESH_SECRET = process.env.JWT_REFRESH_SECRET || "dev_refresh_secret_change_me";
-
-export const ACCESS_TOKEN_EXPIRES_IN = "15m";
-export const REFRESH_TOKEN_EXPIRES_IN = "7d";
-`,
-
-    "routes/auth.routes.js": `import { Router } from "express";
-import { login, refreshToken } from "../controllers/auth.controller.js";
-
-const router = Router();
-
-router.post("/login", login);
-router.post("/refresh", refreshToken);
-
-export default router;
-`,
-
-    "controllers/auth.controller.js": `import * as authService from "../services/auth.service.js";
-
-export async function login(req, res, next) {
-  try {
-    const { email, password } = req.body || {};
-    const result = await authService.login({ email, password });
-    res.json(result);
-  } catch (err) {
-    next(err);
+// ---------- Ensure backend root dir exists (ساخت فقط فولدر، نه کد) ----------
+function ensureBackendDirs() {
+  if (!fs.existsSync(BACKEND_ROOT)) {
+    fs.mkdirSync(BACKEND_ROOT, { recursive: true });
   }
-}
-
-export async function refreshToken(req, res, next) {
-  try {
-    const { refreshToken } = req.body || {};
-    const result = await authService.refreshToken({ refreshToken });
-    res.json(result);
-  } catch (err) {
-    next(err);
-  }
-}
-`,
-
-    "services/auth.service.js": `import bcrypt from "bcrypt";
-import { signAccessToken, signRefreshToken, verifyRefreshToken } from "../utils/jwt.js";
-import { findUserByEmail } from "../models/user.model.js";
-import {
-  createRefreshTokenRecord,
-  findRefreshTokenRecord,
-  rotateRefreshTokenRecord,
-} from "../models/token.model.js";
-
-export async function login({ email, password }) {
-  if (!email || !password) {
-    const error = new Error("Email and password are required");
-    error.status = 400;
-    throw error;
-  }
-
-  const user = await findUserByEmail(email);
-  if (!user) {
-    const error = new Error("Invalid credentials");
-    error.status = 401;
-    throw error;
-  }
-
-  const isMatch = await bcrypt.compare(password, user.password_hash);
-  if (!isMatch) {
-    const error = new Error("Invalid credentials");
-    error.status = 401;
-    throw error;
-  }
-
-  const accessToken = signAccessToken({ userId: user.id });
-  const refreshJwt = signRefreshToken({ userId: user.id });
-  await createRefreshTokenRecord({ userId: user.id, token: refreshJwt });
-
-  return {
-    user: {
-      id: user.id,
-      email: user.email,
-      name: user.name || null,
-    },
-    accessToken,
-    refreshToken: refreshJwt,
-  };
-}
-
-export async function refreshToken({ refreshToken }) {
-  if (!refreshToken) {
-    const error = new Error("Refresh token is required");
-    error.status = 400;
-    throw error;
-  }
-
-  let payload;
-  try {
-    payload = verifyRefreshToken(refreshToken);
-  } catch {
-    const error = new Error("Invalid refresh token");
-    error.status = 401;
-    throw error;
-  }
-
-  const existing = await findRefreshTokenRecord(refreshToken);
-  if (!existing || existing.is_revoked) {
-    const error = new Error("Refresh token revoked or not found");
-    error.status = 401;
-    throw error;
-  }
-
-  const newAccessToken = signAccessToken({ userId: payload.userId });
-  const newRefreshJwt = signRefreshToken({ userId: payload.userId });
-
-  await rotateRefreshTokenRecord({
-    oldToken: refreshToken,
-    newToken: newRefreshJwt,
-    userId: payload.userId,
-  });
-
-  return {
-    accessToken: newAccessToken,
-    refreshToken: newRefreshJwt,
-  };
-}
-`,
-
-    "models/user.model.js": `import db from "../db.js";
-import bcrypt from "bcrypt";
-
-export function initUserModel() {
-  db.serialize(() => {
-    db.run(
-      \`CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT UNIQUE NOT NULL,
-        password_hash TEXT NOT NULL,
-        name TEXT,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-      )\`
-    );
-
-    const email = "test@example.com";
-    const plainPassword = "password123";
-    const saltRounds = 10;
-    const passwordHash = bcrypt.hashSync(plainPassword, saltRounds);
-
-    db.run(
-      \`INSERT OR IGNORE INTO users (email, password_hash, name)
-       VALUES (?, ?, ?)\`,
-      [email, passwordHash, "Test User"]
-    );
-  });
-}
-
-export function findUserByEmail(email) {
-  return new Promise((resolve, reject) => {
-    db.get("SELECT * FROM users WHERE email = ?", [email], (err, row) => {
-      if (err) return reject(err);
-      resolve(row || null);
-    });
-  });
-}
-`,
-
-    "models/token.model.js": `import db from "../db.js";
-
-export function initTokenModel() {
-  db.serialize(() => {
-    db.run(
-      \`CREATE TABLE IF NOT EXISTS refresh_tokens (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        token TEXT UNIQUE NOT NULL,
-        is_revoked INTEGER DEFAULT 0,
-        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        FOREIGN KEY(user_id) REFERENCES users(id)
-      )\`
-    );
-  });
-}
-
-export function createRefreshTokenRecord({ userId, token }) {
-  return new Promise((resolve, reject) => {
-    db.run(
-      "INSERT INTO refresh_tokens (user_id, token, is_revoked) VALUES (?, ?, 0)",
-      [userId, token],
-      function (err) {
-        if (err) return reject(err);
-        resolve({ id: this.lastID });
-      }
-    );
-  });
-}
-
-export function findRefreshTokenRecord(token) {
-  return new Promise((resolve, reject) => {
-    db.get(
-      "SELECT * FROM refresh_tokens WHERE token = ?",
-      [token],
-      (err, row) => {
-        if (err) return reject(err);
-        resolve(row || null);
-      }
-    );
-  });
-}
-
-export function revokeRefreshTokenRecord(token) {
-  return new Promise((resolve, reject) => {
-    db.run(
-      "UPDATE refresh_tokens SET is_revoked = 1 WHERE token = ?",
-      [token],
-      function (err) {
-        if (err) return reject(err);
-        resolve(this.changes > 0);
-      }
-    );
-  });
-}
-
-export async function rotateRefreshTokenRecord({ oldToken, newToken, userId }) {
-  await revokeRefreshTokenRecord(oldToken);
-  await createRefreshTokenRecord({ userId, token: newToken });
-}
-`,
-
-    "middleware/auth.middleware.js": `import { verifyAccessToken } from "../utils/jwt.js";
-
-export function requireAuth(req, res, next) {
-  const authHeader = req.headers.authorization || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-  if (!token) {
-    return res.status(401).json({ error: "Missing access token" });
-  }
-
-  try {
-    const payload = verifyAccessToken(token);
-    req.user = { id: payload.userId };
-    next();
-  } catch {
-    return res.status(401).json({ error: "Invalid or expired token" });
-  }
-}
-`,
-
-    "utils/jwt.js": `import jwt from "jsonwebtoken";
-import {
-  JWT_ACCESS_SECRET,
-  JWT_REFRESH_SECRET,
-  ACCESS_TOKEN_EXPIRES_IN,
-  REFRESH_TOKEN_EXPIRES_IN,
-} from "../config/auth.config.js";
-
-export function signAccessToken(payload) {
-  return jwt.sign(payload, JWT_ACCESS_SECRET, { expiresIn: ACCESS_TOKEN_EXPIRES_IN });
-}
-
-export function signRefreshToken(payload) {
-  return jwt.sign(payload, JWT_REFRESH_SECRET, { expiresIn: REFRESH_TOKEN_EXPIRES_IN });
-}
-
-export function verifyAccessToken(token) {
-  return jwt.verify(token, JWT_ACCESS_SECRET);
-}
-
-export function verifyRefreshToken(token) {
-  return jwt.verify(token, JWT_REFRESH_SECRET);
-}
-`,
-  };
-
-  for (const rel of REQUIRED_BACKEND_FILES) {
-    const abs = path.join(BACKEND_ROOT, rel);
+  for (const d of REQUIRED_BACKEND_DIRS) {
+    const abs = path.join(BACKEND_ROOT, d);
     if (!fs.existsSync(abs)) {
-      const content = skeletons[rel] || "// TODO: implemented by AI\n";
-      const dir = path.dirname(abs);
-      fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(abs, content, "utf8");
-      console.log(`📄 Created skeleton: ${rel}`);
+      fs.mkdirSync(abs, { recursive: true });
     }
   }
 }
 
-// ---------- Ensure backend ----------
-function backendExists() {
-  return (
-    fs.existsSync(BACKEND_ROOT) &&
-    fs.existsSync(path.join(BACKEND_ROOT, "package.json"))
-  );
-}
-
-function ensureBackendInitialized() {
-  if (backendExists()) {
-    console.log("✅ Existing backend detected. Skipping initialization.");
-    return;
-  }
-
-  console.log("📂 backend folder not found or missing package.json. Creating fresh backend skeleton...");
-  fs.mkdirSync(BACKEND_ROOT, { recursive: true });
-
-  for (const d of REQUIRED_BACKEND_DIRS) {
-    const abs = path.join(BACKEND_ROOT, d);
-    if (!fs.existsSync(abs)) fs.mkdirSync(abs, { recursive: true });
-  }
-
-  const packageJsonPath = path.join(BACKEND_ROOT, "package.json");
-  if (!fs.existsSync(packageJsonPath)) {
-    console.log("📦 package.json not found. Initializing npm project...");
-    execSync("npm init -y", { cwd: BACKEND_ROOT, stdio: "inherit" });
-  }
-
-  const pkgRaw = fs.readFileSync(packageJsonPath, "utf8");
-  const pkg = JSON.parse(pkgRaw);
-
-  pkg.type = "module";
-  pkg.scripts = pkg.scripts || {};
-  pkg.scripts.test = "node --experimental-vm-modules node_modules/jest/bin/jest.js";
-  pkg.scripts.start = pkg.scripts.start || "node server.js";
-
-  fs.writeFileSync(packageJsonPath, JSON.stringify(pkg, null, 2), "utf8");
-
-  const nodeModulesPath = path.join(BACKEND_ROOT, "node_modules");
-  if (!fs.existsSync(nodeModulesPath)) {
-    console.log("⬇️ Installing backend dependencies...");
-    execSync("npm install express cors sqlite3 jsonwebtoken bcrypt", {
-      cwd: BACKEND_ROOT,
-      stdio: "inherit",
-    });
-    execSync("npm install -D jest supertest", {
-      cwd: BACKEND_ROOT,
-      stdio: "inherit",
-    });
-  } else {
-    console.log("✅ node_modules exists. Skipping npm install.");
-  }
-
-  const jestConfigPath = path.join(BACKEND_ROOT, "jest.config.cjs");
-  if (!fs.existsSync(jestConfigPath)) {
-    const jestConfig = `const config = {
-  testEnvironment: "node",
-  verbose: true,
-  testMatch: ["**/__tests__/**/*.test.js"],
-};
-
-module.exports = config;
-
-`;
-    fs.writeFileSync(jestConfigPath, jestConfig, "utf8");
-  }
-
-  createBackendSkeletonFiles();
-}
-
-// ---------- Summarize backend (+ optional frontend snippet) ----------
+// ---------- Summarize backend + read frontend contract ----------
 async function summarizeBackendFiles() {
   const filesResponse = await listBackendFiles({ dir: BACKEND_CWD_REL });
 
@@ -656,32 +263,25 @@ async function summarizeBackendFiles() {
     )
   );
 
-  const missing = REQUIRED_BACKEND_FILES.filter(
-    (p) => !existingPaths.has(p)
-  );
+  const missing = REQUIRED_BACKEND_FILES.filter((p) => !existingPaths.has(p));
   lines.push("");
   lines.push(
-    `Missing(required spec): ${missing.length ? missing.join(", ") : "<none>"}`
+    `Missing(required spec): ${
+      missing.length ? missing.join(", ") : "<none>"
+    }`
   );
 
   try {
-    const appPath = path.join(FRONTEND_ROOT, "src", "App.tsx");
-    const altAppPath = path.join(FRONTEND_ROOT, "src", "App.jsx");
-    let frontendContent = null;
-
-    if (fs.existsSync(appPath)) {
-      const res = await readFrontendFile({ path: appPath });
-      if (res.success) frontendContent = res.content.slice(0, 800);
-    } else if (fs.existsSync(altAppPath)) {
-      const res = await readFrontendFile({ path: altAppPath });
-      if (res.success) frontendContent = res.content.slice(0, 800);
-    }
-
-    if (frontendContent) {
-      lines.push("");
-      lines.push("---- FRONTEND (login-app) snippet ----");
-      lines.push(frontendContent);
-      lines.push("---- END FRONTEND snippet ----");
+    if (fs.existsSync(FRONTEND_AUTH_CONTRACT_PATH)) {
+      const res = await readFrontendFile({ path: FRONTEND_AUTH_CONTRACT_PATH });
+      if (res.success && typeof res.content === "string") {
+        lines.push("");
+        lines.push(
+          "---- FRONTEND AUTH CONTRACT (API/api2.ts) snippet ----"
+        );
+        lines.push(res.content.slice(0, 1600));
+        lines.push("---- END FRONTEND AUTH CONTRACT snippet ----");
+      }
     }
   } catch {
     // ignore
@@ -691,26 +291,30 @@ async function summarizeBackendFiles() {
 }
 
 // ---------- Planner call ----------
-async function callPlanner({ testStatus, filesSummary, curlStatus }) {
+async function callPlanner({ testStatus, filesSummary, curlStatus, userInput }) {
   const resp = await openai.chat.completions.create({
-    model: "gpt-4o",
+    model: "gpt-4.1",
     messages: [
       { role: "system", content: PLANNER_SYSTEM_PROMPT },
       {
         role: "user",
         content: `
+ورودی کاربر (از ترمینال/curl):
+${userInput || "<none>"}
+
 وضعیت تست‌ها:
-${testStatus}
+${testStatus || "<not run>"}
 
 وضعیت curl flow:
 ${curlStatus || "not_provided"}
 
-خلاصه ساختار فایل‌های بک‌اند و بخشی از frontend:
+خلاصه ساختار فایل‌های بک‌اند و snippet از قرارداد فرانت‌اند:
 ${filesSummary}
 
 وظیفه:
-- برنامه‌ریزی کن چه فایل‌هایی باید ایجاد/اصلاح شوند تا به Definition of Done برسیم.
-- در هر مرحله حداکثر 2-3 فایل در target_files بگذار.
+- با توجه به ورودی کاربر و وضعیت فعلی پروژه، برنامه‌ریزی کن کدام فایل‌ها باید ایجاد/اصلاح شوند.
+- وقتی backend تقریباً خالی است، از بین فایل‌های موردنیاز spec (لیست بالا) مهم‌ترین‌ها را انتخاب کن.
+- حداکثر 2-3 فایل در target_files بگذار.
 - خروجی فقط JSON معتبر مطابق schema.
 `.trim(),
       },
@@ -721,6 +325,7 @@ ${filesSummary}
   const text = resp.choices?.[0]?.message?.content || "";
   const parsed = safeJsonParse(text);
   if (!parsed.ok) {
+    // eslint-disable-next-line no-console
     console.warn("⚠️ Planner returned non-JSON. Raw:\n", text);
     throw parsed.error;
   }
@@ -733,41 +338,46 @@ async function generateFullFileContent({
   currentContent,
   change,
   testStatus,
+  userInput,
 }) {
   const fileEditPrompt = `
 نام فایل (نسبت به backend/): ${relPath}
+
+ورودی کاربر (از ترمینال/curl):
+${userInput || "<none>"}
 
 محتوای فعلی (اگر خالی است یعنی وجود ندارد یا قابل خواندن نبود):
 ----------------
 ${currentContent || ""}
 ----------------
 
-دلیل تغییر:
+دلیل تغییر (از planner):
 ${change.reason || "N/A"}
 
-اقدامات لازم:
+اقدامات لازم (از planner):
 - ${(change.actions || []).join("\n- ")}
 
-وضعیت تست‌ها:
-${testStatus}
+اطلاعات کمکی تست‌ها:
+${testStatus || "<not run>"}
 
 نیازمندی مهم:
-- ساختار پروژه باید دقیقاً مطابق spec لایه‌ای باشد.
-- login/refresh با refresh rotation و SQLite-backed tokens.
-- برای endpoint /api/login خروجی باید با این قرارداد سازگار باشد:
-  - روی موفق:
-    status 200
-    body: { user: { id, email, name? }, accessToken, refreshToken }
-  - روی خطا:
-    status 4xx
-    body: { error: string }
-- تست‌ها باید با Jest+Supertest پاس شوند.
+- ساختار پروژه باید مطابق spec لایه‌ای (Fastify + TS + Drizzle + SQLite) باشد.
+- endpointهای auth باید با قرارداد API/api2.ts سازگار باشند:
+  - POST /back/api/auth/login
+  - GET  /back/api/auth/me
+  - POST /back/api/auth/register
+- پاسخ login/register باید فیلد token یا access_token داشته باشد.
+- bcrypt برای hash password، JWT برای token، Drizzle برای DB.
+- backend بر اساس ESM است:
+  - package.json: "type": "module"
+  - tsconfig.module: "NodeNext"
+  - همه importها و exportها از syntax ESM استفاده کنند.
 
 لطفاً کل محتوای جدید این فایل را فقط به شکل کد برگردان. هیچ توضیحی ننویس.
 `.trim();
 
   const resp = await openai.chat.completions.create({
-    model: "gpt-4o",
+    model: "gpt-4.1",
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: fileEditPrompt },
@@ -782,34 +392,48 @@ ${testStatus}
 async function writeBackendFile({ relPath, content }) {
   const absPath = path.join(BACKEND_ROOT, relPath);
   fs.mkdirSync(path.dirname(absPath), { recursive: true });
-  await editFile({ filePath: absPath, newContent: content });
+
+  // اگر ابزار editFile انتظار امضای (path, content) دارد:
+  await editFile({
+    path: absPath,
+    content,
+  });
 }
 
-// ---------- Curl flow test ----------
+// ---------- Curl flow test (login + me) ----------
 async function runCurlAuthFlow() {
-  console.log("🌐 Running curl auth flow test...");
-
-  // Kill existing server
+  // فقط برای دیباگ، اجباری نیست و نتیجه‌اش روند را متوقف نمی‌کند
   try {
-    await runBackendCommand({
-      cmd: `lsof -ti tcp:4000 | xargs -r kill -9`,
-      cwd: BACKEND_CWD_REL,
-    });
-  } catch (_) {}
+    const distApp = path.join(BACKEND_ROOT, "dist", "app.js");
+    let cmd;
+    if (fs.existsSync(distApp)) {
+      cmd =
+        'NODE_ENV=production PORT=3000 node dist/app.js > /tmp/backend_agent_server.log 2>&1 &';
+    } else if (fs.existsSync(path.join(BACKEND_ROOT, "src", "app.ts"))) {
+      cmd =
+        'NODE_ENV=production PORT=3000 npx ts-node-dev --respawn --transpile-only src/app.ts > /tmp/backend_agent_server.log 2>&1 &';
+    } else {
+      return {
+        success: false,
+        stage: "startup",
+        error: "no app entry (src/app.ts or dist/app.js) found",
+      };
+    }
 
-  // Start server in background
-  try {
     await runBackendCommand({
-      cmd: `NODE_ENV=production PORT=4000 node server.js > /tmp/backend_agent_server.log 2>&1 &`,
+      cmd,
       cwd: BACKEND_CWD_REL,
     });
   } catch (e) {
-    console.warn("⚠️ Server start failed, continuing anyway:", e);
+    return {
+      success: false,
+      stage: "startup-exec",
+      error: String(e),
+    };
   }
 
-  // Wait until port is open (robust)
   let ready = false;
-  for (let i = 0; i < 25; i++) {
+  for (let i = 0; i < 20; i++) {
     try {
       const check = await runBackendCommand({
         cmd: `curl -s -o /dev/null -w "%{http_code}" ${APP_URL}/health`,
@@ -820,8 +444,11 @@ async function runCurlAuthFlow() {
         ready = true;
         break;
       }
-    } catch {}
-    await sleep(200);
+    } catch {
+      // ignore
+    }
+    // eslint-disable-next-line no-await-in-loop
+    await sleep(250);
   }
 
   if (!ready) {
@@ -832,135 +459,82 @@ async function runCurlAuthFlow() {
     };
   }
 
-  // LOGIN
   const loginPayload = JSON.stringify({
     email: "test@example.com",
     password: "password123",
   });
 
-  const loginCmd = `${CURL_BIN} -s -o /tmp/login_body.json -w "%{http_code}" -H "Content-Type: application/json" -d '${loginPayload}' ${APP_URL}/api/login`;
-  const loginRes = await runBackendCommand({ cmd: loginCmd });
+  try {
+    const loginCmd = `${CURL_BIN} -s -o /tmp/login_body.json -w "%{http_code}" -H "Content-Type: application/json" -d '${loginPayload}' ${APP_URL}/back/api/auth/login`;
+    const loginRes = await runBackendCommand({ cmd: loginCmd });
 
-  const loginStatus = (loginRes.stdout || "").trim();
-  const loginBodyRaw = fs.readFileSync("/tmp/login_body.json", "utf8");
-  const loginBody = safeJsonParse(loginBodyRaw);
+    const loginStatus = (loginRes.stdout || "").trim();
+    const loginBodyRaw = fs.readFileSync("/tmp/login_body.json", "utf8");
+    const loginBody = safeJsonParse(loginBodyRaw);
 
-  if (loginStatus !== "200" || !loginBody.ok) {
+    if (loginStatus !== "200" || !loginBody.ok) {
+      return {
+        success: false,
+        stage: "login-status",
+        status: loginStatus,
+        body: loginBodyRaw,
+      };
+    }
+
+    const data = loginBody.value;
+    const token = data.token || data.access_token;
+    if (!token) {
+      return {
+        success: false,
+        stage: "login-token-missing",
+        body: loginBody.value,
+      };
+    }
+
+    const meCmd = `${CURL_BIN} -s -o /tmp/me_body.json -w "%{http_code}" -H "Authorization: Bearer ${token}" ${APP_URL}/back/api/auth/me`;
+    const meRes = await runBackendCommand({ cmd: meCmd });
+
+    const meStatus = (meRes.stdout || "").trim();
+    const meBodyRaw = fs.readFileSync("/tmp/me_body.json", "utf8");
+    const meBody = safeJsonParse(meBodyRaw);
+
+    if (meStatus !== "200" || !meBody.ok) {
+      return {
+        success: false,
+        stage: "me-status",
+        status: meStatus,
+        body: meBodyRaw,
+      };
+    }
+
+    return { success: true };
+  } catch (e) {
     return {
       success: false,
-      stage: "login-status",
-      status: loginStatus,
-      body: loginBodyRaw,
+      stage: "curl-exception",
+      error: String(e),
     };
-  }
-
-  const { accessToken, refreshToken } = loginBody.value;
-  if (!accessToken || !refreshToken) {
-    return {
-      success: false,
-      stage: "login-tokens",
-      body: loginBody.value,
-    };
-  }
-
-  // FIRST REFRESH
-  const refreshPayload = JSON.stringify({ refreshToken });
-  const refreshCmd = `${CURL_BIN} -s -o /tmp/refresh_body.json -w "%{http_code}" -H "Content-Type: application/json" -d '${refreshPayload}' ${APP_URL}/api/refresh`;
-  const refreshRes = await runBackendCommand({ cmd: refreshCmd });
-
-  const refreshStatus = (refreshRes.stdout || "").trim();
-  const refreshBodyRaw = fs.readFileSync("/tmp/refresh_body.json", "utf8");
-  const refreshBody = safeJsonParse(refreshBodyRaw);
-
-  if (refreshStatus !== "200" || !refreshBody.ok) {
-    return {
-      success: false,
-      stage: "refresh-status",
-      status: refreshStatus,
-      body: refreshBodyRaw,
-    };
-  }
-
-  const newRefresh = refreshBody.value.refreshToken;
-  if (!newRefresh) {
-    return {
-      success: false,
-      stage: "refresh-token-missing",
-      body: refreshBody.value,
-    };
-  }
-
-  // REUSE OLD refreshToken → MUST FAIL
-  const reuseCmd = `${CURL_BIN} -s -o /dev/null -w "%{http_code}" -H "Content-Type: application/json" -d '${refreshPayload}' ${APP_URL}/api/refresh`;
-  const reuseRes = await runBackendCommand({ cmd: reuseCmd });
-  const reuseStatus = (reuseRes.stdout || "").trim();
-
-  const reuseValid = reuseStatus === "401" || reuseStatus === "403";
-  if (!reuseValid) {
-    return {
-      success: false,
-      stage: "reuse-old-refresh",
-      status: reuseStatus,
-    };
-  }
-
-  // TEST NEW refreshToken WORKS
-  const secondPayload = JSON.stringify({ refreshToken: newRefresh });
-  const secondCmd = `${CURL_BIN} -s -o /tmp/second_refresh_body.json -w "%{http_code}" -H "Content-Type: application/json" -d '${secondPayload}' ${APP_URL}/api/refresh`;
-  const secondRes = await runBackendCommand({ cmd: secondCmd });
-
-  const secondStatus = (secondRes.stdout || "").trim();
-  const secondBodyRaw = fs.readFileSync("/tmp/second_refresh_body.json", "utf8");
-  const secondBody = safeJsonParse(secondBodyRaw);
-
-  if (secondStatus !== "200" || !secondBody.ok) {
-    return {
-      success: false,
-      stage: "new-refresh-should-work",
-      status: secondStatus,
-      body: secondBodyRaw,
-    };
-  }
-
-  return { success: true };
-}
-
-// ---------- Ensure test infrastructure + placeholder tests ----------
-function ensureTestInfrastructure() {
-  const testsDir = path.join(BACKEND_ROOT, "__tests__");
-  if (!fs.existsSync(testsDir)) fs.mkdirSync(testsDir, { recursive: true });
-
-  const existing = fs
-    .readdirSync(testsDir)
-    .filter((n) => n.endsWith(".test.js") || n.endsWith(".spec.js"));
-
-  if (existing.length === 0) {
-    const smokePath = path.join(testsDir, "smoke.test.js");
-    const smoke = `import request from "supertest";
-import app from "../server.js";
-
-describe("smoke", () => {
-  it("healthcheck works", async () => {
-    const res = await request(app).get("/health");
-    expect(res.status).toBe(200);
-    expect(res.body).toHaveProperty("status", "ok");
-  });
-});
-`;
-    fs.writeFileSync(smokePath, smoke, "utf8");
   }
 }
 
 // ---------- helper: parse Jest result ----------
 function interpretTestResult(raw) {
+  if (!raw) {
+    return {
+      stdout: "",
+      stderr: "",
+      exitCode: null,
+      noTestSpecified: true,
+      success: false,
+    };
+  }
+
   const stdout = raw?.stdout || "";
   const stderr = raw?.stderr || "";
   const combined = `${stdout}\n${stderr}`;
 
   const exitCode =
-    raw?.exitCode ??
-    raw?.code ??
-    (raw?.success === true ? 0 : 1);
+    raw?.exitCode ?? raw?.code ?? (raw?.success === true ? 0 : 1);
 
   const noTestSpecified =
     combined.includes("Error: no test specified") ||
@@ -978,45 +552,51 @@ function interpretTestResult(raw) {
   };
 }
 
+// ---------- Read user input (for chat-like interaction) ----------
+async function readUserInput() {
+  if (process.env.BACKEND_AGENT_INPUT) {
+    return process.env.BACKEND_AGENT_INPUT;
+  }
+
+  // اگر از stdin چیزی آمده باشد، آن را می‌خوانیم
+  if (!process.stdin.isTTY) {
+    const chunks = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(chunk);
+    }
+    const text = Buffer.concat(chunks).toString("utf8").trim();
+    if (text.length > 0) return text;
+  }
+
+  return "";
+}
+
+// ---------- Main single-step agent ----------
 export async function runBackendAgent() {
-  console.log("🤖 Starting advanced backend agent (Optimized Logic)...");
+  // eslint-disable-next-line no-console
+  console.log(
+    "🤖 Single-step backend agent (Fastify + TS + Drizzle, ESM) started..."
+  );
+  // eslint-disable-next-line no-console
   console.log("Backend root:", BACKEND_ROOT);
+  // eslint-disable-next-line no-console
   console.log("Goal profile:", GOAL);
 
-  ensureBackendInitialized();
-  ensureTestInfrastructure();
+  ensureBackendDirs();
 
-  let step = 0;
-  let consecutiveSameErrorCount = 0;
-  let lastFailureSignature = "";
+  const userInput = await readUserInput();
 
-  while (step < HARD_MAX_STEPS) {
-    step++;
-    console.log(
-      `\n================ Step ${step}/${HARD_MAX_STEPS} ================`
-    );
-
-    const updatedThisStep = new Set();
-
-    // 1) Tests
-    console.log("🧪 Running backend tests...");
-    let rawTestResult;
-    try {
-      rawTestResult = await runBackendTests({
-        cmd: "npm test",
-        cwd: BACKEND_CWD_REL,
-      });
-    } catch (e) {
-      rawTestResult = { success: false, stdout: "", stderr: String(e) };
-    }
-
+  // 1) Optional: run tests (info only, نه شرط توقف)
+  let testStatus = "<not run>";
+  try {
+    const rawTestResult = await runBackendTests({
+      cmd: "npm test",
+      cwd: BACKEND_CWD_REL,
+    });
     const testResult = interpretTestResult(rawTestResult);
-    console.log("Jest exitCode:", testResult.exitCode);
-    console.log("Jest success detected:", testResult.success);
-
-    const testStatus = `
-JEST_EXIT_CODE: ${testResult.exitCode}
-JEST_SUCCESS: ${testResult.success}
+    testStatus = `
+TEST_EXIT_CODE: ${testResult.exitCode}
+TEST_SUCCESS: ${testResult.success}
 NO_TESTS_FOUND: ${testResult.noTestSpecified}
 
 STDOUT:
@@ -1025,182 +605,164 @@ ${testResult.stdout.slice(-500)}
 STDERR:
 ${testResult.stderr.slice(-500)}
 `.trim();
+  } catch (e) {
+    testStatus = `Test run failed: ${String(e)}`;
+  }
 
-    // Loop protection on identical failures
-    const signature =
-      `${testResult.exitCode}::` +
-      `${testResult.stderr.slice(0, 150)}::` +
-      `${testResult.stdout.slice(0, 150)}`;
-    if (!testResult.success && !testResult.noTestSpecified && signature === lastFailureSignature) {
-      consecutiveSameErrorCount++;
-    } else {
-      consecutiveSameErrorCount = 0;
-      lastFailureSignature = signature;
-    }
+  // 2) Optional: run curl flow (info only)
+  let curlStatus = "<not run>";
+  try {
+    const curlDetails = await runCurlAuthFlow();
+    curlStatus = JSON.stringify(curlDetails, null, 2);
+  } catch (e) {
+    curlStatus = `Curl flow failed: ${String(e)}`;
+  }
 
-    if (consecutiveSameErrorCount >= 3) {
-      console.warn("🛑 Loop detected: Failing with same signature for 3 steps. Breaking.");
-      break;
-    }
+  // 3) Files summary
+  let filesSummary = "<failed to summarize>";
+  try {
+    filesSummary = await summarizeBackendFiles();
+  } catch (e) {
+    filesSummary = `<failed to summarize: ${String(e)}>`;
+  }
 
-    // 2) Curl Auth Flow
-    console.log("🌐 Running curl authentication flow...");
-    let curlDetails = null;
-    try {
-      curlDetails = await runCurlAuthFlow();
-    } catch (e) {
-      curlDetails = { success: false, stage: "exception", error: String(e) };
-    }
-    const curlStatus = JSON.stringify(curlDetails, null, 2);
-
-    // 3) Files summary
-    console.log("📂 Summarizing backend files...");
-    let filesSummary = "<failed to summarize>";
-    try {
-      filesSummary = await summarizeBackendFiles();
-    } catch (e) {
-      filesSummary = `<failed to summarize: ${String(e)}>`;
-    }
-
-    // 4) Planner
-    console.log("🧠 Calling planner...");
-    let plan;
-    try {
-      plan = await callPlanner({
-        testStatus: `[JEST RESULT]: ${testResult.success ? "PASSED" : "FAILED"}\n${testStatus}`,
-        filesSummary,
-        curlStatus: `[CURL FLOW]: ${curlDetails.success ? "SUCCESS" : "FAILED"}\n${curlStatus}`,
-      });
-    } catch (e) {
-      console.error("❌ Planner failed:", e);
-      break;
-    }
-
-    console.log(
-      "📋 Plan received. Ready_for_user_review (planner, ignored for stop condition):",
-      plan?.ready_for_user_review
-    );
-
-    // 5) Stop conditions (no dependency on planner.ready_for_user_review)
-
-    // Primary: tests + curl both green
-    if (testResult.success) {
-      console.log("🎉 ALL GREEN: Tests passed AND Curl Auth Flow succeeded.");
-      console.log("🚀 Agent has reached a production-ready state. Stopping.");
-      break;
-    }
-
-    // Secondary: Goal-specific nuance (frontend mode can stop on curl)
-    if (GOAL === "frontend") {
-      if (curlDetails.success) {
-        console.log("✅ [frontend goal] Curl flow passing. Stopping.");
-        break;
-      }
-    }
-
-    // 6) Apply planner changes
-    const changes = Array.isArray(plan?.changes) ? plan.changes : [];
-
-    if (changes.length === 0) {
-      console.log("ℹ️ No changes suggested by planner.");
-      if (testResult.success && curlDetails.success) {
-        console.log("✅ Tests & curl already green. Stopping.");
-        break;
-      }
-      console.warn("⚠️ Tests/Curl not fully passing but no changes suggested. Breaking to avoid infinite loop.");
-      break;
-    }
-
-for (const change of changes) {
-  const targetFiles = Array.isArray(change?.target_files)
-    ? change.target_files
-    : [];
-
-  for (const rel of targetFiles) {
-    const cleaned = rel.startsWith("backend/")
-      ? rel.replace(/^backend[\\/]/, "")
-      : rel;
-
-    if (updatedThisStep.has(cleaned)) continue;
-
-    const abs = path.join(BACKEND_ROOT, cleaned);
-
-    let currentContent = "";
-    if (fs.existsSync(abs)) {
-      try {
-        currentContent = await readFile({ filePath: abs });
-      } catch {
-        currentContent = "";
-      }
-    }
-
-    console.log(`✏️ Generating content for: ${cleaned}`);
-
-    let newContent = await generateFullFileContent({
-      relPath: cleaned,
-      currentContent,
-      change,
+  // 4) Planner: یک بار
+  let plan;
+  try {
+    plan = await callPlanner({
       testStatus,
+      filesSummary,
+      curlStatus,
+      userInput,
     });
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.error("❌ Planner failed:", e);
+    return;
+  }
 
-    newContent = String(newContent).trim();
+  // eslint-disable-next-line no-console
+  console.log("📋 Plan:", JSON.stringify(plan, null, 2));
 
-    // پاک کردن
+  const changes = Array.isArray(plan?.changes) ? plan.changes : [];
 
-if (newContent.startsWith("```")) {
-      newContent = newContent
-        .replace(/^```[a-zA-Z]*\n?/, "")
-.replace(/```$/, "")
-        .trim();
-    }
+  // 5) Apply changes (حداکثر چند فایل، بدون لوپ)
+  for (const change of changes) {
+    const targetFiles = Array.isArray(change?.target_files)
+      ? change.target_files
+      : [];
 
-    const currentNormalized = normalizeContent(currentContent);
-    const newNormalized = normalizeContent(newContent);
+    for (const rel of targetFiles) {
+      const cleaned = rel.startsWith("backend/")
+        ? rel.replace(/^backend[\\/]/, "")
+        : rel;
 
-    // 🔍 DIFF CHECK قوی
-    if (newNormalized === currentNormalized) {
-      console.log(`⚪ No changes for: ${cleaned}`);
-      continue;
-    }
+      const abs = path.join(BACKEND_ROOT, cleaned);
 
-    try {
-      await writeBackendFile({
+      let currentContent = "";
+      if (fs.existsSync(abs)) {
+        try {
+          const res = await readFile({ path: abs });
+          currentContent =
+            typeof res === "string"
+              ? res
+              : typeof res?.content === "string"
+              ? res.content
+              : "";
+        } catch {
+          currentContent = "";
+        }
+      }
+
+      // eslint-disable-next-line no-console
+      console.log(`✏️ Generating content for: ${cleaned}`);
+
+      let newContent = await generateFullFileContent({
         relPath: cleaned,
-        content: newContent,
+        currentContent,
+        change,
+        testStatus,
+        userInput,
       });
 
-      updatedThisStep.add(cleaned);
+      newContent = String(newContent).trim();
 
-      console.log(`✅ File updated: ${cleaned}`);
-    } catch (e) {
-      console.error(`❌ Failed to write ${cleaned}:`, e);
-    }
-  }
+      if (newContent.startsWith("```")) {
+newContent = newContent
+.replace(/^```[a-zA-Z]*\n?/, "")
+          .replace(/```$/, "")
+.trim();
 }
 
+const currentNormalized = normalizeContent(currentContent);
+const newNormalized = normalizeContent(newContent);
 
-// Secondary stop: no file changed + tests already green -> don't loop forever on curl issues
-if (updatedThisStep.size === 0 && testResult.success) {
+if (newNormalized === currentNormalized) {
+// eslint-disable-next-line no-console
+console.log(`⚪ No changes for: ${cleaned}`);
+continue;
+}
+
+try {
+await writeBackendFile({
+relPath: cleaned,
+content: newContent,
+});
+
+// eslint-disable-next-line no-console
 console.log(
-"🟦 No file changes in this step AND tests passed. Stopping to prevent rewrite loop."
+`✅ File updated: ${cleaned} (len=${newContent.length})`
 );
-break;
+} catch (e) {
+// eslint-disable-next-line no-console
+console.error(`❌ Failed to write ${cleaned}:`, e);
 }
-
-// Small sleep to avoid hammering APIs / FS
-await sleep(600);
+}
   }
 
-  if (step >= HARD_MAX_STEPS) {
-console.warn(`⚠️ Termination: Reached maximum steps (${HARD_MAX_STEPS}).`);
+  // 6) Chat-like answer به خود کاربر (خلاصه خروجی)
+  if (userInput && userInput.length > 0) {
+const chatResp = await openai.chat.completions.create({
+model: "gpt-4.1",
+messages: [
+{
+role: "system",
+content:
+"تو یک دستیار فنی بک‌اند هستی. به زبان فارسی، مختصر و دقیق، توضیح بده که در این مرحله چه کارهایی برای کاربر انجام شد و چه قدم بعدی پیشنهاد می‌کنی.",
+},
+{
+role: "user",
+content: `
+پیام کاربر:
+${userInput}
+
+Plan اعمال‌شده:
+${JSON.stringify(plan, null, 2)}
+`.trim(),
+},
+],
+temperature: 0.3,
+});
+
+const answer = chatResp.choices?.[0]?.message?.content || "";
+// پاسخ به صورت متن روی stdout (تا در ترمینال / curl به کاربر برسد)
+// eslint-disable-next-line no-console
+console.log("\n💬 پاسخ Agent برای شما:\n");
+// eslint-disable-next-line no-console
+console.log(answer.trim());
   }
 
-  console.log("🏁 Advanced backend agent execution finished.");
+  // eslint-disable-next-line no-console
+  console.log(
+"\n🏁 Single-step backend agent execution finished (no loop)."
+  );
 }
 
 // Execute if run directly
 if (import.meta.url === `file://${process.argv[1]}`) {
+  // eslint-disable-next-line no-console
   runBackendAgent().catch((err) => {
+// eslint-disable-next-line no-console
 console.error("❌ Backend agent crashed:", err);
 process.exit(1);
   });
