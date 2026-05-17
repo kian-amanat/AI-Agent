@@ -1,0 +1,95 @@
+{
+  "canvas": {
+    "width": 2940,
+    "height": 1657,
+    "background_color": "#54NaNNaN"
+  },
+  "shell": {
+    "max_width": 2940,
+    "min_height": 1657,
+    "background_color": "#54NaNNaN",
+    "border_color": null,
+    "border_width": 0,
+    "border_radius": 0,
+    "shadow": "none"
+  },
+  "layout": {
+    "outer_padding_x": 0,
+    "outer_padding_y": 0,
+    "column_gap": 0
+  },
+  "sidebar": {
+    "width": 823,
+    "width_ratio_vision": 0.28,
+    "width_ratio_measured": 0.27993197278911564,
+    "background_color": "#4fNaNNaN",
+    "border_right_color": "#272727",
+    "padding_x": 16,
+    "padding_y": 16,
+    "section_gap": 12
+  },
+  "main": {
+    "background_color": "#54NaNNaN",
+    "padding_x": 32,
+    "padding_y": 24
+  },
+  "header": {
+    "height": 0,
+    "background_color": "#54NaNNaN",
+    "border_bottom_color": null,
+    "padding_x": 0
+  },
+  "message_list": {
+    "padding_x": 24,
+    "padding_y": 24,
+    "row_gap": 16,
+    "max_width_ratio": 0.55
+  },
+  "message_bubble": {
+    "assistant_bg": "#262626",
+    "user_bg": "#1f2933",
+    "border_radius": 18,
+    "padding_x": 16,
+    "padding_y": 10,
+    "text_color": "#f5f5f5"
+  },
+  "input_bar": {
+    "height": 56,
+    "background_color": "#5d5d5d",
+    "border_top_color": "#54NaNNaN",
+    "padding_x": 20,
+    "padding_y": 12,
+    "field_radius": 999,
+    "button_radius": 999,
+    "accent_color": "#fb7185"
+  },
+  "colors": {
+    "bg": "#54NaNNaN",
+    "surface": "#54NaNNaN",
+    "surface_2": "#181818",
+    "border": "#272727",
+    "text": "#f5f5f5",
+    "text_muted": "#9ca3af",
+    "accent": "#fb7185"
+  },
+  "typography": {
+    "font_family_hint": "Inter, system-ui, sans-serif",
+    "title_size": 16,
+    "title_weight": 600,
+    "body_size": 14,
+    "body_weight": 400,
+    "muted_size": 13,
+    "muted_weight": 400,
+    "line_height": 20
+  },
+  "_meta": {
+    "structure": {
+      "has_right_sidebar": true,
+      "sidebar_width_ratio": 0.28,
+      "has_bottom_input": true,
+      "notes": "A distinct right-side panel lists chats; it occupies a bit over a quarter of the screen width. A rounded, bottom-centered message input bar is visible across the main content area."
+    },
+    "source_image": "reference_ui.png",
+    "notes": "canvas/sidebar colors from sharp; structure from vision; numeric defaults deterministic."
+  }
+}

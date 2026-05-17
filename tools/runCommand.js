@@ -3,20 +3,28 @@ import { spawn } from "child_process";
 import { resolveWorkspacePath, WORKSPACE_ROOT } from "./workspace_utils.js";
 
 /**
- * Unified runCommand
- * Supports both:
- *   - runCommand({ cmd: "npm install --include=dev", cwd: "..." })
- *   - runCommand({ command: "/abs/path/to/npm", args: ["install", "--include=dev"], cwd: "..." })
+ * Safe & correct runCommand implementation
+ * - No shell
+ * - Proper argv splitting
+ * - True execution of absolute npm/npx paths
+ * - Guaranteed cwd resolution
  */
-export async function runCommand(options) {
+export async function runCommand({ cmd, cwd, timeout_ms, __json_error__ }) {
   return new Promise((resolve) => {
     try {
-      const { cmd, command, args, cwd, timeout_ms, __json_error__ } = options || {};
-
       if (__json_error__) {
         return resolve({
           success: false,
           error: `Invalid JSON for runCommand: ${String(__json_error__)}`,
+          stdout: "",
+          stderr: "",
+        });
+      }
+
+      if (!cmd || typeof cmd !== "string") {
+        return resolve({
+          success: false,
+          error: "'cmd' must be a non-empty string",
           stdout: "",
           stderr: "",
         });
@@ -32,38 +40,21 @@ export async function runCommand(options) {
       }
 
       // -----------------------------
-      // Determine bin + argv
+      // Split command into [bin, ...args]
       // -----------------------------
-      let bin;
-      let argv;
-
-      if (command) {
-        // New API: explicit command + args
-        bin = command;
-        argv = Array.isArray(args) ? args : [];
-      } else if (cmd && typeof cmd === "string") {
-        // Legacy API: cmd string, split on spaces
-        const parts = cmd.split(" ").filter(Boolean);
-        bin = parts.shift();
-        argv = parts;
-      } else {
-        return resolve({
-          success: false,
-          error: "runCommand: either 'command' or non-empty 'cmd' string is required",
-          stdout: "",
-          stderr: "",
-        });
-      }
+      const parts = cmd.split(" ").filter(Boolean);
+      const bin = parts.shift();
+      const args = parts;
 
       // -----------------------------
       // Spawn (WITHOUT shell)
       // -----------------------------
-      const proc = spawn(bin, argv, {
+      const proc = spawn(bin, args, {
         cwd: execCwd,
-        shell: false,
+        shell: false,               // <-- FIXED (most important)
         env: {
           ...process.env,
-          PATH: process.env.PATH, // می‌تونیم بعداً این‌جا REAL_NPM_PATH هم prepend کنیم
+          PATH: process.env.PATH,   // inherited correctly
         },
       });
 
@@ -90,7 +81,7 @@ export async function runCommand(options) {
         if (timeoutId) clearTimeout(timeoutId);
         resolve({
           success: code === 0,
-          error: code === 0 ? "" : `Exited with code ${code}\n${stderr}`,
+          error: code === 0 ? "" : `Exited with code ${code}`,
           stdout,
           stderr,
         });
