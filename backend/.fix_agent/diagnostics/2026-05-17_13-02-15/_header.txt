@@ -1,0 +1,6 @@
+reason=TSC_REFERENCES_MISSING_FILES
+loopIndex=2
+projectDir=/Users/kkanamanat/Developer/ai-sandbox/backend
+model=gpt-4o-mini
+dryRun=false
+lastPatchHash=7800a000dd97d44299f0d9887046bba5dee156b0e552658f40bb8d49bc7f35e4

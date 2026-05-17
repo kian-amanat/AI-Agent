@@ -1,0 +1,13 @@
+fastify-auth-app@1.0.0 /Users/kkanamanat/Developer/ai-sandbox/backend
+├── @types/bcrypt@6.0.0
+├── @types/better-sqlite3@7.6.13
+├── @types/jsonwebtoken@9.0.10
+├── bcrypt@5.1.1
+├── better-sqlite3@8.7.0
+├── drizzle-orm@0.29.5
+├── fastify@4.29.1
+├── jsonwebtoken@9.0.3
+├── typescript@5.9.3
+└── vitest@1.6.1
+
+

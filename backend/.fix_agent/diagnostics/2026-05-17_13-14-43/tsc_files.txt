@@ -1,0 +1,3 @@
+src/auth/service.ts
+src/db/schema.ts
+src/routes/auth.ts
