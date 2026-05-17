@@ -1,0 +1,3 @@
+src/auth/utils.js
+src/types/fastify.d.ts
+src/types/vendor.d.ts
