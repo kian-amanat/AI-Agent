@@ -1,8 +1,0 @@
-src/auth/service.ts
-src/db/schema.ts
-src/routes/auth.ts
-src/auth/utils.ts
-src/auth/utils.js
-src/auth/jwt-middleware.ts
-src/types/fastify.d.ts
-src/types/vendor.d.ts

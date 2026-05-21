@@ -1,6 +1,0 @@
-reason=PATCH_LOOP_STUCK
-loopIndex=2
-projectDir=/Users/kkanamanat/Developer/ai-sandbox/backend
-model=gpt-4o-mini
-dryRun=false
-lastPatchHash=7e7ee44ed0e0cd7e41fead69113da60bf4578b03aa3758a5c397b0e6fd5bc5be

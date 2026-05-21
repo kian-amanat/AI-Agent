@@ -1,0 +1,511 @@
+{
+  "name": "dashboard-backend",
+  "ready_for_user_review": false,
+  "goal": "ایجاد یک backend مدرن برای داشبورد مدیریت چت، فولدرها و اسناد با Fastify و TypeScript، با ساختار ESM و ابزارهای توسعه و تست مناسب.",
+  "tech_stack": {
+    "runtime": "Node.js (>=18, ESM, NodeNext)",
+    "language": "TypeScript",
+    "framework": "Fastify",
+    "orm": "Drizzle ORM",
+    "db": "PostgreSQL",
+    "testing": "Vitest",
+    "tooling": "ESLint, Prettier, dotenv, tsx, nodemon"
+  },
+  "phases": [
+    {
+      "id": "bootstrap",
+      "title": "Bootstrap & Setup",
+      "description": "راه‌اندازی اولیه پروژه و ابزارهای توسعه",
+      "steps": [
+        {
+          "id": "init-package",
+          "description": "ایجاد package.json و نصب وابستگی‌های اصلی و dev",
+          "files": [
+            "package.json"
+          ],
+          "dependencies": [],
+          "priority": "high"
+        },
+        {
+          "id": "init-tsconfig",
+          "description": "ایجاد tsconfig.json با تنظیمات ESM و NodeNext",
+          "files": [
+            "tsconfig.json"
+          ],
+          "dependencies": [
+            "init-package"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "init-drizzle-config",
+          "description": "ایجاد drizzle.config.ts برای ORM",
+          "files": [
+            "drizzle.config.ts"
+          ],
+          "dependencies": [
+            "init-package"
+          ],
+          "priority": "medium"
+        },
+        {
+          "id": "init-vitest-config",
+          "description": "ایجاد vitest.config.ts برای تست",
+          "files": [
+            "vitest.config.ts"
+          ],
+          "dependencies": [
+            "init-package",
+            "init-tsconfig"
+          ],
+          "priority": "medium"
+        },
+        {
+          "id": "init-eslint-prettier",
+          "description": "پیکربندی ESLint و Prettier",
+          "files": [
+            ".eslintrc.json",
+            ".prettierrc"
+          ],
+          "dependencies": [
+            "init-package"
+          ],
+          "priority": "low"
+        },
+        {
+          "id": "init-env",
+          "description": "ایجاد فایل env نمونه و src/config.ts برای مدیریت تنظیمات",
+          "files": [
+            ".env.example",
+            "src/config.ts"
+          ],
+          "dependencies": [
+            "init-package"
+          ],
+          "priority": "high"
+        }
+      ]
+    },
+    {
+      "id": "db-modeling",
+      "title": "Domain & Database Modeling",
+      "description": "مدلسازی جداول و ساختار دیتابیس برای چت، فولدر و اسناد",
+      "steps": [
+        {
+          "id": "define-db-schema",
+          "description": "ایجاد src/db/schema.ts و تعریف جداول (users, sessions, chats, folders, documents)",
+          "files": [
+            "src/db/schema.ts"
+          ],
+          "dependencies": [
+            "init-drizzle-config",
+            "init-tsconfig"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "setup-db-client",
+          "description": "ایجاد src/db/client.ts برای اتصال به دیتابیس با Drizzle",
+          "files": [
+            "src/db/client.ts"
+          ],
+          "dependencies": [
+            "define-db-schema"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "db-migration-script",
+          "description": "ایجاد اسکریپت migration برای ساخت جداول",
+          "files": [
+            "scripts/migrate.ts"
+          ],
+          "dependencies": [
+            "define-db-schema"
+          ],
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "core-app",
+      "title": "Core Application & Fastify Setup",
+      "description": "راه‌اندازی Fastify و ساختار اصلی اپلیکیشن",
+      "steps": [
+        {
+          "id": "init-app-entry",
+          "description": "ایجاد src/app.ts به عنوان ورودی اصلی Fastify",
+          "files": [
+            "src/app.ts"
+          ],
+          "dependencies": [
+            "init-tsconfig",
+            "init-env"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "setup-server-script",
+          "description": "ایجاد src/server.ts برای اجرای اپلیکیشن",
+          "files": [
+            "src/server.ts"
+          ],
+          "dependencies": [
+            "init-app-entry"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "register-db-plugin",
+          "description": "اتصال db client به Fastify instance به صورت plugin",
+          "files": [
+            "src/plugins/db.ts"
+          ],
+          "dependencies": [
+            "setup-db-client",
+            "init-app-entry"
+          ],
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "auth-session",
+      "title": "Authentication & Session Management",
+      "description": "پیاده‌سازی احراز هویت و مدیریت سشن",
+      "steps": [
+        {
+          "id": "auth-module",
+          "description": "ایجاد src/modules/auth.ts برای ثبت‌نام، ورود و مدیریت سشن",
+          "files": [
+            "src/modules/auth.ts"
+          ],
+          "dependencies": [
+            "register-db-plugin"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "session-middleware",
+          "description": "ایجاد src/middleware/session.ts برای مدیریت session در Fastify",
+          "files": [
+            "src/middleware/session.ts"
+          ],
+          "dependencies": [
+            "auth-module"
+          ],
+          "priority": "high"
+        }
+      ]
+    },
+    {
+      "id": "features",
+      "title": "Dashboard Features (Chats, Folders, Documents)",
+      "description": "ایجاد endpointهای اصلی برای مدیریت چت، فولدر و اسناد",
+      "steps": [
+        {
+          "id": "chat-module",
+          "description": "ایجاد src/modules/chat.ts برای CRUD چت‌ها",
+          "files": [
+            "src/modules/chat.ts"
+          ],
+          "dependencies": [
+            "session-middleware"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "folder-module",
+          "description": "ایجاد src/modules/folder.ts برای CRUD فولدرها",
+          "files": [
+            "src/modules/folder.ts"
+          ],
+          "dependencies": [
+            "session-middleware"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "document-module",
+          "description": "ایجاد src/modules/document.ts برای CRUD اسناد",
+          "files": [
+            "src/modules/document.ts"
+          ],
+          "dependencies": [
+            "session-middleware"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "routes-index",
+          "description": "ایجاد src/routes/index.ts و ثبت routeهای ماژول‌ها",
+          "files": [
+            "src/routes/index.ts"
+          ],
+          "dependencies": [
+            "chat-module",
+            "folder-module",
+            "document-module"
+          ],
+          "priority": "medium"
+        }
+      ]
+    },
+    {
+      "id": "testing",
+      "title": "Testing & Quality Assurance",
+      "description": "نوشتن تست‌های واحد و یکپارچه برای ماژول‌ها و endpointها",
+      "steps": [
+        {
+          "id": "test-auth",
+          "description": "نوشتن تست برای ماژول احراز هویت",
+          "files": [
+            "tests/auth.test.ts"
+          ],
+          "dependencies": [
+            "auth-module"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "test-chat",
+          "description": "نوشتن تست برای ماژول چت",
+          "files": [
+            "tests/chat.test.ts"
+          ],
+          "dependencies": [
+            "chat-module"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "test-folder",
+          "description": "نوشتن تست برای ماژول فولدر",
+          "files": [
+            "tests/folder.test.ts"
+          ],
+          "dependencies": [
+            "folder-module"
+          ],
+          "priority": "high"
+        },
+        {
+          "id": "test-document",
+          "description": "نوشتن تست برای ماژول اسناد",
+          "files": [
+            "tests/document.test.ts"
+          ],
+          "dependencies": [
+            "document-module"
+          ],
+          "priority": "high"
+        }
+      ]
+    },
+    {
+      "id": "hardening",
+      "title": "Hardening & Finalization",
+      "description": "بهبود امنیت، لاگ‌گیری و آماده‌سازی برای استقرار",
+      "steps": [
+        {
+          "id": "add-logging",
+          "description": "افزودن لاگ‌گیری ساخت‌یافته با Fastify",
+          "files": [
+            "src/plugins/logger.ts"
+          ],
+          "dependencies": [
+            "init-app-entry"
+          ],
+          "priority": "medium"
+        },
+        {
+          "id": "add-error-handling",
+          "description": "افزودن هندلر خطاهای مرکزی",
+          "files": [
+            "src/plugins/errorHandler.ts"
+          ],
+          "dependencies": [
+            "init-app-entry"
+          ],
+          "priority": "medium"
+        },
+        {
+          "id": "security-headers",
+          "description": "افزودن هدرهای امنیتی و محدودیت‌های CORS",
+          "files": [
+            "src/plugins/security.ts"
+          ],
+          "dependencies": [
+            "init-app-entry"
+          ],
+          "priority": "medium"
+        }
+      ]
+    }
+  ],
+  "files": [
+    {
+      "path": "package.json",
+      "kind": "config",
+      "purpose": "مدیریت وابستگی‌ها و اسکریپت‌های پروژه",
+      "notes": "باید ESM و type: module باشد"
+    },
+    {
+      "path": "tsconfig.json",
+      "kind": "config",
+      "purpose": "پیکربندی TypeScript با ماژول NodeNext",
+      "notes": "module: NodeNext, target: ES2022"
+    },
+    {
+      "path": "drizzle.config.ts",
+      "kind": "config",
+      "purpose": "پیکربندی Drizzle ORM",
+      "notes": "شامل تنظیمات اتصال به PostgreSQL"
+    },
+    {
+      "path": "vitest.config.ts",
+      "kind": "config",
+      "purpose": "پیکربندی Vitest برای تست",
+      "notes": "سازگار با ESM و TypeScript"
+    },
+    {
+      "path": ".eslintrc.json",
+      "kind": "config",
+      "purpose": "پیکربندی ESLint",
+      "notes": "برای رعایت استانداردهای کدنویسی"
+    },
+    {
+      "path": ".prettierrc",
+      "kind": "config",
+      "purpose": "پیکربندی Prettier",
+      "notes": "یکنواخت‌سازی فرمت کد"
+    },
+    {
+      "path": ".env.example",
+      "kind": "config",
+      "purpose": "نمونه متغیرهای محیطی",
+      "notes": "برای راه‌اندازی و توسعه"
+    },
+    {
+      "path": "src/config.ts",
+      "kind": "app",
+      "purpose": "لود و مدیریت تنظیمات محیطی",
+      "notes": "از dotenv استفاده کند"
+    },
+    {
+      "path": "src/app.ts",
+      "kind": "app",
+      "purpose": "ورودی اصلی Fastify و ثبت pluginها",
+      "notes": "ساختار ماژولار و قابل تست"
+    },
+    {
+      "path": "src/server.ts",
+      "kind": "app",
+      "purpose": "اجرای اپلیکیشن Fastify",
+      "notes": "فقط مسئول start کردن سرور"
+    },
+    {
+      "path": "src/db/schema.ts",
+      "kind": "db",
+      "purpose": "تعریف جداول و مدل‌های دیتابیس",
+      "notes": "با Drizzle ORM و تایپ‌های TypeScript"
+    },
+    {
+      "path": "src/db/client.ts",
+      "kind": "db",
+      "purpose": "اتصال به دیتابیس و export client",
+      "notes": "برای استفاده در pluginها و ماژول‌ها"
+    },
+    {
+      "path": "scripts/migrate.ts",
+      "kind": "script",
+      "purpose": "اجرای migration دیتابیس",
+      "notes": "با استفاده از Drizzle"
+    },
+    {
+      "path": "src/plugins/db.ts",
+      "kind": "module",
+      "purpose": "اتصال db client به Fastify",
+      "notes": "به صورت Fastify plugin"
+    },
+    {
+      "path": "src/plugins/logger.ts",
+      "kind": "module",
+      "purpose": "افزودن لاگ‌گیری ساخت‌یافته",
+      "notes": "استفاده از logger داخلی Fastify"
+    },
+    {
+      "path": "src/plugins/errorHandler.ts",
+      "kind": "module",
+      "purpose": "هندلر مرکزی خطاها",
+      "notes": "پاسخ‌دهی استاندارد به خطاها"
+    },
+    {
+      "path": "src/plugins/security.ts",
+      "kind": "module",
+      "purpose": "هدرهای امنیتی و CORS",
+      "notes": "استفاده از fastify-helmet و CORS"
+    },
+    {
+      "path": "src/modules/auth.ts",
+      "kind": "module",
+      "purpose": "منطق احراز هویت و مدیریت سشن",
+      "notes": "JWT یا session-based با ذخیره در دیتابیس"
+    },
+    {
+      "path": "src/middleware/session.ts",
+      "kind": "module",
+      "purpose": "میان‌افزار مدیریت session",
+      "notes": "بررسی session در هر درخواست"
+    },
+    {
+      "path": "src/modules/chat.ts",
+      "kind": "module",
+      "purpose": "CRUD چت‌ها",
+      "notes": "endpointهای RESTful"
+    },
+    {
+      "path": "src/modules/folder.ts",
+      "kind": "module",
+      "purpose": "CRUD فولدرها",
+      "notes": "endpointهای RESTful"
+    },
+    {
+      "path": "src/modules/document.ts",
+      "kind": "module",
+      "purpose": "CRUD اسناد",
+      "notes": "endpointهای RESTful"
+    },
+    {
+      "path": "src/routes/index.ts",
+      "kind": "app",
+      "purpose": "ثبت routeهای ماژول‌ها",
+      "notes": "ساختاردهی routeها و prefix مناسب"
+    },
+    {
+      "path": "tests/auth.test.ts",
+      "kind": "test",
+      "purpose": "تست ماژول احراز هویت",
+      "notes": "شامل تست ثبت‌نام، ورود و session"
+    },
+    {
+      "path": "tests/chat.test.ts",
+      "kind": "test",
+      "purpose": "تست ماژول چت",
+      "notes": "CRUD و اعتبارسنجی"
+    },
+    {
+      "path": "tests/folder.test.ts",
+      "kind": "test",
+      "purpose": "تست ماژول فولدر",
+      "notes": "CRUD و اعتبارسنجی"
+    },
+    {
+      "path": "tests/document.test.ts",
+      "kind": "test",
+      "purpose": "تست ماژول اسناد",
+      "notes": "CRUD و اعتبارسنجی"
+    }
+  ],
+  "notes": "این پلن بر پایه Fastify و ESM طراحی شده و تمرکز بر مدیریت چت، فولدر و اسناد با احراز هویت و سشن دارد. ساختار ماژولار و قابل توسعه است و ابزارهای توسعه و تست مدرن را پوشش می‌دهد. در صورت نیاز به هماهنگی با frontend یا قراردادهای خاص API، endpointها باید با نیازهای frontend align شوند."
+}

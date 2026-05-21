@@ -80,7 +80,7 @@ const SYSTEM_PROMPT = `
 تو یک Agent ارشد بک‌اند هستی که با Node.js + TypeScript + Fastify + Drizzle ORM + SQLite کار می‌کنی.
 
 هدف:
-- بر اساس قرارداد فرانت‌اند (فایل API/api2.ts که شامل توابعی مثل login/register/me و ... است)
+- بر اساس قرارداد فرانت‌اند (فایل API/api1.ts که شامل توابعی مثل login/register/me و ... است)
   یک بک‌اند production-grade بساز.
 - استک: Fastify + TypeScript + Zod + Drizzle + SQLite + JWT + bcrypt.
 - امنیت:

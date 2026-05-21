@@ -1,1 +1,0 @@
-// Placeholder vendor type declarations.
