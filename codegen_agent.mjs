@@ -7,7 +7,9 @@ const PLAN_PATH = "./planner_plan.json";
 const WORKSPACE = "backend";
 
 const client = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY || "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
+  apiKey:
+    process.env.OPENAI_API_KEY ||
+    "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
   baseURL: process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1",
 });
 
@@ -46,14 +48,39 @@ function readPlan() {
   return JSON.parse(fs.readFileSync(PLAN_PATH, "utf8"));
 }
 
-function fileFullPath(relativePath) {
-  return path.join(WORKSPACE, relativePath);
+/**
+ * نرمال‌سازی مسیرهای relative مثل scaffold:
+ * - حذف ./ اول
+ * - نرمال‌سازی با path.normalize
+ */
+function normalizeRelativePath(p) {
+  if (!p || typeof p !== "string") return "";
+  let norm = p.trim();
+  if (norm.startsWith("./")) norm = norm.slice(2);
+  norm = path.normalize(norm);
+  return norm;
 }
 
+function fileFullPath(relativePath) {
+  const rel = normalizeRelativePath(relativePath);
+  return path.join(WORKSPACE, rel);
+}
+
+/**
+ * تصمیم می‌گیرد آیا فایل نیاز به generation / rewrite دارد یا نه.
+ * - اگر وجود ندارد => true
+ * - اگر خالی است => true
+ * - اگر شامل "TODO" است => true
+ * - در غیر این صورت => false (یعنی دست‌کم یک پیاده‌سازی قبلی هست)
+ */
 function fileNeedsGeneration(filePath) {
-  if (!fs.existsSync(filePath)) return true;
+  if (!fs.existsSync(filePath)) {
+    return true;
+  }
   const content = fs.readFileSync(filePath, "utf8").trim();
-  return content === "" || content.includes("TODO");
+  if (content === "") return true;
+  if (content.includes("TODO")) return true;
+  return false;
 }
 
 /* -------------------------------------------------- */
@@ -61,6 +88,8 @@ function fileNeedsGeneration(filePath) {
 /* -------------------------------------------------- */
 
 function walkDir(dir, fileList = []) {
+  if (!fs.existsSync(dir)) return fileList;
+
   const files = fs.readdirSync(dir);
   for (const file of files) {
     const full = path.join(dir, file);
@@ -68,7 +97,9 @@ function walkDir(dir, fileList = []) {
     if (stat.isDirectory()) {
       walkDir(full, fileList);
     } else {
-      fileList.push(full.replace(WORKSPACE + "/", ""));
+      // خروجی structure نسبی نسبت به WORKSPACE
+      const rel = path.relative(WORKSPACE, full);
+      fileList.push(rel);
     }
   }
   return fileList;
@@ -157,18 +188,25 @@ async function run() {
   const plan = readPlan();
   const projectContext = readProjectContext();
 
+  if (!plan.phases || !Array.isArray(plan.phases)) {
+throw new Error("Invalid plan structure: phases missing or not array");
+  }
+
   for (const phase of plan.phases) {
 console.log(`\n🚀 PHASE: ${phase.title}`);
 
+if (!phase.steps || !Array.isArray(phase.steps)) continue;
+
 for (const step of phase.steps) {
 console.log(`   🔹 STEP: ${step.id}`);
-if (!step.files) continue;
+
+if (!step.files || !Array.isArray(step.files)) continue;
 
 for (const relativeFile of step.files) {
 const fullPath = fileFullPath(relativeFile);
 
 if (!fileNeedsGeneration(fullPath)) {
-console.log(`   ⚠️ Skipping: ${relativeFile}`);
+console.log(`   ⚠️ Skipping (already implemented): ${relativeFile}`);
 continue;
 }
 
