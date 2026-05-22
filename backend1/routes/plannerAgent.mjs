@@ -277,39 +277,48 @@ ${plan.tech_stack ? Object.entries(plan.tech_stack).filter(([k, v]) => v).slice(
     const timeoutId = setTimeout(() => controller.abort(), 25000);
     
     const stream = await openai.chat.completions.create({
-      model: 'gpt-4o-mini',
-      messages: [
-        {
-          role: 'system',
-          content: `You are a friendly project planner. Create a warm, conversational summary in ${lang === 'en' ? 'English' : 'Farsi'} explaining:
-- What you've planned
-- Key features (2-3 main ones)
-- Tech stack chosen
-- Main phases (briefly)
-
-Be enthusiastic. No JSON/code. Use emojis sparingly. Keep it concise (2-3 paragraphs max).`
-        },
-        {
-          role: 'user',
-          content: `User: "${userMessage}"\n\nPlan: ${plan.phases?.length || 0} phases, ${plan.files?.length || 0} files.\n\nSummarize briefly.`
-        }
-      ],
-      temperature: 0.7,
-      max_tokens: 300,
-      stream: true,
-      signal: controller.signal,
-    });
+  model: 'gpt-4o-mini',
+  messages: [
+    {
+      role: 'system',
+      content: `Return summary ONLY as bullet points.
+Every line MUST start with "- ".
+No paragraphs. No JSON/code.
+Language: ${lang === 'en' ? 'English' : 'Farsi'}.
+6-10 bullets max.`
+    },
+    {
+      role: 'user',
+      content: `User: "${userMessage}"\n\nPlan: ${plan.phases?.length || 0} phases, ${plan.files?.length || 0} files.\n\nSummarize briefly.`
+    }
+  ],
+  temperature: 0.2,
+  max_tokens: 300,
+  stream: true,
+  signal: controller.signal,
+});
 
     clearTimeout(timeoutId);
     
-    let fullContent = '';
-    for await (const chunk of stream) {
-      const content = chunk.choices[0]?.delta?.content || '';
-      if (content) {
-        fullContent += content;
-        reply.raw.write(`data: ${JSON.stringify({ type: 'content', content })}\n\n`);
-      }
-    }
+let fullContent = '';
+for await (const chunk of stream) {
+  const content = chunk.choices[0]?.delta?.content || '';
+  if (content) fullContent += content;
+}
+
+// ✅ اینجا تبدیل اجباری به بولت
+const hasBullets = /(^|\n)\s*[-•]\s+/.test(fullContent);
+if (!hasBullets) {
+  const sentences = fullContent
+    .replace(/\n+/g, ' ')
+    .split(/(?<=[.!?])\s+/)
+    .filter(Boolean);
+  fullContent = sentences.map(s => `- ${s}`).join('\n');
+}
+
+// بعدش یک‌باره بفرست
+reply.raw.write(`data: ${JSON.stringify({ type: 'content', content: fullContent })}\n\n`);
+
     
     return fullContent;
   } catch (error) {
@@ -546,6 +555,7 @@ export default async function (fastify, opts) {
               phases_count: plan.phases?.length || 0,
               files_count: plan.files?.length || 0,
             },
+            plan: plan, // ✅ اضافه شد برای دکمه JSON
             full_plan_url: `/api/agent/plan/${filename}`
           }
         })}\n\n`);

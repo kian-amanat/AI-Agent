@@ -2,15 +2,15 @@
   "name": "Email/Password Auth Backend",
   "project_type": "backend",
   "ready_for_user_review": true,
-  "goal": "Develop a secure, scalable backend API for user sign up and login using email and password authentication, following modern best practices and production standards.",
+  "goal": "Develop a secure, production-ready backend API for user sign up and login using email and password authentication.",
   "tech_stack": {
     "runtime": "Bun 1.1+",
-    "language": "TypeScript 5.5+ (strict mode)",
+    "language": "TypeScript 5.5+",
     "framework": "Fastify 5.0",
     "orm": "Drizzle ORM 0.36+",
-    "db": "PostgreSQL 17 (with pgvector enabled for future AI features)",
+    "db": "PostgreSQL 17",
     "testing": "Vitest + Supertest",
-    "tooling": "ESLint, Prettier, Drizzle CLI, Scalar (OpenAPI), Bunx",
+    "tooling": "Bun, Drizzle CLI, Scalar, Pino, Zod",
     "ci_cd": "GitHub Actions + Docker",
     "monitoring": "Grafana + Prometheus"
   },
@@ -20,8 +20,7 @@
       "Presentation (Routes/Controllers)",
       "Application (Use Cases/DTOs)",
       "Domain (Entities/Value Objects)",
-      "Infrastructure (Repositories/External Services)",
-      "Shared (Errors/Utils)"
+      "Infrastructure (Repositories/DB/Auth)"
     ],
     "principles": [
       "Separation of Concerns",
@@ -42,48 +41,52 @@
       "steps": [
         {
           "id": "step-1-1",
-          "description": "Initialize Bun project with TypeScript (strict mode) and Fastify.",
+          "description": "Initialize Bun project with TypeScript strict mode.",
           "files": [
-            "src/app.ts",
-            "src/server.ts",
-            "tsconfig.json"
-          ],
-          "dependencies": [],
-          "priority": "high",
-          "estimated_time": "2h"
-        },
-        {
-          "id": "step-1-2",
-          "description": "Configure environment variables with Zod validation.",
-          "files": [
-            "src/config/env.ts",
-            ".env.example"
+            "bun.lockb",
+            "tsconfig.json",
+            "package.json"
           ],
           "dependencies": [],
           "priority": "high",
           "estimated_time": "1h"
         },
         {
-          "id": "step-1-3",
-          "description": "Set up Drizzle ORM and PostgreSQL connection.",
+          "id": "step-1-2",
+          "description": "Install and configure Fastify, Drizzle ORM, PostgreSQL, Zod, Pino, and Lucia Auth.",
           "files": [
-            "src/config/database.ts",
-            "drizzle.config.ts"
+            "src/app.ts",
+            "src/server.ts",
+            "src/config/env.ts",
+            "src/config/database.ts"
+          ],
+          "dependencies": [
+            "step-1-1"
+          ],
+          "priority": "high",
+          "estimated_time": "2h"
+        },
+        {
+          "id": "step-1-3",
+          "description": "Set up environment variable validation using Zod.",
+          "files": [
+            "src/config/env.ts"
           ],
           "dependencies": [
             "step-1-2"
           ],
           "priority": "high",
-          "estimated_time": "1.5h"
+          "estimated_time": "1h"
         },
         {
           "id": "step-1-4",
-          "description": "Implement global error handling middleware.",
+          "description": "Configure base error handling middleware.",
           "files": [
+            "src/app.ts",
             "src/shared/infrastructure/error-handler.ts"
           ],
           "dependencies": [
-            "step-1-1"
+            "step-1-2"
           ],
           "priority": "high",
           "estimated_time": "1h"
@@ -92,15 +95,16 @@
     },
     {
       "id": "phase-2",
-      "name": "Core Infrastructure & Security",
-      "description": "Implement authentication, security, and essential plugins.",
+      "name": "Core Infrastructure & Auth",
+      "description": "Implement authentication, RBAC, and security layers.",
       "steps": [
         {
           "id": "step-2-1",
-          "description": "Integrate Lucia Auth for email/password authentication.",
+          "description": "Design and implement user database schema with Drizzle ORM.",
           "files": [
-            "src/modules/auth/infrastructure/lucia.ts",
-            "src/plugins/auth.ts"
+            "src/db/schema/user.ts",
+            "src/db/migrations/",
+            "drizzle.config.ts"
           ],
           "dependencies": [
             "phase-1"
@@ -110,18 +114,31 @@
         },
         {
           "id": "step-2-2",
-          "description": "Set up RBAC (Role-Based Access Control) for future extensibility.",
+          "description": "Set up Lucia Auth for email/password authentication.",
+          "files": [
+            "src/plugins/auth.ts",
+            "src/modules/auth/infrastructure/lucia.ts"
+          ],
+          "dependencies": [
+            "step-2-1"
+          ],
+          "priority": "high",
+          "estimated_time": "2h"
+        },
+        {
+          "id": "step-2-3",
+          "description": "Implement RBAC (basic user roles).",
           "files": [
             "src/modules/auth/domain/roles.ts"
           ],
           "dependencies": [
-            "step-2-1"
+            "step-2-2"
           ],
           "priority": "medium",
           "estimated_time": "1h"
         },
         {
-          "id": "step-2-3",
+          "id": "step-2-4",
           "description": "Configure CORS, rate limiting, and security headers (helmet).",
           "files": [
             "src/plugins/cors.ts",
@@ -137,28 +154,29 @@
     },
     {
       "id": "phase-3",
-      "name": "Domain & Application Logic",
-      "description": "Design user schema, implement repositories, and business logic for sign up and login.",
+      "name": "Domain Logic & Validation",
+      "description": "Implement user registration and login logic with validation.",
       "steps": [
         {
           "id": "step-3-1",
-          "description": "Design Drizzle schema for users and migrations.",
+          "description": "Create user entity, value objects, and repository interfaces.",
           "files": [
-            "src/db/schema/user.ts",
-            "src/db/migrations/001_create_users.sql"
+            "src/modules/auth/domain/user.entity.ts",
+            "src/modules/auth/domain/user.value-object.ts",
+            "src/modules/auth/infrastructure/user.repository.ts"
           ],
           "dependencies": [
-            "step-1-3"
+            "step-2-1"
           ],
           "priority": "high",
-          "estimated_time": "1.5h"
+          "estimated_time": "2h"
         },
         {
           "id": "step-3-2",
-          "description": "Implement User entity, repository, and value objects.",
+          "description": "Implement use cases for sign up and login.",
           "files": [
-            "src/modules/users/domain/user.entity.ts",
-            "src/modules/users/infrastructure/user.repository.ts"
+            "src/modules/auth/application/sign-up.usecase.ts",
+            "src/modules/auth/application/login.usecase.ts"
           ],
           "dependencies": [
             "step-3-1"
@@ -168,25 +186,12 @@
         },
         {
           "id": "step-3-3",
-          "description": "Create use cases for sign up and login (application layer).",
+          "description": "Set up Zod schemas for input validation (email, password).",
           "files": [
-            "src/modules/auth/application/sign-up.usecase.ts",
-            "src/modules/auth/application/login.usecase.ts"
+            "src/modules/auth/presentation/auth.schemas.ts"
           ],
           "dependencies": [
             "step-3-2"
-          ],
-          "priority": "high",
-          "estimated_time": "2h"
-        },
-        {
-          "id": "step-3-4",
-          "description": "Implement Zod validation schemas for input data.",
-          "files": [
-            "src/modules/auth/presentation/schemas/auth.schema.ts"
-          ],
-          "dependencies": [
-            "step-3-3"
           ],
           "priority": "high",
           "estimated_time": "1h"
@@ -196,24 +201,36 @@
     {
       "id": "phase-4",
       "name": "API Layer & Documentation",
-      "description": "Expose RESTful endpoints for sign up and login, add logging and API docs.",
+      "description": "Expose RESTful endpoints for sign up and login, and document the API.",
       "steps": [
         {
           "id": "step-4-1",
-          "description": "Implement Fastify routes/controllers for sign up and login.",
+          "description": "Implement Fastify routes and controllers for /signup and /login.",
           "files": [
             "src/modules/auth/presentation/auth.routes.ts",
             "src/modules/auth/presentation/auth.controller.ts"
           ],
           "dependencies": [
-            "phase-3"
+            "step-3-3"
           ],
           "priority": "high",
           "estimated_time": "2h"
         },
         {
           "id": "step-4-2",
-          "description": "Setup OpenAPI documentation using Scalar.",
+          "description": "Define request/response DTOs.",
+          "files": [
+            "src/modules/auth/presentation/auth.dto.ts"
+          ],
+          "dependencies": [
+            "step-4-1"
+          ],
+          "priority": "medium",
+          "estimated_time": "1h"
+        },
+        {
+          "id": "step-4-3",
+          "description": "Set up OpenAPI documentation with Scalar.",
           "files": [
             "src/plugins/openapi.ts"
           ],
@@ -224,13 +241,13 @@
           "estimated_time": "1h"
         },
         {
-          "id": "step-4-3",
-          "description": "Add request/response logging with Pino.",
+          "id": "step-4-4",
+          "description": "Add request logging with Pino.",
           "files": [
             "src/plugins/logger.ts"
           ],
           "dependencies": [
-            "step-4-1"
+            "phase-1"
           ],
           "priority": "medium",
           "estimated_time": "1h"
@@ -240,15 +257,26 @@
     {
       "id": "phase-5",
       "name": "Testing & Deployment",
-      "description": "Write tests, containerize, setup CI/CD, and monitoring.",
+      "description": "Ensure code quality, test coverage, and prepare for deployment.",
       "steps": [
         {
           "id": "step-5-1",
-          "description": "Write unit, integration, and e2e tests for auth flows.",
+          "description": "Write unit tests for use cases and domain logic.",
           "files": [
-            "tests/unit/auth.spec.ts",
-            "tests/integration/auth.integration.spec.ts",
-            "tests/e2e/auth.e2e.spec.ts"
+            "tests/unit/auth.usecase.test.ts"
+          ],
+          "dependencies": [
+            "phase-3"
+          ],
+          "priority": "high",
+          "estimated_time": "2h"
+        },
+        {
+          "id": "step-5-2",
+          "description": "Write integration and e2e tests for API endpoints.",
+          "files": [
+            "tests/integration/auth.routes.test.ts",
+            "tests/e2e/auth.e2e.test.ts"
           ],
           "dependencies": [
             "phase-4"
@@ -257,40 +285,42 @@
           "estimated_time": "2h"
         },
         {
-          "id": "step-5-2",
-          "description": "Add Dockerfile and docker-compose for local and production.",
+          "id": "step-5-3",
+          "description": "Add Dockerfile and docker-compose for local and production deployment.",
           "files": [
             "docker/Dockerfile",
             "docker/docker-compose.yml"
           ],
-          "dependencies": [],
-          "priority": "high",
-          "estimated_time": "1h"
-        },
-        {
-          "id": "step-5-3",
-          "description": "Configure GitHub Actions for CI/CD pipeline.",
-          "files": [
-            ".github/workflows/ci.yml"
-          ],
           "dependencies": [
-            "step-5-1"
+            "phase-1"
           ],
           "priority": "medium",
           "estimated_time": "1h"
         },
         {
           "id": "step-5-4",
-          "description": "Setup monitoring with Grafana and Prometheus.",
+          "description": "Configure GitHub Actions for CI/CD pipeline.",
+          "files": [
+            ".github/workflows/ci.yml"
+          ],
+          "dependencies": [
+            "step-5-3"
+          ],
+          "priority": "medium",
+          "estimated_time": "1h"
+        },
+        {
+          "id": "step-5-5",
+          "description": "Set up monitoring with Grafana and Prometheus.",
           "files": [
             "docker/prometheus.yml",
             "docker/grafana.ini"
           ],
           "dependencies": [
-            "step-5-2"
+            "step-5-3"
           ],
           "priority": "low",
-          "estimated_time": "1h"
+          "estimated_time": "2h"
         }
       ]
     }
@@ -301,7 +331,7 @@
       "purpose": "Fastify app setup and plugin registration",
       "key_responsibilities": [
         "Initialize Fastify instance",
-        "Register plugins (auth, CORS, rate limit, logger, OpenAPI)",
+        "Register plugins (auth, CORS, logger, rate-limit)",
         "Register routes"
       ]
     },
@@ -315,9 +345,10 @@
     },
     {
       "path": "src/config/env.ts",
-      "purpose": "Environment variable validation",
+      "purpose": "Environment variable validation and loading",
       "key_responsibilities": [
-        "Define and validate environment variables using Zod"
+        "Define and validate environment variables using Zod",
+        "Expose config object"
       ]
     },
     {
@@ -332,68 +363,64 @@
       "path": "src/db/schema/user.ts",
       "purpose": "User table schema definition",
       "key_responsibilities": [
-        "Define user table columns and constraints"
+        "Define user table columns (id, email, password_hash, created_at, etc.)"
       ]
     },
     {
-      "path": "src/db/migrations/001_create_users.sql",
-      "purpose": "Initial migration for users table",
+      "path": "src/db/migrations/",
+      "purpose": "Database migrations",
       "key_responsibilities": [
-        "Create users table in PostgreSQL"
+        "Store migration files for schema changes"
       ]
     },
     {
-      "path": "src/modules/users/domain/user.entity.ts",
+      "path": "src/modules/auth/domain/user.entity.ts",
       "purpose": "User entity definition",
       "key_responsibilities": [
-        "Define User domain model and value objects"
+        "Represent user domain model"
       ]
     },
     {
-      "path": "src/modules/users/infrastructure/user.repository.ts",
+      "path": "src/modules/auth/domain/user.value-object.ts",
+      "purpose": "User value objects (e.g., Email, Password)",
+      "key_responsibilities": [
+        "Encapsulate email and password validation logic"
+      ]
+    },
+    {
+      "path": "src/modules/auth/infrastructure/user.repository.ts",
       "purpose": "User repository implementation",
       "key_responsibilities": [
-        "CRUD operations for users",
-        "Find user by email"
+        "CRUD operations for user entity"
       ]
     },
     {
       "path": "src/modules/auth/infrastructure/lucia.ts",
       "purpose": "Lucia Auth integration",
       "key_responsibilities": [
-        "Configure Lucia for email/password",
-        "Hash and verify passwords"
+        "Configure Lucia for email/password auth",
+        "Session management"
       ]
     },
     {
       "path": "src/modules/auth/application/sign-up.usecase.ts",
-      "purpose": "Sign up business logic",
+      "purpose": "Sign up use case logic",
       "key_responsibilities": [
-        "Validate input",
-        "Create user",
-        "Hash password",
-        "Return result"
+        "Handle user registration flow",
+        "Hash password, validate input, persist user"
       ]
     },
     {
       "path": "src/modules/auth/application/login.usecase.ts",
-      "purpose": "Login business logic",
+      "purpose": "Login use case logic",
       "key_responsibilities": [
-        "Validate input",
-        "Verify credentials",
-        "Issue session/JWT"
-      ]
-    },
-    {
-      "path": "src/modules/auth/presentation/schemas/auth.schema.ts",
-      "purpose": "Zod schemas for auth endpoints",
-      "key_responsibilities": [
-        "Validate sign up and login request bodies"
+        "Handle user login flow",
+        "Validate credentials, issue session/token"
       ]
     },
     {
       "path": "src/modules/auth/presentation/auth.routes.ts",
-      "purpose": "Auth API routes",
+      "purpose": "Auth API route definitions",
       "key_responsibilities": [
         "Define /signup and /login endpoints"
       ]
@@ -402,24 +429,28 @@
       "path": "src/modules/auth/presentation/auth.controller.ts",
       "purpose": "Auth controller logic",
       "key_responsibilities": [
-        "Handle HTTP requests for sign up and login",
-        "Call use cases and return responses"
+        "Handle HTTP requests for sign up and login"
       ]
     },
     {
-      "path": "src/shared/infrastructure/error-handler.ts",
-      "purpose": "Global error handling middleware",
+      "path": "src/modules/auth/presentation/auth.schemas.ts",
+      "purpose": "Zod schemas for input validation",
       "key_responsibilities": [
-        "Catch and format errors",
-        "Return proper HTTP status codes"
+        "Validate email and password inputs"
+      ]
+    },
+    {
+      "path": "src/modules/auth/presentation/auth.dto.ts",
+      "purpose": "Request and response DTOs",
+      "key_responsibilities": [
+        "Define types for API payloads"
       ]
     },
     {
       "path": "src/plugins/auth.ts",
       "purpose": "Fastify plugin for Lucia Auth",
       "key_responsibilities": [
-        "Register Lucia with Fastify",
-        "Expose auth methods"
+        "Register Lucia with Fastify"
       ]
     },
     {
@@ -431,7 +462,7 @@
     },
     {
       "path": "src/plugins/rate-limit.ts",
-      "purpose": "Rate limiting plugin",
+      "purpose": "Rate limiting configuration",
       "key_responsibilities": [
         "Prevent brute-force attacks"
       ]
@@ -451,59 +482,65 @@
       ]
     },
     {
-      "path": "tests/unit/auth.spec.ts",
-      "purpose": "Unit tests for auth logic",
+      "path": "src/shared/infrastructure/error-handler.ts",
+      "purpose": "Centralized error handling",
       "key_responsibilities": [
-        "Test sign up and login use cases"
+        "Handle and format API errors"
       ]
     },
     {
-      "path": "tests/integration/auth.integration.spec.ts",
-      "purpose": "Integration tests for auth endpoints",
+      "path": "tests/unit/auth.usecase.test.ts",
+      "purpose": "Unit tests for auth use cases",
+      "key_responsibilities": [
+        "Test sign up and login logic"
+      ]
+    },
+    {
+      "path": "tests/integration/auth.routes.test.ts",
+      "purpose": "Integration tests for auth routes",
       "key_responsibilities": [
         "Test API endpoints with DB"
       ]
     },
     {
-      "path": "tests/e2e/auth.e2e.spec.ts",
+      "path": "tests/e2e/auth.e2e.test.ts",
       "purpose": "End-to-end tests for auth flows",
       "key_responsibilities": [
-        "Simulate real user sign up and login"
+        "Test full sign up and login process"
       ]
     },
     {
       "path": "docker/Dockerfile",
       "purpose": "Docker image for backend",
       "key_responsibilities": [
-        "Build and run Bun app in container"
+        "Build and run backend in container"
       ]
     },
     {
       "path": "docker/docker-compose.yml",
-      "purpose": "Compose services for local/prod",
+      "purpose": "Compose backend, DB, and monitoring services",
       "key_responsibilities": [
-        "Orchestrate backend, PostgreSQL, monitoring"
+        "Orchestrate multi-service setup"
       ]
     },
     {
       "path": ".github/workflows/ci.yml",
-      "purpose": "CI/CD pipeline config",
+      "purpose": "CI/CD pipeline definition",
       "key_responsibilities": [
-        "Run tests, lint, build, and deploy"
+        "Automate tests and deployment"
       ]
     }
   ],
   "quality_gates": {
-    "code_coverage": ">85%",
-    "performance_budget": "<100ms (p95) for /signup and /login",
+    "code_coverage": ">=85%",
+    "performance_budget": "<100ms p95 API response time",
     "security_checks": [
       "Input validation (Zod)",
-      "Password hashing (Argon2 via Lucia)",
+      "Password hashing (bcrypt/argon2 via Lucia)",
       "Rate limiting",
-      "CORS",
-      "Helmet (security headers)",
+      "CORS configuration",
       "OWASP Top 10 compliance"
     ]
   },
-  "notes": "This plan is focused on secure, production-grade email/password authentication. Lucia Auth is used for modern, type-safe authentication. All endpoints are validated with Zod, and security best practices (rate limiting, CORS, helmet) are enforced. The architecture is modular and testable, with clear separation of concerns. The project is ready for future extensibility (RBAC, OAuth, etc.) and can be deployed with Docker and monitored in production."
+  "notes": "This plan is focused on secure, scalable, and maintainable email/password authentication. Lucia Auth is used for modern, type-safe session management. All input is validated with Zod. Passwords are hashed securely. The architecture is modular and testable, following Clean Architecture and DDD principles. All endpoints are covered by unit, integration, and e2e tests. Monitoring and CI/CD are included for production readiness."
 }
