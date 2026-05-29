@@ -1,26 +1,62 @@
-// tools/list_backend_files.js
 import fs from "fs/promises";
 import path from "path";
 
-// ریشه‌ی پروژه (همون جایی که backend_agent.js رو اجرا می‌کنی)
 const PROJECT_ROOT = process.cwd();
 
-/**
- * به صورت بازگشتی همه‌ی فایل‌ها و دایرکتوری‌ها را لیست می‌کند.
- *
- * ورودی:
- *   - dir: مسیر نسبی نسبت به ریشه‌ی پروژه (مثلاً "backend" یا "backend/routes")
- *
- * خروجی:
- *   {
- *     success: boolean,
- *     files: [ { name, path, is_dir }, ... ],
- *     error?: string,
- *     stdout: string,
- *     stderr: string
- *   }
- */
-export async function listBackendFiles({ dir, __json_error__ } = {}) {
+const DEFAULT_IGNORES = new Set([
+  "node_modules",
+  ".git",
+  ".next",
+  "dist",
+  "build",
+  "coverage",
+  ".turbo",
+  ".cache",
+  "out",
+]);
+
+function normalizeDir(inputDir) {
+  if (!inputDir || typeof inputDir !== "string") return "";
+  let dir = inputDir.trim().replace(/^["'`]+|["'`]+$/g, "");
+  dir = dir.replace(/^\.?\//, "");
+  return path.normalize(dir).replace(/\\/g, "/");
+}
+
+function isInsideProjectRoot(absPath) {
+  const root = path.resolve(PROJECT_ROOT);
+  const target = path.resolve(absPath);
+  return target === root || target.startsWith(root + path.sep);
+}
+
+async function safeStat(absPath) {
+  try {
+    return await fs.stat(absPath);
+  } catch {
+    return null;
+  }
+}
+
+async function readPreview(absPath, maxChars = 200) {
+  try {
+    const stat = await fs.stat(absPath);
+    if (!stat.isFile() || stat.size > 100_000) return "";
+
+    const content = await fs.readFile(absPath, "utf8");
+    return content.slice(0, maxChars).replace(/\s+/g, " ").trim();
+  } catch {
+    return "";
+  }
+}
+
+export async function listBackendFiles({
+  dir = "",
+  maxDepth = 10,
+  includeFiles = true,
+  includeDirs = true,
+  includeMeta = true,
+  ignore = [],
+  __json_error__,
+} = {}) {
   try {
     if (__json_error__) {
       return {
@@ -32,21 +68,24 @@ export async function listBackendFiles({ dir, __json_error__ } = {}) {
       };
     }
 
-    // اگر dir خالی بود، یعنی root پروژه
-    let baseDir = PROJECT_ROOT;
-    let baseRel = "";
-    if (dir && dir.trim() !== "") {
-      // dir رو نسبی به ریشه‌ی پروژه در نظر می‌گیریم (بدون "workspace")
-      baseRel = dir;
-      baseDir = path.join(PROJECT_ROOT, dir);
-    }
+    const relDir = normalizeDir(dir);
+    const baseDir = relDir ? path.resolve(PROJECT_ROOT, relDir) : PROJECT_ROOT;
 
-    // چک کن که دایرکتوری وجود دارد
-    const stat = await fs.stat(baseDir);
-    if (!stat.isDirectory()) {
+    if (!isInsideProjectRoot(baseDir)) {
       return {
         success: false,
-        error: `Path is not a directory: ${baseRel || "."}`,
+        error: "Access denied: directory is outside project root",
+        files: [],
+        stdout: "",
+        stderr: "",
+      };
+    }
+
+    const baseStat = await safeStat(baseDir);
+    if (!baseStat || !baseStat.isDirectory()) {
+      return {
+        success: false,
+        error: `Path is not a directory: ${relDir || "."}`,
         files: [],
         stdout: "",
         stderr: "",
@@ -54,40 +93,63 @@ export async function listBackendFiles({ dir, __json_error__ } = {}) {
     }
 
     const files = [];
+    const ignoreSet = new Set([...DEFAULT_IGNORES, ...ignore]);
 
-    // تابع بازگشتی برای پیمایش
-    async function walk(currentAbsDir, currentRelDir) {
+    async function walk(currentAbsDir, currentRelDir, depth) {
+      if (depth > maxDepth) return;
+
       const entries = await fs.readdir(currentAbsDir, { withFileTypes: true });
 
       for (const entry of entries) {
-        if (entry.name === "node_modules" || entry.name === ".git") {
-          continue;
-        }
+        if (ignoreSet.has(entry.name)) continue;
 
         const entryAbs = path.join(currentAbsDir, entry.name);
         const entryRel = currentRelDir
           ? path.join(currentRelDir, entry.name)
           : entry.name;
 
-        files.push({
+        const relNorm = entryRel.replace(/\\/g, "/");
+        const stat = includeMeta ? await safeStat(entryAbs) : null;
+
+        const item = {
           name: entry.name,
-          path: entryRel.replace(/\\/g, "/"),
+          path: relNorm,
           is_dir: entry.isDirectory(),
-        });
+        };
+
+        if (includeMeta && stat) {
+          item.size = stat.size;
+          item.mtimeMs = stat.mtimeMs;
+          item.ext = entry.isDirectory()
+            ? ""
+            : path.extname(entry.name).replace(".", "");
+        }
 
         if (entry.isDirectory()) {
-          await walk(entryAbs, entryRel);
+          if (includeDirs) files.push(item);
+          await walk(entryAbs, entryRel, depth + 1);
+        } else {
+          if (includeFiles) {
+            if (includeMeta) {
+              item.preview = await readPreview(entryAbs, 180);
+            }
+            files.push(item);
+          }
         }
       }
     }
 
-    await walk(baseDir, baseRel);
+    await walk(baseDir, relDir, 0);
 
     return {
       success: true,
       files,
       stdout: "",
       stderr: "",
+      meta: {
+        root: relDir || ".",
+        count: files.length,
+      },
     };
   } catch (err) {
     return {
