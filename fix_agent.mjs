@@ -1,3 +1,4 @@
+// fix_agent.mjs
 import "dotenv/config";
 import fs from "fs";
 import path from "path";
@@ -6,58 +7,68 @@ import { exec } from "child_process";
 import { promisify } from "util";
 import OpenAI from "openai";
 
-import { generateMissingFiles } from "./missing_file_generator.mjs";
-import { buildProjectContext } from "./project_context.mjs";
-import { guardDependencies } from "./dependency_guard.mjs";
-import { classifyErrors } from "./error_classifier.mjs";
-
 const execAsync = promisify(exec);
 
-/* ------------------------------------------------ */
-/* CONFIG                                            */
-/* ------------------------------------------------ */
+/* ================================================== */
+/* ================== CONFIGURATION ================= */
+/* ================================================== */
 
-const PROJECT_DIR = path.resolve(process.env.PROJECT_DIR || "backend");
-
-const MAX_LOOPS = Number(process.env.MAX_LOOPS || 6);
-const MAX_ERROR_CHARS = Number(process.env.MAX_ERROR_CHARS || 15000);
-const MAX_CONTEXT_CHARS = Number(process.env.MAX_CONTEXT_CHARS || 25000);
-
-const MAX_FILES = Number(process.env.MAX_FILES || 6);
-const MAX_FILES_DEEP = Number(process.env.MAX_FILES_DEEP || 12);
-
-const FILE_HEAD_LINES = Number(process.env.FILE_HEAD_LINES || 120);
-const FILE_TAIL_LINES = Number(process.env.FILE_TAIL_LINES || 80);
-const FILE_HEAD_LINES_DEEP = Number(process.env.FILE_HEAD_LINES_DEEP || 220);
-const FILE_TAIL_LINES_DEEP = Number(process.env.FILE_TAIL_LINES_DEEP || 160);
-
-// Full-file behavior in deep mode
-const DEEP_SEND_FULL_FILES =
-  String(process.env.DEEP_SEND_FULL_FILES || "true").toLowerCase() === "true";
-const MAX_FULL_FILE_CHARS = Number(process.env.MAX_FULL_FILE_CHARS || 35000);
-
-// Logging
-const DEBUG_LLM = String(process.env.DEBUG_LLM || "true").toLowerCase() === "true";
-const DEBUG_DIAG = String(process.env.DEBUG_DIAG || "true").toLowerCase() === "true";
-
-const MODEL = process.env.MODEL || "gpt-4o-mini";
-const DRY_RUN = String(process.env.DRY_RUN || "").toLowerCase() === "true";
-
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-if (!OPENAI_API_KEY) {
-  throw new Error(
-    "Missing OPENAI_API_KEY. Put it in your environment (or .env) before running fix_agent."
-  );
-}
-
-const client = new OpenAI({
-  apiKey: OPENAI_API_KEY,
+const DEFAULT_CONFIG = {
+  // Project settings
+  workspace: "./workspace",
+  projectType: "backend", // backend | frontend | fullstack
+  
+  // LLM settings
+  model: "gpt-4o-mini",
+  temperature: 0,
+  apiKey: process.env.OPENAI_API_KEY,
   baseURL: process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1",
-});
+  
+  // Loop control
+  maxLoops: 6,
+  maxRetries: 2,
+  
+  // Token optimization
+  maxErrorChars: 15000,
+  maxContextChars: 25000,
+  maxFullFileChars: 35000,
+  
+  // File limits
+  maxFiles: 6,
+  maxFilesDeep: 12,
+  fileHeadLines: 120,
+  fileTailLines: 80,
+  fileHeadLinesDeep: 220,
+  fileTailLinesDeep: 160,
+  
+  // Deep mode settings
+  deepSendFullFiles: true,
+  deepModeThreshold: 1,
+  
+  // Auto-healing
+  autoInstallDeps: true,
+  autoInstallTypes: true,
+  autoGenerateMissing: true,
+  autoCreateShims: true,
+  
+  // Logging
+  debugLLM: true,
+  debugDiag: true,
+  dryRun: false,
+  
+  // Output
+  outputDir: "./logs",
+  
+  // Callbacks
+  onProgress: null,
+  onError: null,
+  onSuccess: null,
+  onDiagnostic: null,
+};
 
-/* ------------------------------------------------ */
-/* HELPERS                                           */
-/* ------------------------------------------------ */
+/* ================================================== */
+/* ==================== HELPERS ===================== */
+/* ================================================== */
 
 function sha256(text) {
   return crypto.createHash("sha256").update(String(text || ""), "utf8").digest("hex");
@@ -66,8 +77,7 @@ function sha256(text) {
 function truncate(text, maxChars) {
   if (!text) return "";
   const s = String(text);
-  if (s.length <= maxChars) return s;
-  return s.slice(0, maxChars) + "\n\n... <truncated> ...\n";
+  return s.length <= maxChars ? s : s.slice(0, maxChars) + "\n\n... <truncated> ...\n";
 }
 
 function ensureDir(absDir) {
@@ -83,26 +93,6 @@ function clean(text) {
   return String(text).replace(/```json/gi, "").replace(/```/g, "").trim();
 }
 
-function writeDebugFile(rel, content) {
-  try {
-    const abs = path.join(PROJECT_DIR, ".fix_agent", rel);
-    ensureDirForFile(abs);
-    fs.writeFileSync(abs, String(content || ""), "utf8");
-  } catch {
-    // ignore
-  }
-}
-
-function writeDiagFile(rel, content) {
-  try {
-    const abs = path.join(PROJECT_DIR, ".fix_agent", "diagnostics", rel);
-    ensureDirForFile(abs);
-    fs.writeFileSync(abs, String(content || ""), "utf8");
-  } catch {
-    // ignore
-  }
-}
-
 function nowStamp() {
   const d = new Date();
   const pad = (n) => String(n).padStart(2, "0");
@@ -111,8 +101,530 @@ function nowStamp() {
   )}-${pad(d.getMinutes())}-${pad(d.getSeconds())}`;
 }
 
+function readTextIfExists(absPath) {
+  try {
+    if (!fs.existsSync(absPath)) return null;
+    return fs.readFileSync(absPath, "utf8");
+  } catch {
+    return null;
+  }
+}
+
+function safeJson(obj, fallback = "") {
+  try {
+    return JSON.stringify(obj, null, 2);
+  } catch {
+    return fallback;
+  }
+}
+
+function writeDebugFile(config, rel, content) {
+  if (!config.debugLLM) return;
+  try {
+    const abs = path.join(config.workspace, ".fix_agent", rel);
+    ensureDirForFile(abs);
+    fs.writeFileSync(abs, String(content || ""), "utf8");
+  } catch {}
+}
+
+function writeDiagFile(config, rel, content) {
+  if (!config.debugDiag) return;
+  try {
+    const abs = path.join(config.workspace, ".fix_agent", "diagnostics", rel);
+    ensureDirForFile(abs);
+    fs.writeFileSync(abs, String(content || ""), "utf8");
+  } catch {}
+}
+
+/* ================================================== */
+/* ================ COMMAND EXECUTION =============== */
+/* ================================================== */
+
+async function run(cmd, cwd) {
+  try {
+    const { stdout, stderr } = await execAsync(cmd, {
+      cwd,
+      maxBuffer: 1024 * 1024 * 50,
+      env: process.env,
+    });
+    return { ok: true, stdout: stdout || "", stderr: stderr || "" };
+  } catch (err) {
+    return {
+      ok: false,
+      stdout: err?.stdout || "",
+      stderr: err?.stderr || err?.message || "",
+      code: err?.code || 1,
+    };
+  }
+}
+
+/* ================================================== */
+/* ============== PACKAGE MANAGER =================== */
+/* ================================================== */
+
+function detectPkgManager(workspace) {
+  if (fs.existsSync(path.join(workspace, "pnpm-lock.yaml"))) return "pnpm";
+  if (fs.existsSync(path.join(workspace, "yarn.lock"))) return "yarn";
+  if (fs.existsSync(path.join(workspace, "package-lock.json"))) return "npm";
+  return "npm";
+}
+
+function installCommand(workspace, pkgs, { dev = false } = {}) {
+  const pm = detectPkgManager(workspace);
+  const list = (pkgs || []).join(" ").trim();
+
+  if (!list) {
+    if (pm === "pnpm") return "pnpm install";
+    if (pm === "yarn") return "yarn install";
+    return "npm install";
+  }
+
+  if (pm === "pnpm") return dev ? `pnpm add -D ${list}` : `pnpm add ${list}`;
+  if (pm === "yarn") return dev ? `yarn add -D ${list}` : `yarn add ${list}`;
+  return dev ? `npm install -D ${list}` : `npm install ${list}`;
+}
+
+/* ================================================== */
+/* ============== ERROR CLASSIFICATION ============== */
+/* ================================================== */
+
 /**
- * Extract the first valid JSON object from arbitrary text.
+ * Classify errors into actionable categories
+ */
+function classifyErrors(output) {
+  const classification = {
+    missingModules: [],
+    missingTypes: [],
+    typeErrors: [],
+    syntaxErrors: [],
+    importErrors: [],
+    configErrors: [],
+    otherErrors: [],
+  };
+
+  const lines = String(output || "").split("\n");
+
+  for (const line of lines) {
+    // Missing modules
+    if (/Cannot find module ['"](.+?)['"]/i.test(line)) {
+      const match = line.match(/Cannot find module ['"](.+?)['"]/);
+      if (match && !match[1].startsWith(".")) {
+        classification.missingModules.push(match[1]);
+      }
+    }
+
+    // Missing type declarations
+    if (/Could not find a declaration file for module ['"](.+?)['"]/i.test(line)) {
+      const match = line.match(/Could not find a declaration file for module ['"](.+?)['"]/);
+      if (match && !match[1].startsWith(".")) {
+        classification.missingTypes.push(match[1]);
+      }
+    }
+
+    // Type errors
+    if (/error TS\d+:/i.test(line)) {
+      if (/TS2\d{3}/.test(line)) {
+        classification.typeErrors.push(line.trim());
+      } else if (/TS1\d{3}/.test(line)) {
+        classification.syntaxErrors.push(line.trim());
+      } else {
+        classification.otherErrors.push(line.trim());
+      }
+    }
+
+    // Import/export errors
+    if (/import|export/i.test(line) && /error/i.test(line)) {
+      classification.importErrors.push(line.trim());
+    }
+
+    // Config errors
+    if (/tsconfig|compilerOptions/i.test(line)) {
+      classification.configErrors.push(line.trim());
+    }
+  }
+
+  // Deduplicate
+  for (const key of Object.keys(classification)) {
+    if (Array.isArray(classification[key])) {
+      classification[key] = [...new Set(classification[key])];
+    }
+  }
+
+  return classification;
+}
+
+/* ================================================== */
+/* =========== SMART FILE SELECTION ================ */
+/* ================================================== */
+
+/**
+ * Extract file paths from compiler output
+ */
+function parseErrorFiles(output, limit) {
+  const lines = String(output || "").split("\n");
+  const files = new Set();
+
+  const rx = /([a-zA-Z0-9_@./\\-]+?\.(?:d\.ts|ts|tsx|mts|cts|js|jsx|mjs))(?=[(:\s])/g;
+
+  for (const line of lines) {
+    let m;
+    while ((m = rx.exec(line))) {
+      const raw = m[1].replaceAll("\\", "/");
+      if (raw.includes("node_modules/")) continue;
+      const normalized = raw.startsWith("./") ? raw.slice(2) : raw;
+      files.add(normalized);
+    }
+  }
+
+  return [...files].slice(0, limit);
+}
+
+/**
+ * Add neighbor files for better context
+ */
+function addNeighborFiles(files, workspace, config) {
+  const set = new Set(files || []);
+  
+  // Add common utility files
+  const candidates = [
+    "src/types/index.ts",
+    "src/types/fastify.d.ts",
+    "src/types/vendor.d.ts",
+    "src/utils/index.ts",
+    "src/config/index.ts",
+  ];
+
+  for (const f of candidates) {
+    if (fs.existsSync(path.join(workspace, f))) {
+      set.add(f);
+    }
+  }
+
+  // Add related files based on imports
+  for (const file of files) {
+    const abs = path.join(workspace, file);
+    if (!fs.existsSync(abs)) continue;
+
+    try {
+      const content = fs.readFileSync(abs, "utf8");
+      const importRegex = /from\s+['"](.+?)['"]/g;
+      let match;
+
+      while ((match = importRegex.exec(content))) {
+        const importPath = match[1];
+        if (importPath.startsWith(".")) {
+          const resolved = path.resolve(path.dirname(abs), importPath);
+          const rel = path.relative(workspace, resolved).replace(/\\/g, "/");
+
+          for (const ext of [".ts", ".tsx", ".js", ".jsx", ""]) {
+            const withExt = rel + ext;
+            if (fs.existsSync(path.join(workspace, withExt))) {
+              set.add(withExt);
+              break;
+            }
+          }
+        }
+      }
+    } catch {}
+  }
+
+  return [...set];
+}
+
+/**
+ * Check if file exists (with fallback for .js -> .ts)
+ */
+function fileExistsWithFallback(workspace, relPath) {
+  const abs = path.join(workspace, relPath);
+  if (fs.existsSync(abs)) return true;
+
+  if (relPath.endsWith(".js")) {
+    const base = relPath.slice(0, -3);
+    if (fs.existsSync(path.join(workspace, base + ".ts"))) return true;
+    if (fs.existsSync(path.join(workspace, base))) return true;
+  }
+
+  return false;
+}
+
+/**
+ * Find missing files
+ */
+function findMissingFiles(files, workspace) {
+  const missing = [];
+  for (const f of files || []) {
+    if (!fileExistsWithFallback(workspace, f)) {
+      missing.push(f);
+    }
+  }
+  return missing;
+}
+
+/* ================================================== */
+/* ============= SMART FILE READING ================ */
+/* ================================================== */
+
+/**
+ * Read files with smart truncation
+ */
+function readFiles(files, workspace, config, deepMode = false) {
+  const result = {};
+
+  for (const file of files) {
+    const abs = path.join(workspace, file);
+    if (!fs.existsSync(abs)) continue;
+
+    try {
+      const content = fs.readFileSync(abs, "utf8");
+      const lines = content.split("\n");
+
+      // Deep mode: send full file if small enough
+      if (deepMode && config.deepSendFullFiles) {
+        if (content.length <= config.maxFullFileChars) {
+          result[file] = content;
+          continue;
+        }
+      }
+
+      // Normal mode: head + tail
+      const headLines = deepMode ? config.fileHeadLinesDeep : config.fileHeadLines;
+      const tailLines = deepMode ? config.fileTailLinesDeep : config.fileTailLines;
+
+      const head = lines.slice(0, headLines).join("\n");
+      const tail = lines.slice(-tailLines).join("\n");
+
+      result[file] = `${head}\n\n// ... [${lines.length - headLines - tailLines} lines omitted] ...\n\n${tail}`;
+    } catch (err) {
+      console.error(`⚠️ Failed to read ${file}: ${err.message}`);
+    }
+  }
+
+  return result;
+}
+
+/* ================================================== */
+/* =========== PROJECT CONTEXT BUILDER ============= */
+/* ================================================== */
+
+/**
+ * Build minimal project context
+ */
+function buildProjectContext(workspace, config) {
+  const context = {
+    projectType: config.projectType,
+    structure: {},
+    dependencies: {},
+    config: {},
+  };
+
+  // 1. Package.json
+  const pkgPath = path.join(workspace, "package.json");
+  if (fs.existsSync(pkgPath)) {
+    try {
+      const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8"));
+      context.dependencies = {
+        runtime: Object.keys(pkg.dependencies || {}),
+        dev: Object.keys(pkg.devDependencies || {}),
+      };
+    } catch {}
+  }
+
+  // 2. tsconfig.json
+  const tsconfigPath = path.join(workspace, "tsconfig.json");
+  if (fs.existsSync(tsconfigPath)) {
+    try {
+      const tsconfig = JSON.parse(fs.readFileSync(tsconfigPath, "utf8"));
+      context.config.typescript = {
+        target: tsconfig.compilerOptions?.target,
+        module: tsconfig.compilerOptions?.module,
+        moduleResolution: tsconfig.compilerOptions?.moduleResolution,
+        strict: tsconfig.compilerOptions?.strict,
+      };
+    } catch {}
+  }
+
+  // 3. Project structure (limited depth)
+  const relevantDirs = ["src", "lib", "utils", "types", "routes", "services", "components"];
+  for (const dir of relevantDirs) {
+    const dirPath = path.join(workspace, dir);
+    if (fs.existsSync(dirPath)) {
+      context.structure[dir] = listDirectory(dirPath, 2);
+    }
+  }
+
+  return truncate(JSON.stringify(context, null, 2), config.maxContextChars);
+}
+
+function listDirectory(dirPath, maxDepth, currentDepth = 0) {
+  if (currentDepth >= maxDepth) return [];
+
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    const result = [];
+
+    for (const entry of entries) {
+      if (entry.name.startsWith(".")) continue;
+
+      if (entry.isDirectory()) {
+        const subPath = path.join(dirPath, entry.name);
+        result.push({
+          name: entry.name,
+          type: "dir",
+          children: listDirectory(subPath, maxDepth, currentDepth + 1),
+        });
+      } else {
+        result.push({ name: entry.name, type: "file" });
+      }
+    }
+
+    return result;
+  } catch {
+    return [];
+  }
+}
+
+/* ================================================== */
+/* ============= STRATEGY BUILDER =================== */
+/* ================================================== */
+
+/**
+ * Build fix strategy hints based on error classification
+ */
+function buildStrategyHints(classification) {
+  const hints = [];
+
+  const all = JSON.stringify(classification || {});
+
+  // Common patterns
+  if (all.includes("autoincrement")) {
+    hints.push(
+      "- Drizzle SQLite: Replace `autoincrement()` with correct sqlite-core schema pattern for your drizzle-orm version."
+    );
+  }
+
+  if (all.includes("request.user")) {
+    hints.push(
+      "- Fastify request.user: Ensure request decoration exists and add TS module augmentation for FastifyRequest.user."
+    );
+  }
+
+  if (all.includes("verifyToken")) {
+    hints.push(
+      "- Export mismatch: Ensure utils exports `verifyToken` (named export) OR change import to match existing export."
+    );
+  }
+
+  if (all.includes("bcrypt")) {
+    hints.push(
+      "- bcrypt errors: Ensure consistent import style (default vs namespace) and avoid mixing callbacks/promises."
+    );
+  }
+
+  if (all.includes("TS2835")) {
+    hints.push(
+      "- TS2835 (ESM import extensions): For NodeNext/Node16, use explicit .js extensions in imports while keeping .ts source files."
+    );
+  }
+
+  if (all.includes("TS2345")) {
+    hints.push(
+      "- TS2345 on schema defaults: Ensure default values match declared types. Use Date or SQL expressions for timestamps."
+    );
+  }
+
+  if (all.includes("Property") && all.includes("does not exist")) {
+    hints.push(
+      "- Missing properties: Either add the property to the schema/type or stop using it in code."
+    );
+  }
+
+  // Generic advice
+  hints.push("- Fix root causes, not just type assertions.");
+  hints.push("- Keep changes minimal and focused on the actual errors.");
+  hints.push("- Ensure consistency across imports, types, and implementations.");
+
+  return hints.join("\n");
+}
+
+/* ================================================== */
+/* =============== PROMPT BUILDER =================== */
+/* ================================================== */
+
+/**
+ * Build optimized prompt for LLM
+ */
+function buildFixPrompt(errors, files, projectContext, strategy, meta, config) {
+  const sections = [];
+
+  // 1. Role and rules
+  sections.push(`You are a senior ${config.projectType} engineer fixing compilation errors.
+
+CRITICAL RULES:
+- Return ONLY valid JSON (no markdown, no explanations)
+- Keys MUST be existing file paths from FILES object
+- Values MUST be FULL file contents (complete replacement)
+- Do NOT append or patch. Replace entire file.
+- Keep minimal diffs. Don't change unrelated code.
+- Ensure consistency across imports/types/tests.`);
+
+  // 2. Previous attempt feedback
+  if (meta.attempt > 1 && meta.lastRejectReason) {
+    sections.push(`
+⚠️ PREVIOUS ATTEMPT REJECTED
+Reason: ${meta.lastRejectReason}
+Fix the issue and try again.`);
+  }
+
+  // 3. Strategy hints
+  sections.push(`\nFIX STRATEGY:\n${strategy}`);
+
+  // 4. Meta information
+  sections.push(`\nMETA:\n${safeJson(meta)}`);
+
+  // 5. Project context
+  sections.push(`\nPROJECT CONTEXT:\n${projectContext}`);
+
+  // 6. Errors (filtered)
+  const filteredErrors = filterRelevantErrors(errors);
+  sections.push(`\nCOMPILATION ERRORS:\n${truncate(filteredErrors, config.maxErrorChars)}`);
+
+  // 7. Files to fix
+  sections.push(`\nFILES TO FIX:\n${safeJson(files)}`);
+
+  // 8. Output format
+  sections.push(`
+OUTPUT FORMAT (JSON only):
+{
+  "src/file1.ts": "full corrected content",
+  "src/file2.ts": "full corrected content"
+}`);
+
+  return sections.join("\n");
+}
+
+/**
+ * Filter errors to most relevant lines
+ */
+function filterRelevantErrors(output) {
+  const lines = String(output || "").split("\n");
+  const keep = [];
+
+  for (const line of lines) {
+    if (/error TS\d+:/i.test(line)) keep.push(line);
+    if (/\bTS\d+\b/i.test(line)) keep.push(line);
+    if (/Cannot find module/i.test(line)) keep.push(line);
+    if (/Could not find a declaration/i.test(line)) keep.push(line);
+  }
+
+  return keep.join("\n");
+}
+
+/* ================================================== */
+/* =============== JSON EXTRACTION ================== */
+/* ================================================== */
+
+/**
+ * Extract JSON from LLM response
  */
 function extractJSON(text) {
   if (!text) return null;
@@ -160,23 +672,13 @@ function extractJSON(text) {
   return null;
 }
 
-// Relaxed validation option for deep mode
-function isCodeLike(content) {
-  if (typeof content !== "string") return false;
-  const s = content.trim();
-  if (s.length < 30) return false;
+/* ================================================== */
+/* ============= PATCH VALIDATION =================== */
+/* ================================================== */
 
-  // Reject obvious explanations/markdown/json
-  const badStarts = ["Here is", "Sure,", "I will", "Explanation:", "```", "{", "["];
-  if (badStarts.some((b) => s.startsWith(b))) return false;
-
-  return (
-/(^|\n)\s*(import|export|type|interface|const|let|class|function)\b/.test(s) ||
-/(^|\n)\s*(\/\/|\/\*)/.test(s) ||
-/(^|\n)\s*([a-zA-Z0-9_$]+\s*[:=]\s*)/.test(s)
-  );
-}
-
+/**
+ * Validate patch content
+ */
 function isProbablyFullFile(content) {
   if (typeof content !== "string") return false;
   const s = content.trim();
@@ -185,381 +687,35 @@ function isProbablyFullFile(content) {
   const badStarts = ["Here is", "Sure,", "I will", "Explanation:", "```", "{", "["];
   if (badStarts.some((b) => s.startsWith(b))) return false;
 
-  const looksTS =
+  const looksLikeCode =
+/(^|\n)\s*(import|export|type|interface|const|let|class|function)\b/.test(s) ||
+/(^|\n)\s*(\/\/|\/\*)/.test(s);
+
+  return looksLikeCode;
+}
+
+function isCodeLike(content) {
+  if (typeof content !== "string") return false;
+  const s = content.trim();
+  if (s.length < 30) return false;
+
+  const badStarts = ["Here is", "Sure,", "I will", "Explanation:", "```", "{", "["];
+  if (badStarts.some((b) => s.startsWith(b))) return false;
+
+  return (
     /(^|\n)\s*(import|export|type|interface|const|let|class|function)\b/.test(s) ||
-    /(^|\n)\s*(\/\/|\/\*)/.test(s);
-
-  return looksTS;
-}
-
-function readTextIfExists(absPath) {
-  try {
-    if (!fs.existsSync(absPath)) return null;
-    return fs.readFileSync(absPath, "utf8");
-  } catch {
-    return null;
-  }
-}
-
-function safeJson(obj, fallback = "") {
-  try {
-    return JSON.stringify(obj, null, 2);
-  } catch {
-    return fallback;
-  }
-}
-
-/* ------------------------------------------------ */
-/* RUNNER                                            */
-/* ------------------------------------------------ */
-
-async function run(cmd, cwd = PROJECT_DIR) {
-  try {
-    const { stdout, stderr } = await execAsync(cmd, {
-      cwd,
-      maxBuffer: 1024 * 1024 * 50,
-      env: process.env,
-    });
-    return { ok: true, stdout: stdout || "", stderr: stderr || "" };
-  } catch (err) {
-    return {
-      ok: false,
-      stdout: err?.stdout || "",
-      stderr: err?.stderr || err?.message || "",
-    };
-  }
-}
-
-/* ------------------------------------------------ */
-/* PACKAGE MANAGER                                   */
-/* ------------------------------------------------ */
-
-function detectPkgManager() {
-  if (fs.existsSync(path.join(PROJECT_DIR, "pnpm-lock.yaml"))) return "pnpm";
-  if (fs.existsSync(path.join(PROJECT_DIR, "yarn.lock"))) return "yarn";
-  if (fs.existsSync(path.join(PROJECT_DIR, "package-lock.json"))) return "npm";
-  return "npm";
-}
-
-function installCommand(pkgs, { dev = false } = {}) {
-  const pm = detectPkgManager();
-  const list = (pkgs || []).join(" ").trim();
-
-  if (!list) {
-    if (pm === "pnpm") return "pnpm install";
-    if (pm === "yarn") return "yarn install";
-    return "npm install";
-  }
-
-  if (pm === "pnpm") return dev ? `pnpm add -D ${list}` : `pnpm add ${list}`;
-  if (pm === "yarn") return dev ? `yarn add -D ${list}` : `yarn add ${list}`;
-  return dev ? `npm install -D ${list}` : `npm install ${list}`;
-}
-
-/* ------------------------------------------------ */
-/* INSTALL MISSING MODULES                           */
-/* ------------------------------------------------ */
-
-async function installMissingModules(output) {
-  const regex = /Cannot find module ['"](.+?)['"]/g;
-  const modules = new Set();
-  let match;
-
-  while ((match = regex.exec(output || ""))) {
-    const mod = match[1];
-    if (!mod.startsWith(".")) modules.add(mod);
-  }
-
-  if (!modules.size) return false;
-
-  const list = [...modules];
-  console.log("\n📦 Installing missing runtime modules:", list);
-
-  if (DRY_RUN) {
-    console.log("🧪 DRY_RUN=true -> skipping install");
-    return true;
-  }
-
-  await run(installCommand(list, { dev: false }));
-  return true;
-}
-
-/* ------------------------------------------------ */
-/* INSTALL MISSING TYPES + SHIMS                      */
-/* ------------------------------------------------ */
-
-function mapModuleToTypesPackage(modName) {
-  if (modName.startsWith("@")) {
-    return `@types/${modName.slice(1).replace("/", "__")}`;
-  }
-  return `@types/${modName}`;
-}
-
-function findMissingDeclarationModules(output) {
-  const regex = /Could not find a declaration file for module ['"](.+?)['"]/g;
-  const modules = new Set();
-  let match;
-  while ((match = regex.exec(output || ""))) {
-    const mod = match[1];
-    if (!mod.startsWith(".")) modules.add(mod);
-  }
-  return [...modules];
-}
-
-function createTypeShim(modName) {
-  return `// Auto-generated by fix_agent.mjs to unblock TypeScript compilation.
-declare module "${modName}" {
-  const anyExport: any;
-  export = anyExport;
-}
-`;
-}
-
-async function installMissingTypes(output) {
-  const missing = findMissingDeclarationModules(output);
-  if (!missing.length) return { didSomething: false, installed: [], shimmed: [] };
-
-  console.log("\n🧩 Missing type declarations for modules:", missing);
-
-  const typePkgs = [...new Set(missing.map(mapModuleToTypesPackage))];
-  console.log("📦 Attempting to install type packages:", typePkgs);
-
-  if (!DRY_RUN) {
-    await run(installCommand(typePkgs, { dev: true }));
-  } else {
-    console.log("🧪 DRY_RUN=true -> skipping @types install");
-  }
-
-  const tsc2 = await run("npx tsc --noEmit --pretty false");
-  const out2 = (tsc2.stdout || "") + "\n" + (tsc2.stderr || "");
-  const stillMissing = findMissingDeclarationModules(out2);
-
-  const shimmed = [];
-  if (stillMissing.length) {
-    console.log("\n🧷 Still missing declarations after @types install:", stillMissing);
-    console.log("🧷 Creating/Updating src/types/vendor.d.ts");
-
-    const shimFileAbs = path.join(PROJECT_DIR, "src/types/vendor.d.ts");
-
-    if (!DRY_RUN) {
-      ensureDirForFile(shimFileAbs);
-      const existing = readTextIfExists(shimFileAbs) || "";
-      let appended = "";
-
-      for (const mod of stillMissing) {
-        if (existing.includes(`declare module "${mod}"`)) continue;
-        appended += "\n" + createTypeShim(mod);
-        shimmed.push(mod);
-      }
-
-      if (appended.trim().length) {
-        fs.writeFileSync(shimFileAbs, (existing + "\n" + appended).trimStart(), "utf8");
-      }
-    } else {
-      shimmed.push(...stillMissing);
-      console.log("🧪 DRY_RUN=true -> skipping shim file write");
-    }
-  }
-
-  return { didSomething: true, installed: typePkgs, shimmed };
-}
-
-/* ------------------------------------------------ */
-/* ERROR PARSING                                     */
-/* ------------------------------------------------ */
-
-/**
- * Extract file paths from tsc output robustly.
- * Supports formats like:
- * - src/foo.ts(12,5): error TS...
- * - src/foo.ts:12:5 - error TS...
- * - packages/x/src/foo.ts(1,1): error TS...
- */
-function parseTscFiles(output, limit) {
-  const lines = String(output || "").split("\n");
-  const files = new Set();
-
-  // Common path-ish matcher ending with ts/tsx/mts/cts/js/mjs/d.ts
-  const rx = /([a-zA-Z0-9_@./\\-]+?\.(?:d\.ts|ts|tsx|mts|cts|js|mjs))(?=[(:\s])/g;
-
-  for (const line of lines) {
-    let m;
-    while ((m = rx.exec(line))) {
-      const raw = m[1].replaceAll("\\", "/");
-      // Ignore node_modules to avoid noise
-      if (raw.includes("node_modules/")) continue;
-      // Prefer project-relative paths (strip leading ./)
-      const normalized = raw.startsWith("./") ? raw.slice(2) : raw;
-      files.add(normalized);
-    }
-  }
-
-  return [...files].slice(0, limit);
-}
-
-// Expand file list with neighbor files to improve context
-function addNeighborFiles(files) {
-  const set = new Set(files || []);
-  const candidates = [
-    "src/auth/utils.ts",
-    "src/auth/utils.js",
-    "src/auth/jwt-middleware.ts",
-    "src/routes/auth.ts",
-    "src/db/schema.ts",
-    "src/types/fastify.d.ts",
-    "src/types/vendor.d.ts",
-  ];
-  for (const f of candidates) set.add(f);
-  return [...set];
-}
-
-function readFiles(files, { headLines, tailLines, deepMode }) {
-  const result = {};
-
-  for (const file of files) {
-    const abs = path.join(PROJECT_DIR, file);
-    if (!fs.existsSync(abs)) continue;
-
-    const content = fs.readFileSync(abs, "utf8");
-
-    if (deepMode && DEEP_SEND_FULL_FILES) {
-      result[file] = truncate(content, MAX_FULL_FILE_CHARS);
-      continue;
-    }
-
-    const lines = content.split("\n");
-    const head = lines.slice(0, headLines).join("\n");
-    const tail = lines.slice(-tailLines).join("\n");
-
-    result[file] = `${head}\n\n// ... truncated ...\n\n${tail}`;
-  }
-
-  return result;
-}
-
-function filterTscToRelevantLines(output) {
-  const lines = String(output || "").split("\n");
-  const keep = [];
-  for (const line of lines) {
-    if (/error TS\d+:/i.test(line)) keep.push(line);
-    if (/\bTS\d+\b/i.test(line)) keep.push(line);
-  }
-  return keep.join("\n");
-}
-
-function listAllProjectFiles({ max = 5000 } = {}) {
-  const out = [];
-  const root = PROJECT_DIR;
-
-  const walk = (dir) => {
-    let entries = [];
-    try {
-      entries = fs.readdirSync(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-
-    for (const ent of entries) {
-      const abs = path.join(dir, ent.name);
-      const rel = path.relative(root, abs).replaceAll("\\", "/");
-
-      if (rel.startsWith("node_modules/") || rel.startsWith(".git/") || rel.startsWith(".fix_agent/"))
-        continue;
-
-      if (ent.isDirectory()) {
-        walk(abs);
-      } else {
-        out.push(rel);
-        if (out.length >= max) return;
-      }
-    }
-  };
-
-  walk(root);
-  return out;
+    /(^|\n)\s*(\/\/|\/\*)/.test(s) ||
+    /(^|\n)\s*([a-zA-Z0-9_$]+\s*[:=]\s*)/.test(s)
+  );
 }
 
 /**
- * وجود فایل با درنظر گرفتن fallback برای import های .js که منبع .ts دارند
+ * Normalize file path
  */
-function fileExistsWithTsFallback(relPath) {
-  const abs = path.join(PROJECT_DIR, relPath);
-  if (fs.existsSync(abs)) return true;
-
-  if (relPath.endsWith(".js")) {
-    const base = relPath.slice(0, -3);
-    const tsAbs = path.join(PROJECT_DIR, base + ".ts");
-    const noExtAbs = path.join(PROJECT_DIR, base);
-    if (fs.existsSync(tsAbs) || fs.existsSync(noExtAbs)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function missingFilesFromList(files) {
-  const missing = [];
-  for (const f of files || []) {
-    if (!fileExistsWithTsFallback(f)) {
-      missing.push(f);
-    }
-  }
-  return missing;
-}
-
-/* ------------------------------------------------ */
-/* LLM PATCH                                         */
-/* ------------------------------------------------ */
-
-function buildStrategyHints(classification) {
-  const hints = [];
-
-  const all = JSON.stringify(classification || {});
-
-  if (all.includes("autoincrement")) {
-    hints.push(
-      "- Drizzle SQLite: if `autoincrement()` is not available, replace with the correct sqlite-core schema pattern for your drizzle-orm version (often integer primary key without calling autoincrement(), or using `primaryKey({ autoIncrement: true })` depending on version)."
-    );
-  }
-  if (all.includes("request.user")) {
-    hints.push(
-      "- Fastify request.user typing: ensure request decoration exists and add TS module augmentation for FastifyRequest.user (or avoid request.user if you store it elsewhere)."
-    );
-  }
-  if (all.includes("verifyToken")) {
-    hints.push(
-      "- Export mismatch: ensure utils exports `verifyToken` (named export) OR change import to match existing export. Keep ESM import paths consistent (.js vs .ts in TS source)."
-    );
-  }
-  if (all.includes("bcrypt")) {
-    hints.push(
-      "- bcrypt overload errors often come from wrong import style (default vs namespace) or mixing callbacks/promises. Make imports consistent with installed bcrypt + @types."
-    );
-  }
-  if (all.includes("TS2835")) {
-    hints.push(
-      "- TS2835 (ESM import extensions): For NodeNext/Node16 moduleResolution, fix relative imports to use explicit .js extensions at runtime, but ensure the corresponding .ts source exists. If a .js import points to a .ts file, either: (a) create a small JS shim that re-exports from the TS file, or (b) adjust tsconfig/module settings consistently."
-    );
-  }
-  if (all.includes("TS2345")) {
-    hints.push(
-      "- TS2345 on schema defaults: Ensure default values for columns match their declared types. For timestamp/date columns use Date or SQL expressions (e.g., CURRENT_TIMESTAMP) instead of raw numbers. For integer columns, avoid passing Date objects."
-    );
-  }
-  if (all.includes("Property 'name' does not exist")) {
-    hints.push(
-      "- Property 'name' missing on User: either add a `name` column to the user schema (and update types) or stop using `user.name` in services/routes. Keep schema and returned DTOs consistent."
-    );
-  }
-
-  return hints.length ? hints.join("\n") : "- Fix the root causes, not just types.";
-}
-
 function normalizeKeyToAllowed(k, allowedSet) {
   if (allowedSet.has(k)) return k;
 
-  // try swapping .ts <-> .js
+  // Try swapping .ts <-> .js
   if (k.endsWith(".js")) {
     const k2 = k.slice(0, -3) + ".ts";
     if (allowedSet.has(k2)) return k2;
@@ -569,7 +725,7 @@ function normalizeKeyToAllowed(k, allowedSet) {
     if (allowedSet.has(k2)) return k2;
   }
 
-  // try removing leading ./
+  // Try removing leading ./
   if (k.startsWith("./")) {
     const k2 = k.slice(2);
     if (allowedSet.has(k2)) return k2;
@@ -578,472 +734,364 @@ function normalizeKeyToAllowed(k, allowedSet) {
   return null;
 }
 
-async function batchFix(
-  errors,
-  files,
-  projectContext,
-  meta = {},
-  classification = {},
-  attempt = 1,
-  lastRejectReason = ""
-) {
-  console.log("🧠 Sending batch fix request...\n");
+/* ================================================== */
+/* ================ LLM PATCH ======================= */
+/* ================================================== */
 
-  const strategy = buildStrategyHints(classification);
+/**
+ * Request patch from LLM
+ */
+async function requestPatch(errors, files, projectContext, strategy, meta, config) {
+  console.log(`🧠 Requesting patch (attempt ${meta.attempt}/${config.maxRetries + 1})...`);
 
-  const prompt = [
-    "You are a senior TypeScript backend engineer. Fix compilation errors by editing code.",
-    "",
-    "CRITICAL RULES:",
-    "- Return ONLY valid JSON (no markdown, no explanations, no extra keys)",
-    "- Keys MUST be existing file paths from the provided FILES object (subset allowed)",
-    "- Values MUST be FULL file contents (complete replacement)",
-    "- Do NOT append. Replace entire file.",
-    "- Do not change unrelated formatting; keep minimal diffs.",
-    "- Ensure changes are consistent across imports/types/tests.",
-    "",
-    attempt > 1 ? "IMPORTANT: Your previous response was rejected by the validator." : "",
-    attempt > 1 ? `REJECTION REASON: ${lastRejectReason || "(unknown)"}` : "",
-    "",
-    "STRATEGY (IMPORTANT):",
-    strategy,
-    "",
-    "META:",
-    safeJson(meta),
-    "",
-    "PROJECT CONTEXT:",
-    projectContext,
-    "",
-    "TYPESCRIPT ERRORS (filtered):",
-    filterTscToRelevantLines(errors),
-    "",
-    "FILES (may include full files in DEEP mode):",
-    safeJson(files),
-    "",
-    "Output format:",
-    '{ "src/file.ts": "full corrected file content" }',
-  ]
-    .filter(Boolean)
-    .join("\n");
-
-  const resp = await client.chat.completions.create({
-    model: MODEL,
-    temperature: 0,
-    messages: [
-      { role: "system", content: "You fix backend TypeScript projects." },
-      { role: "user", content: prompt },
-    ],
+  const client = new OpenAI({
+    apiKey: config.apiKey,
+    baseURL: config.baseURL,
   });
 
-  const raw0 = resp.choices?.[0]?.message?.content || "";
-  if (DEBUG_LLM) writeDebugFile("last_llm_response.txt", raw0);
+  const prompt = buildFixPrompt(errors, files, projectContext, strategy, meta, config);
 
-  const raw = clean(raw0);
+  // Save prompt for debugging
+  writeDebugFile(config, `loop_${meta.loopIndex}_attempt_${meta.attempt}_prompt.txt`, prompt);
 
+  try {
+    const resp = await client.chat.completions.create({
+      model: config.model,
+      temperature: config.temperature,
+      messages: [
+        {
+          role: "system",
+          content: `You are an expert ${config.projectType} engineer. Fix code errors by providing complete file replacements in JSON format.`,
+        },
+        { role: "user", content: prompt },
+      ],
+    });
+
+    const raw = resp.choices?.[0]?.message?.content || "";
+
+    // Save raw response
+    writeDebugFile(config, `loop_${meta.loopIndex}_attempt_${meta.attempt}_response.txt`, raw);
+
+    return raw;
+  } catch (err) {
+    console.error(`❌ LLM request failed: ${err.message}`);
+    if (config.onError) {
+      config.onError({
+        type: "llm_error",
+        message: err.message,
+        meta,
+      });
+    }
+    return null;
+  }
+}
+
+/**
+ * Parse and validate LLM response
+ */
+function parsePatchResponse(raw, files, meta, config) {
+  if (!raw) {
+    return { patches: null, rejectReason: "Empty LLM response" };
+  }
+
+  const cleaned = clean(raw);
+
+  // Try direct parse
   let parsed = null;
   let parseMode = "direct";
+
   try {
-    parsed = JSON.parse(raw);
+    parsed = JSON.parse(cleaned);
   } catch {
+    // Try extracting JSON
     const extracted = extractJSON(raw);
     if (!extracted) {
-      if (DEBUG_LLM)
-        console.log("⚠️ No JSON found in model response. First 1200 chars:\n", raw0.slice(0, 1200));
-      return { patches: null, rejectReason: "No JSON found in model response (maybe markdown/explanation)." };
+      return {
+        patches: null,
+        rejectReason: "No valid JSON found in response (possibly markdown/explanation)",
+      };
     }
+
     try {
       parsed = JSON.parse(extracted);
       parseMode = "extracted";
     } catch {
-      if (DEBUG_LLM)
-        console.log("⚠️ JSON parsing failed. First 1200 chars:\n", raw0.slice(0, 1200));
-      return { patches: null, rejectReason: "JSON parsing failed even after extraction." };
+      return {
+        patches: null,
+        rejectReason: "JSON parsing failed even after extraction",
+      };
     }
   }
 
+  // Validate structure
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    return { patches: null, rejectReason: "Model JSON is not an object." };
+    return {
+      patches: null,
+      rejectReason: "Response is not a valid object",
+    };
   }
 
+  // Validate and normalize keys
   const allowed = new Set(Object.keys(files || {}));
-  const out = {};
+  const validPatches = {};
 
   for (const [kRaw, v] of Object.entries(parsed)) {
     const k = normalizeKeyToAllowed(String(kRaw), allowed);
     if (!k) continue;
 
+    // Validate content
     const deepMode = Boolean(meta?.deepMode);
-    const ok = deepMode ? isProbablyFullFile(v) || isCodeLike(v) : isProbablyFullFile(v);
-    if (!ok) continue;
+    const isValid = deepMode ? (isProbablyFullFile(v) || isCodeLike(v)) : isProbablyFullFile(v);
 
-    out[k] = v;
+    if (!isValid) continue;
+
+    validPatches[k] = v;
   }
 
-  if (!Object.keys(out).length) {
-    const reason = `No valid file patches after validation. parseMode=${parseMode}. AllowedKeys=${
-      allowed.size
-    }. DeepMode=${Boolean(meta?.deepMode)}. Validator=${
-      Boolean(meta?.deepMode) ? "full||codelike" : "fullOnly"
-    }.`;
-    if (DEBUG_LLM) {
-      console.log("⚠️ " + reason);
-      console.log("First 1200 chars of raw model output:\n", raw0.slice(0, 1200));
-    }
-    return { patches: null, rejectReason: reason };
+  if (Object.keys(validPatches).length === 0) {
+    return {
+      patches: null,
+      rejectReason: `No valid patches after validation. ParseMode=${parseMode}, AllowedKeys=${allowed.size}, DeepMode=${Boolean(
+        meta?.deepMode
+      )}`,
+    };
   }
 
-  return { patches: out, rejectReason: "" };
+  return { patches: validPatches, rejectReason: "" };
 }
 
-/* ------------------------------------------------ */
-/* WRITE FILES                                       */
-/* ------------------------------------------------ */
+/**
+ * Request patch with retry logic
+ */
+async function getPatchWithRetry(errors, files, projectContext, strategy, meta, config) {
+  let lastRejectReason = "";
 
-function writeFiles(patches) {
-  if (!patches || typeof patches !== "object") {
-    console.log("⚠️ No valid patches returned.");
-    return { wrote: 0, changed: 0, patchHash: sha256("") };
-  }
-
-  let wrote = 0;
-  let changed = 0;
-
-  // Stable hash of patch intent (keys + file hashes) to detect “same patch again”
-  const patchMeta = [];
-
-  for (const file of Object.keys(patches).sort()) {
-    const newContent = patches[file];
-    if (!newContent) continue;
-
-    const abs = path.join(PROJECT_DIR, file);
-    ensureDirForFile(abs);
-
-    const oldContent = readTextIfExists(abs) ?? "";
-    const oldHash = sha256(oldContent);
-    const newHash = sha256(newContent);
-
-    patchMeta.push({ file, oldHash, newHash, len: String(newContent).length });
-
-    if (oldHash === newHash) {
-      console.log(`↩️ unchanged (skip write): ${file}`);
-      continue;
-    }
-
-    changed++;
-
-    if (DRY_RUN) {
-      console.log(`🧪 DRY_RUN would write: ${file} (len=${String(newContent).length})`);
-      continue;
-    }
-
-    fs.writeFileSync(abs, newContent, "utf8");
-    console.log("✅ fixed", file);
-    wrote++;
-  }
-
-  const patchHash = sha256(JSON.stringify(patchMeta));
-  return { wrote, changed, patchHash };
-}
-
-/* ------------------------------------------------ */
-/* DIAGNOSTICS / EXIT HANDLING                       */
-/* ------------------------------------------------ */
-
-async function enterDiagnosticMode({
-  reason,
-  loopIndex,
-  tscOutputRaw,
-  tscFiltered,
-  fileList,
-  missingFiles,
-  lastPatchHash,
-}) {
-  const stamp = nowStamp();
-  const header = [
-    `reason=${reason}`,
-    `loopIndex=${loopIndex}`,
-    `projectDir=${PROJECT_DIR}`,
-    `model=${MODEL}`,
-    `dryRun=${DRY_RUN}`,
-    `lastPatchHash=${lastPatchHash || ""}`,
-    "",
-  ].join("\n");
-
-  console.log("\n🧯 Entering DIAGNOSTIC MODE");
-  console.log(header);
-
-  if (!DEBUG_DIAG) {
-    console.log("ℹ️ DEBUG_DIAG=false, not writing diagnostic files.");
-    console.log("🛑 Stopping (needs human/context).");
-    return;
-  }
-
-  writeDiagFile(`${stamp}/_header.txt`, header);
-  writeDiagFile(`${stamp}/tsc_raw.txt`, tscOutputRaw || "");
-  writeDiagFile(`${stamp}/tsc_filtered.txt`, tscFiltered || "");
-  writeDiagFile(`${stamp}/missing_files_from_tsc.txt`, (missingFiles || []).join("\n"));
-  writeDiagFile(`${stamp}/tsc_files.txt`, (fileList || []).join("\n"));
-
-  // Environment + dependency snapshot
-  const versions = await run('node -p "process.versions"');
-  writeDiagFile(`${stamp}/node_versions.txt`, (versions.stdout || "") + "\n" + (versions.stderr || ""));
-
-  const pm = detectPkgManager();
-  const listCmd =
-    pm === "pnpm"
-      ? "pnpm ls --depth=0"
-      : pm === "yarn"
-      ? "yarn list --depth=0"
-      : "npm ls --depth=0";
-  const deps = await run(listCmd);
-  writeDiagFile(`${stamp}/deps_tree.txt`, (deps.stdout || "") + "\n" + (deps.stderr || ""));
-
-  // tsconfig snapshot
-  const tsconfigAbs = path.join(PROJECT_DIR, "tsconfig.json");
-  const tsconfig = readTextIfExists(tsconfigAbs);
-  if (tsconfig) writeDiagFile(`${stamp}/tsconfig.json`, tsconfig);
-
-  // Project file listing (limited)
-  const listing = listAllProjectFiles({ max: 8000 });
-  writeDiagFile(`${stamp}/project_file_list.txt`, listing.join("\n"));
-
-  console.log(
-    `\n📦 Diagnostic bundle written to: ${path.join(
-      PROJECT_DIR,
-      ".fix_agent",
-      "diagnostics",
-      stamp
-    )}`
-  );
-  console.log("\n🛑 Stopping to avoid infinite loop. Next steps:");
-  if ((missingFiles || []).length) {
-    console.log(
-      "- tsc references files that do not exist on disk. Check wrong tsconfig, build output paths, or running tsc in wrong directory."
-    );
-    console.log("- Fix the path issue first; then rerun fix_agent.");
-  } else {
-    console.log(
-      "- Attach/share the diagnostic bundle folder or paste tsc_raw + the referenced source files so we can fix deterministically."
-    );
-  }
-}
-
-/* ------------------------------------------------ */
-/* MAIN                                              */
-/* ------------------------------------------------ */
-
-async function main() {
-  console.log("⚙️ Repo‑Aware Fix Agent Starting\n");
-  console.log(`📁 PROJECT_DIR: ${PROJECT_DIR}`);
-  console.log(`🧪 DRY_RUN: ${DRY_RUN ? "true" : "false"}`);
-  console.log(`🧠 MODEL: ${MODEL}`);
-  console.log(`🧠 DEBUG_LLM: ${DEBUG_LLM ? "true" : "false"}`);
-  console.log(`🧠 DEBUG_DIAG: ${DEBUG_DIAG ? "true" : "false"}`);
-  console.log(`🧠 DEEP_SEND_FULL_FILES: ${DEEP_SEND_FULL_FILES ? "true" : "false"}`);
-
-  guardDependencies(PROJECT_DIR);
-
-  await run(installCommand([], { dev: false }));
-
-  let lastTscHash = "";
-  let sameErrorCount = 0;
-
-  let lastPatchHash = "";
-  let samePatchCount = 0;
-
-  let noWriteStreak = 0;
-
-  for (let i = 0; i < MAX_LOOPS; i++) {
-    const loopIndex = i + 1;
-
-    console.log(`\n🔍 TypeScript check (loop ${loopIndex}/${MAX_LOOPS})`);
-
-    const tsc = await run("npx tsc --noEmit --pretty false");
-    if (tsc.ok) {
-      console.log("\n✅ Project compiles successfully");
-      return;
-    }
-
-    const tscOutputRawFull = (tsc.stdout || "") + "\n" + (tsc.stderr || "");
-    let output = truncate(tscOutputRawFull, MAX_ERROR_CHARS);
-
-    const classification = classifyErrors(output);
-
-    const filtered = filterTscToRelevantLines(output);
-    const thisHash = sha256(filtered);
-
-    if (thisHash === lastTscHash) {
-      sameErrorCount++;
-      console.log(
-        `\n⚠️ Same tsc (filtered) hash again (${thisHash.slice(0, 10)}...), count=${sameErrorCount}`
-      );
-    } else {
-      sameErrorCount = 0;
-    }
-    lastTscHash = thisHash;
-
-    // Escalate only after true repetition
-    const deepMode = sameErrorCount >= 1;
-    console.log(`\n🧠 Mode: ${deepMode ? "DEEP" : "NORMAL"}`);
-
-    console.log("\n📊 Error classification:");
-    console.log(JSON.stringify(classification, null, 2));
-
-    // Dependency/type self-healing
-    const didInstallModules = await installMissingModules(output);
-    const typesRes = await installMissingTypes(output);
-
-    if (didInstallModules || typesRes.didSomething) {
-      console.log("\n🔁 Re-checking tsc after installs...");
-      const tscAfter = await run("npx tsc --noEmit --pretty false");
-      if (tscAfter.ok) {
-        console.log("\n✅ Project compiles successfully (after dependency/type fixes)");
-        return;
-      }
-      const afterRaw = (tscAfter.stdout || "") + "\n" + (tscAfter.stderr || "");
-      output = truncate(afterRaw, MAX_ERROR_CHARS);
-    }
-
-    let projectContext = buildProjectContext(PROJECT_DIR);
-    projectContext = truncate(projectContext, MAX_CONTEXT_CHARS);
-
-    await generateMissingFiles(PROJECT_DIR, output, projectContext);
-
-    // Determine target files from tsc output
-    const fileLimit = deepMode ? MAX_FILES_DEEP : MAX_FILES;
-    let files = parseTscFiles(output, fileLimit);
-
-    files = deepMode ? addNeighborFiles(files).slice(0, MAX_FILES_DEEP) : files;
-
-    // Hard guard: if tsc points to files that do not exist, stop + diagnostics
-    const missing = missingFilesFromList(files);
-    if (missing.length) {
-      await enterDiagnosticMode({
-        reason: "TSC_REFERENCES_MISSING_FILES",
-        loopIndex,
-        tscOutputRaw: tscOutputRawFull,
-        tscFiltered: filterTscToRelevantLines(tscOutputRawFull),
-        fileList: files,
-        missingFiles: missing,
-        lastPatchHash,
-      });
-      return;
-    }
-
-    if (!files.length) {
-      await enterDiagnosticMode({
-        reason: "NO_FILES_DETECTED_FROM_TSC",
-        loopIndex,
-        tscOutputRaw: tscOutputRawFull,
-        tscFiltered: filterTscToRelevantLines(tscOutputRawFull),
-        fileList: [],
-        missingFiles: [],
-        lastPatchHash,
-      });
-      return;
-    }
-
-    console.log("\n📂 Files with errors:", files);
-
-    const contents = readFiles(files, {
-      headLines: deepMode ? FILE_HEAD_LINES_DEEP : FILE_HEAD_LINES,
-      tailLines: deepMode ? FILE_TAIL_LINES_DEEP : FILE_TAIL_LINES,
-      deepMode,
-    });
-
-    // 1) Ask LLM for patch
-    let { patches, rejectReason } = await batchFix(
-      output,
-      contents,
+  for (let attempt = 1; attempt <= config.maxRetries + 1; attempt++) {
+    const raw = await requestPatch(
+      errors,
+      files,
       projectContext,
-      { loopIndex, maxLoops: MAX_LOOPS, deepMode, tscHash: thisHash, sameErrorCount },
-      classification,
-      1,
-      ""
+      strategy,
+      { ...meta, attempt, lastRejectReason },
+      config
     );
 
-    // Retry once if invalid
-    if (!patches) {
-      console.log("⚠️ Skipping write due to invalid model response.");
-      console.log("🔁 Retrying once with stricter instructions...");
-      const retry = await batchFix(
-        output,
-        contents,
-        projectContext,
-        { loopIndex, maxLoops: MAX_LOOPS, deepMode, tscHash: thisHash, sameErrorCount },
-        classification,
-        2,
-        rejectReason
-      );
-      patches = retry.patches;
-      rejectReason = retry.rejectReason;
-    }
-
-    if (!patches) {
-      console.log("⚠️ Still no valid patches after retry.");
-
-      // If repeatedly stuck with invalid patches, stop with diagnostics
-      if (sameErrorCount >= 2) {
-        await enterDiagnosticMode({
-          reason: "REPEATED_INVALID_PATCHES",
-          loopIndex,
-          tscOutputRaw: tscOutputRawFull,
-          tscFiltered: filterTscToRelevantLines(tscOutputRawFull),
-          fileList: files,
-          missingFiles: [],
-          lastPatchHash,
-        });
-        return;
-      }
-
+    if (!raw) {
+      lastRejectReason = "LLM request failed";
       continue;
     }
 
-    // 2) Apply patches
-    const { wrote, changed, patchHash } = writeFiles(patches);
+    const { patches, rejectReason } = parsePatchResponse(raw, files, meta, config);
 
-    if (changed === 0) {
-      noWriteStreak++;
-      console.log(`\n⚠️ No actual changes written this loop. noWriteStreak=${noWriteStreak}`);
-    } else {
-      noWriteStreak = 0;
+    if (patches) {
+      console.log(`✅ Valid patches received (${Object.keys(patches).length} files)`);
+      return { patches, rejectReason: "" };
     }
 
-    if (patchHash && lastPatchHash && patchHash === lastPatchHash) {
-      samePatchCount++;
-      console.log(
-        `\n⚠️ Patch hash unchanged across loops (${patchHash.slice(
-          0,
-          10
-        )}...), count=${samePatchCount}`
-      );
-    } else {
-      samePatchCount = 0;
-    }
-    // بعد از مقایسه، مقدار جدید را ذخیره می‌کنیم
-    lastPatchHash = patchHash;
-
-    // Emergency exit: stuck patch loop
-    if (samePatchCount >= 2 || noWriteStreak >= 3) {
-      await enterDiagnosticMode({
-        reason: "PATCH_LOOP_STUCK",
-        loopIndex,
-        tscOutputRaw: tscOutputRawFull,
-        tscFiltered: filterTscToRelevantLines(tscOutputRawFull),
-        fileList: files,
-        missingFiles: [],
-        lastPatchHash,
-      });
-      return;
-    }
+    console.log(`⚠️ Invalid response (attempt ${attempt}/${config.maxRetries + 1}): ${rejectReason}`);
+    lastRejectReason = rejectReason;
   }
 
-  // If we reached here, max loops hit without success
-  console.log("\n⏹️ Max loops reached — errors may remain.");
+  return { patches: null, rejectReason: lastRejectReason };
 }
 
-// top-level runner with error logging
-main().catch((err) => {
-  console.error("💥 Unhandled error in fix_agent:", err);
-  process.exitCode = 1;
-});
+/* ================================================== */
+/* ============== WRITE PATCHES ==================== */
+/* ================================================== */
+
+/**
+ * Write patches to disk
+ */
+function writePatches(patches, workspace, config) {
+  if (!patches || typeof patches !== "object") return [];
+
+const written = [];
+
+for (const [rel, content] of Object.entries(patches)) {
+
+const abs = path.join(workspace, rel);
+
+// Safety check
+
+if (!fs.existsSync(path.dirname(abs))) {
+
+ensureDir(path.dirname(abs));
+
+}
+
+// Hash check
+
+const currentHash = fs.existsSync(abs) ? sha256(fs.readFileSync(abs,"utf8")) : "";
+
+const newHash = sha256(content);
+
+if (currentHash === newHash) {
+
+console.log("ℹ️ Skipping (no change): ${rel}");
+
+continue;
+
+}
+
+fs.writeFileSync(abs, content, "utf8");
+
+written.push(rel);
+
+console.log("💾 Applied patch to: ${rel}");
+
+}
+
+return written;
+
+}
+
+/* ================================================== */
+
+/* =================== ENTRY POINT ================== */
+
+/* ================================================== */
+
+export async function runFixAgent(options = {}) {
+
+const config = { ...DEFAULT_CONFIG, ...options };
+
+const workspace = path.resolve(config.workspace);
+
+console.log("🚀 Starting fix_agent in: ${workspace}");
+
+const context = buildProjectContext(workspace, config);
+
+let loopIndex = 0;
+
+let diagnosticMode = false;
+
+let history = []; // To prevent loops
+
+while (loopIndex < config.maxLoops) {
+
+loopIndex++;
+
+console.log(`\n--- LOOP ${loopIndex}/${config.maxLoops} ---`);
+
+// 1. Run build/test
+
+const result = await run("npm run build", workspace); 
+
+if (result.ok) {
+
+console.log("✅ Build/Test passed!");
+
+if (config.onSuccess) config.onSuccess();
+
+return { success: true };
+
+}
+
+console.log("❌ Build failed, analyzing errors...");
+
+// 2. Classify errors
+
+const classification = classifyErrors(result.stderr || result.stdout);
+
+const strategy = buildStrategyHints(classification);
+
+// 3. Smart file selection
+
+const rawFiles = parseErrorFiles(result.stderr || result.stdout, config.maxFiles);
+
+const allFiles = diagnosticMode ? addNeighborFiles(rawFiles, workspace, config) : rawFiles;
+
+// Limit file count again
+
+const finalFiles = allFiles.slice(0, diagnosticMode ? config.maxFilesDeep : config.maxFiles);
+
+// 4. Check for missing files
+
+const missing = findMissingFiles(finalFiles, workspace);
+
+if (missing.length > 0 && config.autoGenerateMissing) {
+
+// Simple logic for auto-creating
+
+  for (const m of missing) {
+    console.log(`⚠️ Missing file detected: ${m}. Creating stub...`);
+    ensureDirForFile(path.join(workspace, m));
+    fs.writeFileSync(path.join(workspace, m), "// Auto-generated by fix_agent\nexport {};", "utf8");
+  }
+}
+
+}
+
+// 5. Build context
+
+const fileContents = readFiles(finalFiles, workspace, config, diagnosticMode);
+
+// 6. Loop protection (using hash of file states)
+
+const stateHash = sha256(JSON.stringify(fileContents));
+
+if (history.includes(stateHash)) {
+
+console.log("⚠️ Stuck in a loop. Entering Diagnostic Mode.");
+
+diagnosticMode = true;
+
+}
+
+history.push(stateHash);
+
+// 7. Request patch
+
+const { patches, rejectReason } = await getPatchWithRetry(
+
+result.stderr || result.stdout,
+
+fileContents,
+
+context,
+
+strategy,
+
+{ loopIndex, diagnosticMode },
+
+config
+
+);
+
+if (!patches) {
+
+console.log(`🚫 Could not get valid patch: ${rejectReason}`);
+
+if (diagnosticMode) {
+
+console.log("🚨 Diagnostic mode failed. Manual intervention required.");
+
+writeDiagFile(config, `error_state_${nowStamp()}.json`, JSON.stringify({
+  output: result.stderr,
+  context,
+  finalFiles,
+  strategy
+}, null, 2));
+
+
+return { success: false, reason: "Diagnostic failure" };
+
+}
+
+diagnosticMode = true;
+return;
+
+}
+
+// 8. Write patches
+
+const updated = writePatches(patches, workspace, config);
+
+if (updated.length === 0) {
+  console.log("ℹ️ No meaningful changes made.");
+  diagnosticMode = true;
+}
+// حذف این } اضافی که اینجا بوده
+
+return { success: false, reason: "Max loops reached" };
+}

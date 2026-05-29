@@ -1,0 +1,32 @@
+{
+  "task_type": "task",
+  "name": "Fix Next.js client/server component error with framer-motion in LoginPage",
+  "task_scope": "frontend",
+  "goal": "Resolve the runtime error caused by using framer-motion's motion.div in a Next.js server component by ensuring the LoginPage is a client component.",
+  "summary": "The error occurs because framer-motion (and its createMotionComponent) can only run on the client, but LoginPage is currently a server component. The fix is to mark LoginPage as a client component by adding 'use client' at the top of the file.",
+  "context_assumptions": [
+    "Next.js app directory is used.",
+    "framer-motion is only compatible with client components.",
+    "No other server-only logic is present in LoginPage."
+  ],
+  "files_to_create": [],
+  "files_to_modify": [
+    {
+      "path": "chatbot/my-chatbot-ui/app/login/page.tsx",
+      "purpose": "Mark LoginPage as a client component so framer-motion can be used without runtime errors.",
+      "content": "'use client';\n\nimport LoginForm from '../components/LoginForm';\nimport { motion } from 'framer-motion';\nimport { Sparkles } from 'lucide-react';\n\nexport default function LoginPage() {\n  return (\n    <div className=\"min-h-screen flex items-center justify-center bg-[#161616] font-sans\">\n      <motion.div\n        initial={{ opacity: 0, y: 32 }}\n        animate={{ opacity: 1, y: 0 }}\n        transition={{ duration: 0.5, ease: 'easeOut' }}\n        className=\"w-full max-w-md px-8 py-10 rounded-3xl shadow-2xl border border-[#ff8a3d]/20 bg-gradient-to-br from-[#ff8a3d]/10 via-[#ff5e4d]/8 to-[#ff2d2d]/6 backdrop-blur-md flex flex-col items-center\"\n      >\n        <div className=\"flex flex-col items-center mb-7\">\n          <div className=\"flex h-14 w-14 items-center justify-center rounded-2xl border border-[#ff8a3d]/18 bg-white/[0.04] mb-2 shadow-[0_2px_8px_rgba(255,138,61,0.08)]\">\n            <Sparkles className=\"h-7 w-7 text-[#ff8a3d]\" />\n          </div>\n          <h1 className=\"text-2xl font-semibold text-white tracking-tight\">Welcome back</h1>\n          <p className=\"text-sm text-white/38 mt-1\">Sign in to your AI Assistant</p>\n        </div>\n        <div className=\"w-full\">\n          <LoginForm />\n        </div>\n      </motion.div>\n    </div>\n  );\n}\n"
+    }
+  ],
+  "dependencies": [],
+  "constraints": [
+    "Do not remove or refactor existing logic.",
+    "Only add 'use client' directive as needed.",
+    "Do not change the structure of the component."
+  ],
+  "acceptance_criteria": [
+    "No runtime error about createMotionComponent being called from the server.",
+    "LoginPage renders with framer-motion animations as before.",
+    "No other functionality is broken."
+  ],
+  "notes": "This is a standard Next.js app directory issue when using client-only libraries like framer-motion. The fix is minimal and safe."
+}

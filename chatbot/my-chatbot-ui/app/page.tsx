@@ -1,25 +1,39 @@
 "use client";
 
-import React, { useRef, useState, useEffect } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
 import { v4 as uuidv4 } from "uuid";
 import {
   Search,
-  Layers,
-  CheckCircle,
+  Plus,
+  MessageSquare,
   Sparkles,
   Send,
   Loader2,
   Paperclip,
   Mic,
   StopCircle,
-  Moon,
-  Sun,
   Copy,
   Check,
-  ChevronDown,
-  ChevronUp,
-  FileJson,
+  ChevronLeft,
+  ChevronRight,
+  Bot,
+  User,
+  MoreHorizontal,
+  Layers,
+  CheckCircle,
+  Trash2,
 } from "lucide-react";
+
+import {
+  fetchSessions,
+  fetchSessionMessages,
+  deleteSession,
+  sendMessage,
+  type Session,
+  type Message as ApiMessage,
+} from "./lib/api";
+import { useRouter, useSearchParams } from "next/navigation";
 
 type Role = "user" | "assistant";
 
@@ -46,42 +60,105 @@ interface Message {
   };
 }
 
+interface Conversation {
+  id: string;
+  title: string;
+  preview: string;
+  updatedAt: string;
+  unread?: number;
+}
+
+interface PipelineStage {
+  key: string;
+  label: string;
+  description: string;
+  icon: React.ComponentType<{ className?: string }>;
+}
+
 const nowIso = () => new Date().toISOString();
 
-const PIPELINE_STAGES = [
+const makeTitle = (text: string) => {
+  const clean = text.replace(/\s+/g, " ").trim();
+  return clean.length > 34 ? `${clean.slice(0, 34)}…` : clean;
+};
+
+const AGENT_STAGES: PipelineStage[] = [
   {
-    key: "analyzing",
-    label: "Analyzing",
+    key: "intake",
+    label: "Intake",
+    description: "Reading the request",
     icon: Search,
-    activeColor: "text-blue-500",
-    activeBg: "bg-blue-500/10",
-    activeBorder: "border-blue-500/30",
   },
   {
-    key: "planning",
-    label: "Planning",
+    key: "context",
+    label: "Context",
+    description: "Scanning files and structure",
     icon: Layers,
-    activeColor: "text-purple-500",
-    activeBg: "bg-purple-500/10",
-    activeBorder: "border-purple-500/30",
   },
   {
-    key: "validating",
-    label: "Validating",
+    key: "plan",
+    label: "Plan",
+    description: "Designing the task flow",
+    icon: Sparkles,
+  },
+  {
+    key: "validate",
+    label: "Validate",
+    description: "Checking quality and constraints",
     icon: CheckCircle,
-    activeColor: "text-orange-500",
-    activeBg: "bg-orange-500/10",
-    activeBorder: "border-orange-500/30",
   },
   {
     key: "complete",
     label: "Complete",
-    icon: Sparkles,
-    activeColor: "text-green-500",
-    activeBg: "bg-green-500/10",
-    activeBorder: "border-green-500/30",
+    description: "Ready for review",
+    icon: Bot,
   },
 ];
+
+function toUiMessage(message: ApiMessage): Message {
+  return {
+    id: message.id != null ? String(message.id) : crypto.randomUUID(),
+    role: message.role,
+    content: message.content,
+    createdAt: message.created_at,
+    metadata: {
+      intent: message.intent ?? undefined,
+    },
+  };
+}
+
+
+function formatUpdatedAt(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Now";
+
+  const diffMs = Date.now() - date.getTime();
+  const diffMin = Math.max(0, Math.floor(diffMs / 60000));
+  const diffHour = Math.floor(diffMin / 60);
+  const diffDay = Math.floor(diffHour / 24);
+
+  if (diffMin < 1) return "Now";
+  if (diffMin < 60) return `${diffMin}m`;
+  if (diffHour < 24) return `${diffHour}h`;
+  if (diffDay === 1) return "Yesterday";
+  if (diffDay < 7) return `${diffDay}d`;
+
+  return date.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+  });
+}
+
+function getPreviewFromMessages(messages: Message[], fallback: string) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const content = messages[i]?.content?.trim();
+    if (content) {
+      return content.length > 54 ? `${content.slice(0, 54)}…` : content;
+    }
+  }
+
+  return fallback;
+}
 
 function parseAssistantContent(content: string) {
   const sections: Array<{ type: string; content: string; language?: string }> = [];
@@ -92,9 +169,9 @@ function parseAssistantContent(content: string) {
 
   lines.forEach((line) => {
     if (line.trim().startsWith("```")) {
-if (!inCodeBlock) {
-if (currentSection) sections.push(currentSection);
-codeLanguage = line.trim().replace(/```/g, "").trim();
+      if (!inCodeBlock) {
+        if (currentSection) sections.push(currentSection);
+        codeLanguage = line.trim().replace(/```/g, "").trim();
         currentSection = { type: "code", content: "", language: codeLanguage };
         inCodeBlock = true;
       } else {
@@ -175,22 +252,19 @@ function AssistantMessage({ content }: { content: string }) {
         if (section.type === "bullet") {
           const items = section.content.split("\n").filter((l) => l.trim());
           return (
-            <ul key={idx} className="space-y-2 ml-1">
+            <ul key={idx} className="space-y-2">
               {items.map((item, i) => {
                 let cleanText = item.trim();
                 cleanText = cleanText.replace(/^[•\-*✓✗→◦▪▫■□●○◆◇★☆]+\s*/g, "");
                 cleanText = cleanText.replace(/^\*+\s*/g, "");
-                cleanText = cleanText.replace(/^[\s]*\*+[\s]*/g, "");
                 cleanText = cleanText.replace(/^\*\*([^*]+)\*\*/, "$1");
                 cleanText = cleanText.trim();
                 if (!cleanText) return null;
 
                 return (
                   <li key={i} className="flex items-start gap-2.5">
-                    <span className="text-gray-400 dark:text-gray-500 mt-1 text-sm flex-shrink-0">•</span>
-                    <span className="flex-1 text-[15px] leading-relaxed text-gray-800 dark:text-gray-200">
-                      {cleanText}
-                    </span>
+                    <span className="mt-1 text-white/30">•</span>
+                    <span className="flex-1 text-[15px] leading-7 text-white/84">{cleanText}</span>
                   </li>
                 );
               })}
@@ -201,7 +275,7 @@ function AssistantMessage({ content }: { content: string }) {
         if (section.type === "numbered") {
           const items = section.content.split("\n").filter((l) => l.trim());
           return (
-            <ol key={idx} className="space-y-2 ml-1">
+            <ol key={idx} className="space-y-2">
               {items.map((item, i) => {
                 let cleanText = item.trim();
                 cleanText = cleanText.replace(/^[\s]*\d+\.[\s]*/, "");
@@ -211,12 +285,8 @@ function AssistantMessage({ content }: { content: string }) {
 
                 return (
                   <li key={i} className="flex items-start gap-2.5">
-                    <span className="text-gray-600 dark:text-gray-400 font-medium min-w-[24px] mt-0.5 text-sm flex-shrink-0">
-                      {i + 1}.
-                    </span>
-                    <span className="flex-1 text-[15px] leading-relaxed text-gray-800 dark:text-gray-200">
-                      {cleanText}
-                    </span>
+                    <span className="min-w-[24px] text-sm font-medium text-white/42">{i + 1}.</span>
+                    <span className="flex-1 text-[15px] leading-7 text-white/84">{cleanText}</span>
                   </li>
                 );
               })}
@@ -228,10 +298,16 @@ function AssistantMessage({ content }: { content: string }) {
           return (
             <div
               key={idx}
-              className="rounded-lg bg-black dark:bg-gray-950 p-3 overflow-x-auto border border-gray-800 dark:border-gray-700"
+              className="overflow-x-auto rounded-2xl border border-white/10 bg-[#0f0f0f] p-4 shadow-inner"
             >
-              {section.language && <div className="text-xs text-gray-400 mb-2 font-mono">{section.language}</div>}
-              <pre className="text-sm text-gray-100 font-mono leading-relaxed">{section.content}</pre>
+              {section.language && (
+                <div className="mb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-white/35">
+                  {section.language}
+                </div>
+              )}
+              <pre className="whitespace-pre-wrap break-words font-mono text-[13px] leading-6 text-white/88">
+                {section.content}
+              </pre>
             </div>
           );
         }
@@ -243,7 +319,7 @@ function AssistantMessage({ content }: { content: string }) {
           return (
             <h3
               key={idx}
-              className={`${sizes[level - 1] || "text-base"} font-semibold text-gray-900 dark:text-gray-100 mt-3 mb-1.5`}
+              className={`${sizes[level - 1] || "text-base"} mb-1.5 mt-3 font-semibold text-white`}
             >
               {text}
             </h3>
@@ -254,18 +330,16 @@ function AssistantMessage({ content }: { content: string }) {
           return (
             <div
               key={idx}
-              className="h-px bg-gradient-to-r from-transparent via-gray-200 dark:via-gray-700 to-transparent my-3"
+              className="my-4 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent"
             />
           );
         }
 
         if (section.content.trim()) {
           return (
-            <div key={idx}>
-              <p className="text-[15px] leading-relaxed text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
-                {section.content}
-              </p>
-            </div>
+            <p key={idx} className="whitespace-pre-wrap text-[15px] leading-7 text-white/84">
+              {section.content}
+            </p>
           );
         }
 
@@ -275,28 +349,207 @@ function AssistantMessage({ content }: { content: string }) {
   );
 }
 
+function TypingIndicator() {
+  return (
+    <div className="flex items-center gap-1.5 py-1">
+      <span className="h-2 w-2 animate-bounce rounded-full bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d] [animation-delay:-0.2s]" />
+      <span className="h-2 w-2 animate-bounce rounded-full bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d] [animation-delay:-0.1s]" />
+      <span className="h-2 w-2 animate-bounce rounded-full bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d]" />
+    </div>
+  );
+}
+
+function EmptyStateCard({
+  title,
+  desc,
+  onClick,
+}: {
+  title: string;
+  desc: string;
+  onClick: () => void;
+}) {
+  return (
+    <motion.button
+      whileHover={{ y: -2, scale: 1.01 }}
+      whileTap={{ scale: 0.99 }}
+      onClick={onClick}
+      className="group rounded-3xl border border-white/8 bg-white/[0.03] p-4 text-left transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-white/[0.045]"
+    >
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/8 bg-gradient-to-br from-[#ff8a3d]/18 to-[#ff5e4d]/12 text-white/88">
+          <Sparkles className="h-4 w-4" />
+        </div>
+        <div className="min-w-0">
+          <p className="text-sm font-medium text-white">{title}</p>
+          <p className="mt-1 text-xs leading-5 text-white/40">{desc}</p>
+        </div>
+      </div>
+    </motion.button>
+  );
+}
+
+function AgentPipelinePanel({
+  task,
+  stageIndex,
+  progress,
+  stages,
+}: {
+  task: string;
+  stageIndex: number;
+  progress: number;
+  stages: PipelineStage[];
+}) {
+  const currentStage = stages[Math.min(stageIndex, stages.length - 1)];
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: -10, scale: 0.985 }}
+      animate={{ opacity: 1, y: 0, scale: 1 }}
+      exit={{ opacity: 0, y: -10, scale: 0.985 }}
+      transition={{ duration: 0.35, ease: "easeOut" }}
+      className="mx-auto w-full max-w-4xl px-4 pt-4 md:px-8"
+    >
+      <div className="relative overflow-hidden rounded-[30px] border border-white/8 bg-white/[0.035] p-4 shadow-[0_18px_60px_rgba(0,0,0,0.24)]">
+        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,94,77,0.14),transparent_40%),radial-gradient(circle_at_left,rgba(255,138,61,0.12),transparent_34%)]" />
+        <div className="relative">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-[10px] uppercase tracking-[0.35em] text-white/30">
+                Running agent
+              </div>
+              <div className="mt-1 text-sm text-white/88">
+                {task || "Processing request"}
+              </div>
+              <div className="mt-1 text-xs text-white/38">
+                Current stage: {currentStage?.label} — {currentStage?.description}
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2 rounded-full border border-white/8 bg-white/[0.03] px-3 py-1.5">
+              <motion.span
+                animate={{ scale: [1, 1.15, 1] }}
+                transition={{ repeat: Infinity, duration: 1.35, ease: "easeInOut" }}
+                className="h-2.5 w-2.5 rounded-full bg-gradient-to-br from-[#ff8a3d] via-[#ff5e4d] to-[#ff2d2d]"
+              />
+              <span className="text-xs text-white/50">{Math.round(progress)}%</span>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-2 sm:grid-cols-5">
+            {stages.map((stage, idx) => {
+              const Icon = stage.icon;
+              const isActive = idx === stageIndex;
+              const isDone = idx < stageIndex;
+
+              return (
+                <motion.div
+                  key={stage.key}
+                  layout
+                  transition={{ type: "spring", stiffness: 280, damping: 24 }}
+                  className={`relative overflow-hidden rounded-2xl border px-3 py-3 transition-all duration-300 ${
+                    isActive
+                      ? "border-[#ff8a3d]/25 bg-white/[0.06] shadow-[0_0_0_1px_rgba(255,138,61,0.12),0_0_32px_rgba(255,94,77,0.10)]"
+                      : isDone
+                      ? "border-white/10 bg-white/[0.04]"
+                      : "border-white/6 bg-white/[0.025]"
+                  }`}
+                >
+                  {isActive && (
+                    <motion.div
+                      aria-hidden
+                      className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,138,61,0.14),transparent_55%)]"
+                      animate={{ opacity: [0.6, 1, 0.6] }}
+                      transition={{ repeat: Infinity, duration: 1.8 }}
+                    />
+                  )}
+
+                  <div className="relative flex items-start gap-3">
+                    <div
+                      className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-all duration-300 ${
+                        isActive
+                          ? "border-[#ff8a3d]/30 bg-gradient-to-br from-[#ff8a3d]/18 to-[#ff5e4d]/12 text-white"
+                          : isDone
+                          ? "border-white/10 bg-white/[0.05] text-white"
+                          : "border-white/8 bg-white/[0.025] text-white/55"
+                      }`}
+                    >
+                      <Icon className={`h-4 w-4 ${isActive ? "text-[#ffb38a]" : ""}`} />
+                    </div>
+
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium text-white">{stage.label}</p>
+                      <p className="mt-1 text-[11px] leading-5 text-white/38">
+                        {stage.description}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="relative mt-3 h-1 overflow-hidden rounded-full bg-white/[0.06]">
+                    <motion.div
+                      className="h-full rounded-full bg-gradient-to-r from-[#ff8a3d] via-[#ff5e4d] to-[#ff2d2d]"
+                      initial={false}
+                      animate={{
+                        width: isDone ? "100%" : isActive ? "72%" : "0%",
+                      }}
+                      transition={{ type: "spring", stiffness: 150, damping: 22 }}
+                    />
+                  </div>
+                </motion.div>
+              );
+            })}
+          </div>
+
+          <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/[0.05]">
+            <motion.div
+              className="h-full rounded-full bg-gradient-to-r from-[#ff8a3d] via-[#ff5e4d] to-[#ff2d2d]"
+              initial={false}
+              animate={{ width: `${progress}%` }}
+              transition={{ type: "spring", stiffness: 120, damping: 22 }}
+            />
+          </div>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 export default function MinimalChatComponent() {
   const [messageInput, setMessageInput] = useState("");
   const [isSending, setIsSending] = useState(false);
-  const [expandedPlanId, setExpandedPlanId] = useState<string | null>(null);
-  const [currentStage, setCurrentStage] = useState<number>(0);
-  const [isProcessing, setIsProcessing] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
-  const [isDarkMode, setIsDarkMode] = useState(true);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-
+  const [conversationSearch, setConversationSearch] = useState("");
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [sessions, setSessions] = useState<Session[]>([]);
+  const [sessionMessagesCache, setSessionMessagesCache] = useState<Record<string, Message[]>>({});
+  const [isInputFocused, setIsInputFocused] = useState(false);
+
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [activeTask, setActiveTask] = useState("");
+  const [pipelineStage, setPipelineStage] = useState(0);
+  const [pipelineProgress, setPipelineProgress] = useState(0);
+
+  const [loadingSessions, setLoadingSessions] = useState(false);
+  const [loadingSessionId, setLoadingSessionId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const abortRequestRef = useRef<null | (() => void)>(null);
+  const messagesRef = useRef<Message[]>([]);
+  const selectedSessionIdRef = useRef<string | null>(null);
+
+  const router = useRouter();
+  const searchParams = useSearchParams();
 
   useEffect(() => {
-    if (isDarkMode) {
-      document.documentElement.classList.add("dark");
-    } else {
-      document.documentElement.classList.remove("dark");
-    }
-  }, [isDarkMode]);
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    selectedSessionIdRef.current = selectedSessionId;
+  }, [selectedSessionId]);
 
   function scrollToBottomSoon() {
     requestAnimationFrame(() => {
@@ -306,97 +559,161 @@ export default function MinimalChatComponent() {
     });
   }
 
+
+useEffect(() => {
+  let isMounted = true;
+
+  async function loadSessionsAndMaybeOpen() {
+    setLoadingSessions(true);
+    try {
+      const data = await fetchSessions();
+      if (!isMounted) return;
+
+      setSessions(data);
+
+      // اول چک کن URL session داره
+      const urlSessionId = searchParams.get("session");
+
+      if (urlSessionId && data.some((s) => s.id === urlSessionId)) {
+        await openSession(urlSessionId);
+      } else if (data.length > 0 && !selectedSessionIdRef.current) {
+        await openSession(data[0].id);
+      }
+    } catch (error) {
+      console.error("Failed to load sessions:", error);
+    } finally {
+      if (isMounted) setLoadingSessions(false);
+    }
+  }
+
+  void loadSessionsAndMaybeOpen();
+
+  return () => {
+    isMounted = false;
+    abortRequestRef.current?.();
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, []);
+
+
   useEffect(() => {
     scrollToBottomSoon();
   }, [messages]);
 
   useEffect(() => {
     if (!isProcessing) return;
-    const interval = setInterval(() => {
-      setCurrentStage((prev) => (prev < PIPELINE_STAGES.length - 1 ? prev + 1 : prev));
-    }, 1500);
-    return () => clearInterval(interval);
+
+    const progressMap = [12, 28, 48, 72, 90];
+    const timer = window.setInterval(() => {
+      setPipelineStage((prev) => {
+        const next = Math.min(prev + 1, AGENT_STAGES.length - 1);
+        const nextProgress = progressMap[next] ?? 95;
+        setPipelineProgress(nextProgress);
+        return next;
+      });
+    }, 1150);
+
+    return () => window.clearInterval(timer);
   }, [isProcessing]);
+
+
+  async function refreshSessions(preferredSessionId?: string | null) {
+    try {
+      const data = await fetchSessions();
+      setSessions(data);
+
+      if (preferredSessionId && data.some((session) => session.id === preferredSessionId)) {
+        setSelectedSessionId(preferredSessionId);
+      }
+
+      return data;
+    } catch (error) {
+      console.error("Failed to refresh sessions:", error);
+      return [];
+    }
+  }
+
+async function openSession(sessionId: string) {
+  setSelectedSessionId(sessionId);
+  setLoadingSessionId(sessionId);
+
+  // آپدیت URL
+  router.push(`/?session=${sessionId}`, { scroll: false });
+
+  const cached = sessionMessagesCache[sessionId];
+  if (cached?.length) {
+    setMessages(cached);
+  } else {
+    setMessages([]);
+  }
+
+  try {
+    const apiMessages = await fetchSessionMessages(sessionId);
+    const uiMessages = apiMessages.map(toUiMessage);
+    setSessionMessagesCache((prev) => ({ ...prev, [sessionId]: uiMessages }));
+    setMessages(uiMessages);
+  } catch (error) {
+    console.error("Failed to load session messages:", error);
+    if (!cached?.length) setMessages([]);
+  } finally {
+    setLoadingSessionId((current) => (current === sessionId ? null : current));
+  }
+}
+
+
+async function handleDeleteSession(sessionId: string) {
+  const ok = window.confirm("Delete this conversation?");
+  if (!ok) return;
+
+  try {
+    await deleteSession(sessionId);
+
+    const nextSessions = sessions.filter((s) => s.id !== sessionId);
+    setSessions(nextSessions);
+
+    setSessionMessagesCache((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
+
+    if (selectedSessionId === sessionId) {
+      setSelectedSessionId(null);
+      setMessages([]);
+      setMessageInput("");
+
+      if (nextSessions.length > 0) {
+        await openSession(nextSessions[0].id); // این خودش URL رو آپدیت می‌کنه
+      } else {
+        router.push("/", { scroll: false }); // اگه session‌ای نموند
+      }
+    }
+  } catch (error) {
+    console.error("Failed to delete session:", error);
+  }
+}
+
 
   async function copyToClipboard(text: string, messageId: string) {
     try {
       await navigator.clipboard.writeText(text);
       setCopiedMessageId(messageId);
-      setTimeout(() => setCopiedMessageId(null), 2000);
+      setTimeout(() => setCopiedMessageId(null), 1600);
     } catch (err) {
       console.error("Failed to copy:", err);
     }
   }
 
-  async function callBackendStream(goal: string, assistantId: string) {
-    const res = await fetch("http://localhost:9000/api/agent/run", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: goal, messages }),
-    });
+function startNewChat() {
+  abortRequestRef.current?.();
+  abortRequestRef.current = null;
+  setSelectedSessionId(null);
+  setMessages([]);
+  setMessageInput("");
+  router.push("/", { scroll: false }); // پاک کردن session از URL
+  setTimeout(() => textareaRef.current?.focus(), 50);
+}
 
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      throw new Error(`Backend error: ${res.status} ${text}`);
-    }
-
-    const reader = res.body?.getReader();
-    const decoder = new TextDecoder();
-    if (!reader) throw new Error("No stream");
-
-    let buffer = "";
-    let content = "";
-    let metadata: any = {};
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
-
-      for (const line of lines) {
-        if (!line.startsWith("data:")) continue;
-        const data = line.replace("data:", "").trim();
-        if (data === "[DONE]") continue;
-
-        try {
-          const parsed = JSON.parse(data);
-
-          if (parsed.type === "content") {
-            content += parsed.content;
-            setMessages((prev) => prev.map((m) => (m.id === assistantId ? { ...m, content } : m)));
-          }
-
-          if (parsed.type === "progress") {
-            const stageMap: Record<string, number> = { analyzing: 0, planning: 1, validating: 2 };
-            if (parsed.stage && stageMap[parsed.stage] !== undefined) {
-              setCurrentStage(stageMap[parsed.stage]);
-            }
-          }
-
-          if (parsed.type === "plan_metadata") {
-            metadata = { ...metadata, ...parsed };
-          }
-
-          if (parsed.type === "done") {
-            setIsProcessing(false);
-            setCurrentStage(PIPELINE_STAGES.length - 1);
-            setMessages((prev) =>
-              prev.map((m) =>
-                m.id === assistantId
-                  ? { ...m, metadata: { ...m.metadata, ...parsed.metadata, ...metadata } }
-                  : m
-              )
-            );
-          }
-        } catch {
-          // ignore parse errors
-        }
-      }
-    }
-  }
 
   async function handleSendMessage() {
     const text = messageInput.trim();
@@ -404,7 +721,9 @@ export default function MinimalChatComponent() {
 
     setIsSending(true);
     setIsProcessing(true);
-    setCurrentStage(0);
+    setActiveTask(text);
+    setPipelineStage(0);
+    setPipelineProgress(10);
 
     const userMessage: Message = {
       id: uuidv4(),
@@ -421,319 +740,588 @@ export default function MinimalChatComponent() {
       createdAt: nowIso(),
     };
 
-    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    const nextMessages = [...messagesRef.current, userMessage, assistantMessage];
+    setMessages(nextMessages);
+
+    if (selectedSessionIdRef.current) {
+      setSessionMessagesCache((prev) => ({
+        ...prev,
+        [selectedSessionIdRef.current as string]: nextMessages,
+      }));
+      setSessions((prev) =>
+        prev.map((session) =>
+          session.id === selectedSessionIdRef.current
+            ? {
+                ...session,
+                updated_at: nowIso(),
+              }
+            : session
+        )
+      );
+    }
+
     setMessageInput("");
 
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
-    try {
-      await callBackendStream(text, assistantMessageId);
-      setIsProcessing(false);
-    } catch (err: any) {
-      setIsProcessing(false);
-      setMessages((prev) =>
-        prev.map((msg) =>
-          msg.id === assistantMessageId
-            ? { ...msg, content: "خطا در اتصال به backend:\n" + (err?.message || "خطای ناشناخته") }
-            : msg
-        )
-      );
-    } finally {
-      setIsSending(false);
-      setCurrentStage(0);
-    }
+    const cleanup = sendMessage(
+      text,
+      selectedSessionIdRef.current,
+      (chunk) => {
+        setMessages((prev) => {
+          const updated = prev.map((msg) =>
+            msg.id === assistantMessageId ? { ...msg, content: msg.content + chunk } : msg
+          );
+
+          const activeSessionId = selectedSessionIdRef.current;
+          if (activeSessionId) {
+            setSessionMessagesCache((prevCache) => ({
+              ...prevCache,
+              [activeSessionId]: updated,
+            }));
+          }
+
+          return updated;
+        });
+      },
+      (returnedSessionId) => {
+        const finalSessionId = returnedSessionId || selectedSessionIdRef.current;
+
+        if (finalSessionId) {
+          setSelectedSessionId(finalSessionId);
+          setSessionMessagesCache((prev) => ({
+            ...prev,
+            [finalSessionId]: messagesRef.current,
+          }));
+          void refreshSessions(finalSessionId);
+        }
+
+        setPipelineStage(AGENT_STAGES.length - 1);
+        setPipelineProgress(100);
+
+        setTimeout(() => {
+          setIsProcessing(false);
+        }, 500);
+
+        setIsSending(false);
+        abortRequestRef.current = null;
+      },
+      (err) => {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMessageId
+              ? {
+                  ...msg,
+                  content: "خطا در اتصال به backend:\n" + err,
+                }
+              : msg
+          )
+        );
+
+        setPipelineStage(AGENT_STAGES.length - 1);
+        setPipelineProgress(100);
+        setTimeout(() => {
+          setIsProcessing(false);
+        }, 500);
+
+        setIsSending(false);
+        abortRequestRef.current = null;
+      }
+    );
+
+    abortRequestRef.current = cleanup;
   }
 
-  function handleMessageKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>): void {
+  function handleMessageKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       void handleSendMessage();
     }
   }
 
-  function togglePlanJson(messageId: string) {
-    setExpandedPlanId((prev) => (prev === messageId ? null : messageId));
-  }
+  const filteredConversations = useMemo(() => {
+    const q = conversationSearch.trim().toLowerCase();
+
+    const data: Conversation[] = sessions.map((session) => {
+      const cachedMessages = sessionMessagesCache[session.id] || [];
+      const preview = getPreviewFromMessages(
+        cachedMessages,
+        session.message_count > 0 ? `${session.message_count} message${session.message_count === 1 ? "" : "s"}` : "No messages yet"
+      );
+
+      return {
+        id: session.id,
+        title: session.title?.trim() || "Untitled conversation",
+        preview,
+        updatedAt: formatUpdatedAt(session.updated_at),
+        unread: 0,
+      };
+    });
+
+    if (!q) return data;
+
+    return data.filter(
+      (conversation) =>
+        conversation.title.toLowerCase().includes(q) ||
+        conversation.preview.toLowerCase().includes(q)
+    );
+  }, [conversationSearch, sessions, sessionMessagesCache]);
 
   const isEmpty = messages.length === 0;
 
+  const quickPrompts = [
+    {
+      title: "Show the agent pipeline",
+      desc: "Make the current stage visible in chat.",
+    },
+    {
+      title: "Use orange-red accents",
+      desc: "Highlight important actions and progress.",
+    },
+    {
+      title: "Add brilliant transitions",
+      desc: "Make messages and inputs feel premium.",
+    },
+    {
+      title: "Keep it minimal",
+      desc: "Thin borders, calm surfaces, modern spacing.",
+    },
+  ];
+
   return (
-    <div className="flex h-screen w-full bg-white dark:bg-[#212121] text-gray-900 dark:text-gray-100 overflow-hidden transition-colors duration-200">
-      <main className="flex flex-1 flex-col w-full">
-        <header className="flex h-14 items-center justify-between px-4 border-b border-gray-200 dark:border-gray-800 bg-white dark:bg-[#212121]">
-          <div className="flex items-center gap-2">
-            <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-gray-900 dark:bg-gray-700">
-              <Sparkles className="h-4 w-4 text-white" />
+    <div className="flex h-screen w-full overflow-hidden bg-[#161616] text-white">
+      <motion.aside
+        animate={{ width: isSidebarCollapsed ? 76 : 318 }}
+        transition={{ type: "spring", stiffness: 260, damping: 30 }}
+        className="flex h-full shrink-0 flex-col border-r border-white/8 bg-[#151515]"
+      >
+        <div className="flex items-center justify-between gap-2 border-b border-white/8 p-3">
+          <motion.button
+            whileTap={{ scale: 0.96 }}
+            onClick={() => setIsSidebarCollapsed((p) => !p)}
+            className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/72 transition-colors duration-200 hover:border-white/12 hover:bg-white/[0.05] hover:text-white"
+            title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+          >
+            {isSidebarCollapsed ? (
+              <ChevronRight className="h-5 w-5" />
+            ) : (
+              <ChevronLeft className="h-5 w-5" />
+            )}
+          </motion.button>
+
+          {!isSidebarCollapsed && (
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="flex h-9 w-9 items-center justify-center rounded-2xl border border-white/8 bg-gradient-to-br from-[#ff8a3d]/18 to-[#ff5e4d]/12 text-white/88">
+                <Sparkles className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-white">AI Assistant</p>
+                <p className="truncate text-xs text-white/40">Minimal Chat Workspace</p>
+              </div>
             </div>
-            <span className="text-sm font-medium">AI Assistant</span>
+          )}
+
+          {!isSidebarCollapsed && (
+            <motion.button
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.97 }}
+              onClick={startNewChat}
+              className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/72 transition-colors duration-200 hover:border-[#ff8a3d]/25 hover:bg-[#ff8a3d]/10 hover:text-white"
+              title="New chat"
+            >
+              <Plus className="h-5 w-5" />
+            </motion.button>
+          )}
+        </div>
+
+        {!isSidebarCollapsed && (
+          <div className="border-b border-white/8 p-3">
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/30" />
+              <input
+                value={conversationSearch}
+                onChange={(e) => setConversationSearch(e.target.value)}
+                placeholder="Search conversations"
+                className="h-11 w-full rounded-2xl border border-white/8 bg-white/[0.03] pl-9 pr-3 text-sm text-white outline-none transition-all duration-300 placeholder:text-white/25 focus:border-[#ff8a3d]/30 focus:bg-white/[0.05]"
+              />
+            </div>
+
+            <motion.button
+              whileHover={{ y: -1 }}
+              whileTap={{ scale: 0.99 }}
+              onClick={startNewChat}
+              className="mt-3 flex w-full items-center gap-3 rounded-2xl border border-white/8 bg-white/[0.03] px-3 py-3 text-left transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-[#ff8a3d]/8"
+            >
+              <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-[#ff6a3d] via-[#ff4d3d] to-[#ff2d2d] text-white shadow-[0_10px_22px_rgba(255,77,61,0.18)]">
+                <Plus className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-white">New chat</p>
+                <p className="truncate text-xs text-white/35">Start a fresh conversation</p>
+              </div>
+            </motion.button>
+          </div>
+        )}
+
+        <div className="min-h-0 flex-1 overflow-y-auto p-2">
+          {loadingSessions && sessions.length === 0 ? (
+            <div className="flex items-center gap-2 px-3 py-4 text-sm text-white/40">
+              <Loader2 className="h-4 w-4 animate-spin" />
+              Loading conversations...
+            </div>
+          ) : (
+            filteredConversations.map((conversation) => {
+              const isSelected = selectedSessionId === conversation.id;
+
+return (
+  <motion.div
+    key={conversation.id}
+    whileHover={{ x: 1 }}
+    whileTap={{ scale: 0.99 }}
+    onClick={() => openSession(conversation.id)}
+    role="button"
+    tabIndex={0}
+    onKeyDown={(e) => e.key === "Enter" && openSession(conversation.id)}
+    className={`group mb-1 flex w-full items-start gap-3 rounded-2xl px-3 py-3 text-left transition-all duration-200 ${
+      isSelected
+        ? "border border-[#ff8a3d]/20 bg-white/[0.06]"
+        : "border border-transparent hover:bg-white/[0.04]"
+    }`}
+    title={conversation.title}
+  >
+    <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/[0.03] text-white/70 transition-colors group-hover:border-white/12 group-hover:bg-white/[0.05] group-hover:text-white">
+      <MessageSquare className="h-4 w-4" />
+    </div>
+
+    {!isSidebarCollapsed && (
+      <div className="min-w-0 flex-1">
+        <div className="flex items-start justify-between gap-2">
+          <p className="truncate text-sm font-medium text-white">{conversation.title}</p>
+          <span className="shrink-0 text-[11px] text-white/28">{conversation.updatedAt}</span>
+        </div>
+        <p className="mt-1 truncate text-xs leading-5 text-white/38">
+          {conversation.preview}
+        </p>
+      </div>
+    )}
+
+    {!isSidebarCollapsed && (
+      <div className="mt-1 flex items-center gap-1 opacity-0 transition-all duration-200 group-hover:opacity-100">
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            void handleDeleteSession(conversation.id);
+          }}
+          className="rounded-lg p-1 text-white/25 transition-colors hover:bg-white/[0.04] hover:text-white/75"
+          title="Delete conversation"
+        >
+          <Trash2 className="h-4 w-4" />
+        </button>
+
+        <div className="rounded-lg p-1 text-white/22 hover:bg-white/[0.04] hover:text-white/70">
+          <MoreHorizontal className="h-4 w-4" />
+        </div>
+      </div>
+    )}
+  </motion.div>
+);
+
+            })
+          )}
+        </div>
+
+        <div className="border-t border-white/8 p-3">
+          <button className="flex w-full items-center gap-3 rounded-2xl border border-white/8 bg-white/[0.03] px-3 py-3 text-left transition-colors duration-200 hover:bg-white/[0.05]">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/8 bg-white/[0.04]">
+              <User className="h-4 w-4 text-white/80" />
+            </div>
+            {!isSidebarCollapsed && (
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium text-white">Kian</p>
+                <p className="truncate text-xs text-white/35">Free plan</p>
+              </div>
+            )}
+            {!isSidebarCollapsed && <MoreHorizontal className="h-4 w-4 text-white/25" />}
+          </button>
+        </div>
+      </motion.aside>
+
+      <section className="flex min-w-0 flex-1 flex-col bg-[#161616]">
+        <header className="flex h-14 items-center justify-between border-b border-white/8 px-4 md:px-6">
+          <div className="flex min-w-0 items-center gap-3">
+            <button
+              onClick={() => setIsSidebarCollapsed((p) => !p)}
+              className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/72 transition-colors duration-200 hover:bg-white/[0.05] hover:text-white md:hidden"
+              title="Toggle sidebar"
+            >
+              <ChevronRight className="h-5 w-5" />
+            </button>
+
+            <div className="flex items-center gap-3">
+              <div className="flex h-9 w-9 items-center justify-center rounded-2xl border border-white/8 bg-gradient-to-br from-[#ff8a3d]/18 to-[#ff5e4d]/12 text-white/88">
+                <Sparkles className="h-4 w-4" />
+              </div>
+              <div className="min-w-0">
+                <p className="truncate text-sm font-medium text-white">AI Assistant</p>
+                <p className="truncate text-xs text-white/35">Modern minimal chat interface</p>
+              </div>
+            </div>
           </div>
 
-          <button
-            onClick={() => setIsDarkMode((p) => !p)}
-            className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100 dark:hover:bg-gray-800 transition-colors"
-            title="Toggle theme"
-          >
-            {isDarkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </button>
+          <div className="flex items-center gap-2">
+            <button className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/72 transition-colors duration-200 hover:bg-white/[0.05] hover:text-white">
+              <Search className="h-4 w-4" />
+            </button>
+          </div>
         </header>
 
-        <div className="flex flex-1 flex-col items-center overflow-hidden">
-          <div className="flex flex-1 flex-col w-full max-w-3xl px-4 overflow-hidden">
+        <div className="flex min-h-0 flex-1 flex-col">
+          <AnimatePresence mode="wait">
             {isProcessing && (
-              <div className="py-3 flex items-center justify-center">
-                <div className="flex items-center gap-2 px-3 py-1.5 bg-gradient-to-r from-gray-50/30 to-gray-100/30 dark:from-gray-800/20 dark:to-gray-800/30 rounded-full border border-gray-200/30 dark:border-gray-700/30 backdrop-blur-sm">
-                  {PIPELINE_STAGES.map((stage, idx) => {
-                    const Icon = stage.icon;
-                    const isActive = idx === currentStage;
-                    const isComplete = idx < currentStage;
-                    return (
-                      <React.Fragment key={stage.key}>
-                        <div
-                          className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full transition-all duration-500 ${
-                            isActive
-                              ? `${stage.activeBg} ${stage.activeColor} font-medium border ${stage.activeBorder} scale-105`
-                              : isComplete
-                              ? "text-gray-400 dark:text-gray-500 scale-95"
-                              : "text-gray-300 dark:text-gray-600 scale-90"
-                          }`}
-                        >
-                          <Icon className={`h-3 w-3 transition-all duration-300 ${isActive ? "animate-pulse" : ""}`} />
-                          <span className="text-xs">{stage.label}</span>
-                        </div>
-                        {idx < PIPELINE_STAGES.length - 1 && (
-                          <div className="relative w-6 h-px">
-                            <div className="absolute inset-0 bg-gray-200 dark:bg-gray-700 rounded-full" />
-                            <div
-                              className={`absolute inset-0 rounded-full transition-all duration-500 ${
-                                isComplete
-                                  ? "bg-gradient-to-r from-blue-500 via-purple-500 to-orange-500 w-full"
-                                  : "w-0"
-                              }`}
-                            />
-                          </div>
-                        )}
-                      </React.Fragment>
-                    );
-                  })}
-                </div>
-              </div>
+              <AgentPipelinePanel
+                key="agent-pipeline"
+                task={activeTask}
+                stageIndex={pipelineStage}
+                progress={pipelineProgress}
+                stages={AGENT_STAGES}
+              />
             )}
+          </AnimatePresence>
 
-            {isEmpty ? (
-              <div className="flex-1 flex flex-col items-center justify-center pb-32">
-                <h1 className="text-3xl font-normal text-gray-100 dark:text-gray-100 mb-8">
-                  What's on the agenda today?
-                </h1>
-              </div>
-            ) : (
-              <div ref={scrollRef} className="flex-1 overflow-y-auto py-4 space-y-4 scroll-smooth">
-                {messages.map((m) => (
-                  <div key={m.id} className={`flex flex-col ${m.role === "user" ? "items-end" : "items-start"} px-2`}>
-                    <div className="max-w-[80%]">
-                      <div
-                        className={`rounded-2xl px-4 py-3 ${
-                          m.role === "user"
-                            ? "bg-gray-900 dark:bg-gray-700 text-white"
-                            : "bg-gray-100 dark:bg-gray-800 text-gray-900 dark:text-gray-100"
-                        }`}
-                      >
-                        {m.role === "assistant" ? (
-                          m.content ? (
-                            <AssistantMessage content={m.content} />
-                          ) : (
-                            <div className="flex items-center gap-2 text-gray-500">
-                              <Loader2 className="h-4 w-4 animate-spin" />
-                              <span className="text-sm">Thinking...</span>
-                            </div>
-                          )
-                        ) : (
-                          <div className="text-[15px] leading-relaxed whitespace-pre-wrap">{m.content}</div>
-                        )}
+          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8">
+            <div className="mx-auto flex w-full max-w-4xl flex-col">
+              <AnimatePresence mode="wait">
+                {isEmpty ? (
+                  <motion.div
+                    key="empty"
+                    initial={{ opacity: 0, y: 16 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -12 }}
+                    transition={{ duration: 0.35, ease: "easeOut" }}
+                    className="flex min-h-[calc(100vh-12rem)] flex-col items-center justify-center pb-16"
+                  >
+                    <motion.div
+                      initial={{ scale: 0.92, opacity: 0 }}
+                      animate={{ scale: 1, opacity: 1 }}
+                      transition={{ type: "spring", stiffness: 260, damping: 22 }}
+                      className="mb-6 flex h-16 w-16 items-center justify-center rounded-[28px] border border-white/8 bg-white/[0.04]"
+                    >
+                      <Sparkles className="h-7 w-7 text-white/85" />
+                    </motion.div>
 
-                        {/* Summary + thin lines + toggle JSON */}
-                        {m.metadata?.type === "plan" && m.metadata?.plan_summary && (
-                          <div className="mt-4">
-                            <div className="h-px bg-gradient-to-r from-transparent via-gray-300 dark:via-gray-600 to-transparent mb-4" />
+                    <h1 className="text-center text-3xl font-normal tracking-[-0.03em] text-white md:text-5xl">
+                      What&apos;s on the agenda today?
+                    </h1>
 
-                            <div className="mb-4 rounded-xl bg-gradient-to-br from-blue-50 to-indigo-50 dark:from-gray-800 dark:to-gray-850 p-5 border border-blue-100 dark:border-gray-700">
-                              <div className="flex items-center gap-2 mb-4">
-                                <Sparkles className="h-5 w-5 text-blue-600 dark:text-blue-400" />
-                                <h3 className="text-base font-semibold text-gray-900 dark:text-gray-100">Plan Summary</h3>
-                              </div>
+                    <p className="mt-4 max-w-2xl text-center text-sm leading-6 text-white/38 md:text-base">
+                      A cleaner chat surface with a visible agent pipeline, orange-red accents, and smoother motion.
+                    </p>
 
-                              <div className="space-y-2.5">
-                                {m.metadata.plan_summary.name && (
-                                  <div className="flex items-start gap-2.5">
-                                    <span className="text-blue-500 mt-0.5 flex-shrink-0">•</span>
-                                    <div>
-                                      <span className="text-gray-600 dark:text-gray-400">Project: </span>
-                                      <span className="text-gray-800 dark:text-gray-200 font-medium">{m.metadata.plan_summary.name}</span>
-                                    </div>
-                                  </div>
-                                )}
-
-                                {m.metadata.plan_summary.project_type && (
-                                  <div className="flex items-start gap-2.5">
-                                    <span className="text-purple-500 mt-0.5 flex-shrink-0">•</span>
-                                    <div>
-                                      <span className="text-gray-600 dark:text-gray-400">Type: </span>
-                                      <span className="text-gray-800 dark:text-gray-200 font-medium">{m.metadata.plan_summary.project_type}</span>
-                                    </div>
-                                  </div>
-                                )}
-
-                                {m.metadata.plan_summary.goal && (
-                                  <div className="flex items-start gap-2.5">
-                                    <span className="text-green-500 mt-0.5 flex-shrink-0">•</span>
-                                    <div>
-                                      <span className="text-gray-600 dark:text-gray-400">Goal: </span>
-                                      <span className="text-gray-800 dark:text-gray-200 font-medium">{m.metadata.plan_summary.goal}</span>
-                                    </div>
-                                  </div>
-                                )}
-
-                                {m.metadata.plan_summary.tech_stack &&
-                                  Object.keys(m.metadata.plan_summary.tech_stack).length > 0 && (
-                                    <div className="flex items-start gap-2.5">
-                                      <span className="text-orange-500 mt-0.5 flex-shrink-0">•</span>
-                                      <div className="flex-1">
-                                        <span className="text-gray-600 dark:text-gray-400">Tech Stack: </span>
-                                        <div className="mt-1.5 flex flex-wrap gap-1.5">
-                                          {Object.entries(m.metadata.plan_summary.tech_stack).map(([key, value]) => (
-                                            <span
-                                              key={key}
-                                              className="px-2 py-0.5 bg-gray-200 dark:bg-gray-700 rounded text-xs text-gray-700 dark:text-gray-300"
-                                            >
-                                              {key}: {value}
-                                            </span>
-                                          ))}
-                                        </div>
-                                      </div>
-                                    </div>
-                                  )}
-
-                                {m.metadata.plan_summary.phases_count !== undefined && (
-                                  <div className="flex items-start gap-2.5">
-                                    <span className="text-pink-500 mt-0.5 flex-shrink-0">•</span>
-                                    <div>
-                                      <span className="text-gray-600 dark:text-gray-400">Phases: </span>
-                                      <span className="text-gray-800 dark:text-gray-200 font-medium">{m.metadata.plan_summary.phases_count}</span>
-                                    </div>
-                                  </div>
-                                )}
-
-                                {m.metadata.plan_summary.files_count !== undefined && (
-                                  <div className="flex items-start gap-2.5">
-                                    <span className="text-cyan-500 mt-0.5 flex-shrink-0">•</span>
-                                    <div>
-                                      <span className="text-gray-600 dark:text-gray-400">Files: </span>
-                                      <span className="text-gray-800 dark:text-gray-200 font-medium">{m.metadata.plan_summary.files_count}</span>
-                                    </div>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-
-                            <div className="h-px bg-gradient-to-r from-transparent via-gray-300 dark:via-gray-600 to-transparent my-4" />
-
-                            <button
-                              onClick={() => togglePlanJson(m.id)}
-                              className="flex items-center gap-2 px-3 py-1.5 text-xs font-medium text-gray-700 dark:text-gray-300 bg-gray-200 dark:bg-gray-700 hover:bg-gray-300 dark:hover:bg-gray-600 rounded-lg transition-colors"
+                    <div className="mt-10 grid w-full max-w-4xl grid-cols-1 gap-3 md:grid-cols-2">
+                      {quickPrompts.map((item) => (
+                        <EmptyStateCard
+                          key={item.title}
+                          title={item.title}
+                          desc={item.desc}
+                          onClick={() => setMessageInput(item.title)}
+                        />
+                      ))}
+                    </div>
+                  </motion.div>
+                ) : (
+                  <motion.div layout className="space-y-5 pb-8">
+                    <AnimatePresence initial={false}>
+                      {messages.map((m) => (
+                        <motion.div
+                          key={m.id}
+                          layout
+                          initial={{ opacity: 0, y: 14, scale: 0.985 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: -8, scale: 0.99 }}
+                          transition={{ type: "spring", stiffness: 240, damping: 24 }}
+                          className={`flex w-full ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                        >
+                          <div className="group max-w-[min(92%,48rem)]">
+                            <div
+                              className={`rounded-[24px] border px-4 py-3.5 shadow-sm transition-all duration-300 md:px-5 md:py-4 ${
+                                m.role === "user"
+                                  ? "border-[#ff8a3d]/18 bg-gradient-to-br from-[#ff8a3d]/10 via-[#ff5e4d]/8 to-[#ff2d2d]/6 text-white"
+                                  : "border-white/8 bg-white/[0.03] text-white"
+                              }`}
                             >
-                              <FileJson className="h-3.5 w-3.5" />
-                              {expandedPlanId === m.id ? "Hide JSON" : "View JSON"}
-                              {expandedPlanId === m.id ? <ChevronUp className="h-3.5 w-3.5" /> : <ChevronDown className="h-3.5 w-3.5" />}
-                            </button>
+                              <div className="mb-2 flex items-center gap-2 text-xs text-white/32">
+                                {m.role === "assistant" ? (
+                                  <>
+                                    <Bot className="h-4 w-4 text-[#ff8a3d]" />
+                                    <span>Assistant</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <User className="h-4 w-4 text-[#ff8a3d]" />
+                                    <span>You</span>
+                                  </>
+                                )}
+                              </div>
 
-                            {expandedPlanId === m.id && m.metadata?.plan && (
-                              <div className="mt-3 rounded-lg bg-black dark:bg-gray-950 p-3 overflow-x-auto border border-gray-800 dark:border-gray-700">
-                                <pre className="text-xs text-gray-100 font-mono leading-relaxed">
-                                  {JSON.stringify(m.metadata.plan, null, 2)}
-                                </pre>
+                              {m.role === "assistant" ? (
+                                m.content ? (
+                                  <AssistantMessage content={m.content} />
+                                ) : (
+                                  <div className="flex items-center gap-2 text-white/40">
+                                    <TypingIndicator />
+                                    <span className="text-sm">Running agent…</span>
+                                  </div>
+                                )
+                              ) : (
+                                <div className="whitespace-pre-wrap text-[15px] leading-7 text-white/92">
+                                  {m.content}
+                                </div>
+                              )}
+                            </div>
+
+                            {m.role === "assistant" && m.content && (
+                              <div className="mt-2 flex items-center gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                                <motion.button
+                                  whileTap={{ scale: 0.96 }}
+                                  onClick={() => copyToClipboard(m.content, m.id)}
+                                  className="inline-flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs text-white/60 transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-[#ff8a3d]/8 hover:text-white"
+                                >
+                                  {copiedMessageId === m.id ? (
+                                    <>
+                                      <Check className="h-3.5 w-3.5 text-[#ff8a3d]" />
+                                      Copied
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="h-3.5 w-3.5" />
+                                      Copy
+                                    </>
+                                  )}
+                                </motion.button>
                               </div>
                             )}
+
+                            <div className="mt-1.5 px-1 text-[11px] text-white/24">
+                              {new Date(m.createdAt).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}
+                            </div>
                           </div>
-                        )}
-                      </div>
+                        </motion.div>
+                      ))}
+                    </AnimatePresence>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </div>
 
-                      {m.role === "assistant" && m.content && (
-                        <button
-                          onClick={() => copyToClipboard(m.content, m.id)}
-                          className="mt-2 flex items-center gap-1.5 px-2 py-1 text-xs text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200 transition-colors"
-                        >
-                          {copiedMessageId === m.id ? (
-                            <>
-                              <Check className="h-3 w-3" />
-                              <span>Copied!</span>
-                            </>
-                          ) : (
-                            <>
-                              <Copy className="h-3 w-3" />
-                              <span>Copy</span>
-                            </>
-                          )}
-                        </button>
-                      )}
-
-                      <div className="text-xs text-gray-400 dark:text-gray-500 mt-1.5 px-1">
-                        {new Date(m.createdAt).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            <div className="py-4">
-              <div className="relative flex items-end gap-2 rounded-2xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-2 shadow-sm">
-                <button className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100 dark:hover:bg-gray-700 transition-colors">
-                  <Paperclip className="h-4 w-4 text-gray-500 dark:text-gray-400" />
-                </button>
-
-                <textarea
-                  ref={textareaRef}
-                  value={messageInput}
-                  onChange={(e) => {
-                    setMessageInput(e.target.value);
-                    e.target.style.height = "auto";
-                    e.target.style.height = Math.min(e.target.scrollHeight, 200) + "px";
-                  }}
-                  onKeyDown={handleMessageKeyDown}
-                  placeholder="Type your message..."
-                  rows={1}
-                  className="flex-1 resize-none bg-transparent text-sm text-gray-900 dark:text-gray-100 placeholder-gray-400 dark:placeholder-gray-500 focus:outline-none py-1.5 max-h-[200px] overflow-y-auto"
-                  disabled={isSending}
-                />
-
-                <div className="flex items-center gap-1">
-                  <button
-                    onClick={() => setIsRecording(!isRecording)}
-                    className={`flex h-8 w-8 items-center justify-center rounded-lg transition-colors ${
-                      isRecording
-                        ? "bg-red-500 text-white hover:bg-red-600"
-                        : "hover:bg-gray-100 dark:hover:bg-gray-700 text-gray-500 dark:text-gray-400"
-                    }`}
+          <div className="border-t border-white/8 bg-[#161616] px-4 pb-4 pt-3 md:px-8">
+            <div className="mx-auto w-full max-w-4xl">
+              <motion.div
+                animate={
+                  isInputFocused
+                    ? {
+                        boxShadow:
+                          "0 0 0 1px rgba(255,138,61,0.22), 0 20px 60px rgba(0,0,0,0.22)",
+                      }
+                    : {
+                        boxShadow:
+                          "0 0 0 1px rgba(255,255,255,0.06), 0 18px 50px rgba(0,0,0,0.18)",
+                      }
+                }
+                transition={{ duration: 0.22 }}
+                className="rounded-[22px] border border-white/8 bg-white/[0.03] p-2.5 backdrop-blur-sm"
+              >
+                <div className="flex items-end gap-2">
+                  <motion.button
+                    whileHover={{ scale: 1.03 }}
+                    whileTap={{ scale: 0.96 }}
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/[0.03] text-white/62 transition-colors duration-200 hover:border-white/12 hover:bg-white/[0.05] hover:text-white"
                   >
-                    {isRecording ? <StopCircle className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
-                  </button>
+                    <Paperclip className="h-4 w-4" />
+                  </motion.button>
 
-                  <button
+                  <textarea
+                    ref={textareaRef}
+                    value={messageInput}
+                    onFocus={() => setIsInputFocused(true)}
+                    onBlur={() => setIsInputFocused(false)}
+                    onChange={(e) => {
+                      setMessageInput(e.target.value);
+                      e.target.style.height = "auto";
+                      e.target.style.height = `${Math.min(e.target.scrollHeight, 180)}px`;
+                    }}
+                    onKeyDown={handleMessageKeyDown}
+                    placeholder="Message AI Assistant"
+                    rows={1}
+                    className="min-h-[44px] flex-1 resize-none bg-transparent px-1 py-2.5 text-[14px] leading-6 text-white outline-none placeholder:text-white/24"
+                    disabled={isSending}
+                  />
+
+                  <motion.button
+                    whileHover={{ scale: 1.03 }}
+                    whileTap={{ scale: 0.96 }}
+                    onClick={() => setIsRecording((p) => !p)}
+                    className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-colors duration-200 ${
+                      isRecording
+                        ? "border-[#ff5e4d]/30 bg-[#ff5e4d]/12 text-white"
+                        : "border-white/8 bg-white/[0.03] text-white/62 hover:border-white/12 hover:bg-white/[0.05] hover:text-white"
+                    }`}
+                    title="Voice"
+                  >
+                    {isRecording ? (
+                      <StopCircle className="h-4.5 w-4.5" />
+                    ) : (
+                      <Mic className="h-4.5 w-4.5" />
+                    )}
+                  </motion.button>
+
+                  <motion.button
+                    whileHover={{ scale: isSending ? 1 : 1.03 }}
+                    whileTap={{ scale: isSending ? 1 : 0.96 }}
                     onClick={handleSendMessage}
                     disabled={!messageInput.trim() || isSending}
-                    className="flex h-8 w-8 items-center justify-center rounded-lg bg-gray-900 dark:bg-gray-700 text-white hover:bg-gray-800 dark:hover:bg-gray-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                    className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#ff8a3d]/20 bg-gradient-to-br from-[#ff6a3d] via-[#ff4d3d] to-[#ff2d2d] text-white shadow-[0_12px_26px_rgba(255,77,61,0.22)] transition-all duration-200 hover:shadow-[0_16px_32px_rgba(255,77,61,0.28)] disabled:cursor-not-allowed disabled:opacity-45"
+                    title="Send"
                   >
-                    {isSending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                  </button>
+                    <AnimatePresence mode="wait" initial={false}>
+                      {isSending ? (
+                        <motion.span
+                          key="loading"
+                          initial={{ opacity: 0, scale: 0.9, rotate: -8 }}
+                          animate={{ opacity: 1, scale: 1, rotate: 0 }}
+                          exit={{ opacity: 0, scale: 0.9 }}
+                        >
+                          <Loader2 className="h-4.5 w-4.5 animate-spin" />
+                        </motion.span>
+                      ) : (
+                        <motion.span
+                          key="send"
+                          initial={{ opacity: 0, scale: 0.9, y: 1 }}
+                          animate={{ opacity: 1, scale: 1, y: 0 }}
+                          exit={{ opacity: 0, scale: 0.9 }}
+                        >
+                          <Send className="h-4.5 w-4.5" />
+                        </motion.span>
+                      )}
+                    </AnimatePresence>
+                  </motion.button>
                 </div>
+              </motion.div>
+
+              <div className="mt-2 text-center text-xs text-white/28">
+                Press Enter to send, Shift+Enter for new line
               </div>
 
-              <div className="mt-2 text-center text-xs text-gray-400 dark:text-gray-500">
-                Press Enter to send, Shift+Enter for new line
+              <div className="mt-2 text-center text-[11px] text-white/22">
+                ChatGPT can make mistakes. Check important information.
               </div>
             </div>
           </div>
         </div>
-      </main>
+      </section>
     </div>
   );
 }

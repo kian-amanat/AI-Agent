@@ -1,23 +1,38 @@
-// codegen_agent.mjs
 import fs from "fs";
 import path from "path";
 import OpenAI from "openai";
 
-const PLAN_PATH = "./planner_plan.json";
-const WORKSPACE = "backend";
+import { buildSmartContext } from "./tools/context_engine.js";
+import { listBackendFiles } from "./tools/list_backend_files.js";
+import { readProjectFile } from "./tools/readProjectFile.js";
 
-const client = new OpenAI({
-  apiKey:
-    process.env.OPENAI_API_KEY ||
-    "***REMOVED-SECRET***",
+/* -------------------------------------------------- */
+/* ---------------- CONFIGURATION ------------------- */
+/* -------------------------------------------------- */
+
+const PROJECT_ROOT = process.cwd();
+
+const DEFAULT_CONFIG = {
+  planPath: "./planner_plan.json",
+  workspace: "./",
+  taskWorkspace: "./",
+  model: "gpt-4.1",
+  temperature: 0.1,
+  apiKey: process.env.OPENAI_API_KEY || "***REMOVED-SECRET***",
   baseURL: process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1",
-});
+  skipExisting: true,
+  maxContextFiles: 10,
+  perFileMaxContextFiles: 8,
+  dependencyDepth: 2,
+  perFileDependencyDepth: 2,
+};
 
 /* -------------------------------------------------- */
-/* ---------------- SYSTEM PROMPT ------------------- */
+/* ---------------- SYSTEM PROMPTS ------------------ */
 /* -------------------------------------------------- */
 
-const SYSTEM_PROMPT = `
+const SYSTEM_PROMPTS = {
+  backend: `
 تو یک Senior Backend Engineer هستی.
 
 Stack:
@@ -36,204 +51,593 @@ Stack:
 - اگر فایل وجود ندارد، آن را import نکن.
 - drizzle eq باید از "drizzle-orm" import شود.
 - پروژه ESM است (import/export استاندارد).
+- اگر فایل هدف قبلاً وجود دارد، آن را با context موجود به‌روز کن، نه اینکه رفتار قبلی را از بین ببری.
 - خروجی فقط سورس کد خالص فایل باشد.
-`.trim();
+`.trim(),
+
+  frontend: `
+تو یک Senior Frontend Engineer هستی.
+
+Stack:
+- React 18+ (TypeScript)
+- Next.js (App Router)
+- TailwindCSS
+- Lucide React (icons)
+- CSS Modules
+
+قوانین حیاتی:
+- فقط از فایل‌هایی که در Project Structure آمده استفاده کن.
+- اگر فایل وجود ندارد، آن را import نکن.
+- همیشه TypeScript type-safe باشد.
+- از React hooks به درستی استفاده کن.
+- اگر فایل هدف قبلاً وجود دارد، آن را با context موجود به‌روز کن.
+- خروجی فقط سورس کد خالص فایل باشد.
+`.trim(),
+
+  fullstack: `
+تو یک Senior Full-Stack Engineer هستی.
+
+Backend Stack:
+- Node.js (ESM), TypeScript, Fastify, Drizzle ORM, SQLite
+
+Frontend Stack:
+- React 18+, TypeScript, Next.js, TailwindCSS, Lucide React
+
+قوانین حیاتی:
+- فقط از فایل‌هایی که در Project Structure آمده استفاده کن.
+- اگر فایل وجود ندارد، آن را import نکن.
+- کد باید type-safe و production-ready باشد.
+- اگر فایل هدف قبلاً وجود دارد، آن را با context موجود به‌روز کن.
+- خروجی فقط سورس کد خالص فایل باشد.
+`.trim(),
+};
 
 /* -------------------------------------------------- */
+/* ----------- UNIFIED PLAN FILE EXTRACTOR ---------- */
+/* -------------------------------------------------- */
 
-function readPlan() {
-  if (!fs.existsSync(PLAN_PATH)) {
-    throw new Error("planner_plan.json not found");
+function extractFilesFromPlan(plan) {
+  const files = [];
+
+  if (Array.isArray(plan.files_to_create) || Array.isArray(plan.files_to_modify)) {
+    for (const entry of plan.files_to_create || []) {
+      if (!entry?.path) continue;
+      files.push({
+        path: entry.path,
+        content: entry.content || null,
+        description: entry.purpose || "",
+        action: "create",
+      });
+    }
+
+    for (const entry of plan.files_to_modify || []) {
+      if (!entry?.path) continue;
+      files.push({
+        path: entry.path,
+        content: entry.content || null,
+        description: entry.purpose || "",
+        action: "modify",
+      });
+    }
+
+    return files;
   }
-  return JSON.parse(fs.readFileSync(PLAN_PATH, "utf8"));
+
+  if (Array.isArray(plan.files)) {
+    for (const entry of plan.files) {
+      if (!entry?.path) continue;
+      files.push({
+        path: entry.path,
+        content: entry.content || null,
+        description: entry.purpose || entry.description || "",
+        action: "generate",
+      });
+    }
+    return files;
+  }
+
+  if (Array.isArray(plan.phases)) {
+    for (const phase of plan.phases) {
+      if (!Array.isArray(phase.steps)) continue;
+      for (const step of phase.steps) {
+        if (!Array.isArray(step.files)) continue;
+        for (const f of step.files) {
+          if (typeof f === "string") {
+            files.push({
+              path: f,
+              content: null,
+              description: step.description || "",
+              action: "generate",
+            });
+          } else if (f?.path) {
+            files.push({
+              path: f.path,
+              content: f.content || null,
+              description: f.purpose || step.description || "",
+              action: "generate",
+            });
+          }
+        }
+      }
+    }
+    return files;
+  }
+
+  return files;
 }
 
-/**
- * نرمال‌سازی مسیرهای relative مثل scaffold:
- * - حذف ./ اول
- * - نرمال‌سازی با path.normalize
- */
+/* -------------------------------------------------- */
+/* ---------------- HELPER FUNCTIONS ---------------- */
+/* -------------------------------------------------- */
+
 function normalizeRelativePath(p) {
   if (!p || typeof p !== "string") return "";
   let norm = p.trim();
   if (norm.startsWith("./")) norm = norm.slice(2);
   norm = path.normalize(norm);
-  return norm;
+  return norm.replace(/\\/g, "/");
 }
 
-function fileFullPath(relativePath) {
+function normalizeWorkspaceRoot(workspace) {
+  const rel = normalizeRelativePath(workspace);
+  if (!rel || rel === ".") return "";
+  return rel;
+}
+
+function resolveFilePath(workspaceRoot, relativePath) {
+  const workspace = normalizeWorkspaceRoot(workspaceRoot);
   const rel = normalizeRelativePath(relativePath);
-  return path.join(WORKSPACE, rel);
+
+  if (!rel) return path.resolve(PROJECT_ROOT, workspace);
+
+  if (workspace && (rel === workspace || rel.startsWith(`${workspace}/`))) {
+    return path.resolve(PROJECT_ROOT, rel);
+  }
+
+  return path.resolve(PROJECT_ROOT, workspace, rel);
 }
 
-/**
- * تصمیم می‌گیرد آیا فایل نیاز به generation / rewrite دارد یا نه.
- * - اگر وجود ندارد => true
- * - اگر خالی است => true
- * - اگر شامل "TODO" است => true
- * - در غیر این صورت => false (یعنی دست‌کم یک پیاده‌سازی قبلی هست)
- */
 function fileNeedsGeneration(filePath) {
-  if (!fs.existsSync(filePath)) {
-    return true;
-  }
-  const content = fs.readFileSync(filePath, "utf8").trim();
-  if (content === "") return true;
-  if (content.includes("TODO")) return true;
-  return false;
-}
-
-/* -------------------------------------------------- */
-/* ----------- PROJECT CONTEXT BUILDER ------------- */
-/* -------------------------------------------------- */
-
-function walkDir(dir, fileList = []) {
-  if (!fs.existsSync(dir)) return fileList;
-
-  const files = fs.readdirSync(dir);
-  for (const file of files) {
-    const full = path.join(dir, file);
-    const stat = fs.statSync(full);
-    if (stat.isDirectory()) {
-      walkDir(full, fileList);
-    } else {
-      // خروجی structure نسبی نسبت به WORKSPACE
-      const rel = path.relative(WORKSPACE, full);
-      fileList.push(rel);
+  try {
+    const stats = fs.statSync(filePath);
+    if (stats.isDirectory()) {
+      console.log(`   ⏭️  Skipping directory: ${filePath}`);
+      return false;
     }
+
+    const content = fs.readFileSync(filePath, "utf8").trim();
+
+    if (
+      !content ||
+      content.includes("TODO") ||
+      content.includes("/* placeholder */") ||
+      content.length < 50
+    ) {
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    if (error.code === "ENOENT") return true;
+    console.error(`   ⚠️  Error checking file ${filePath}:`, error.message);
+    return false;
   }
-  return fileList;
 }
 
-function readProjectContext() {
+function ensureDirForFile(filePath) {
+  const dir = path.dirname(filePath);
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
+
+async function readWorkspaceContext(workspaceRoot) {
+  const rootRel = normalizeWorkspaceRoot(workspaceRoot);
   let context = "";
 
-  const pkgPath = fileFullPath("package.json");
-  if (fs.existsSync(pkgPath)) {
-    context += "\n--- package.json ---\n";
-    context += fs.readFileSync(pkgPath, "utf8");
+  const configs = [
+    "package.json",
+    "tsconfig.json",
+    "vite.config.ts",
+    "next.config.ts",
+    "next.config.js",
+    "tailwind.config.ts",
+    "tailwind.config.js",
+    "biome.json",
+  ];
+
+  for (const cfg of configs) {
+    const cfgPath = resolveFilePath(rootRel, cfg);
+    if (fs.existsSync(cfgPath)) {
+      context += `\n--- ${cfg} ---\n`;
+      context += fs.readFileSync(cfgPath, "utf8");
+    }
   }
 
-  const tsconfigPath = fileFullPath("tsconfig.json");
-  if (fs.existsSync(tsconfigPath)) {
-    context += "\n--- tsconfig.json ---\n";
-    context += fs.readFileSync(tsconfigPath, "utf8");
-  }
+  const treeRes = await listBackendFiles({
+    dir: rootRel,
+    maxDepth: 5,
+    includeFiles: true,
+    includeDirs: true,
+    includeMeta: true,
+  });
 
-  const files = walkDir(WORKSPACE);
   context += "\n--- Project Structure ---\n";
-  context += files.join("\n");
+  if (treeRes?.success && Array.isArray(treeRes.files)) {
+    for (const item of treeRes.files) {
+      const meta = [];
+      if (typeof item.size === "number") meta.push(`size=${item.size}`);
+      if (typeof item.ext === "string" && item.ext) meta.push(`ext=${item.ext}`);
+      context += `${item.is_dir ? "DIR " : "FILE"}: ${item.path}${meta.length ? ` (${meta.join(", ")})` : ""}\n`;
+    }
+  } else {
+    context += "<tree unavailable>\n";
+  }
 
   return context;
 }
 
-/* -------------------------------------------------- */
+function mergeContexts(...contexts) {
+  return contexts
+    .filter(Boolean)
+    .join("\n\n")
+    .trim();
+}
 
 function cleanGeneratedCode(content) {
-  let cleaned = String(content).trim();
+  let cleaned = String(content || "").trim();
+
   if (cleaned.startsWith("```")) {
-cleaned = cleaned
-.replace(/^```[a-zA-Z]*\n?/, "")
+    cleaned = cleaned
+      .replace(/^```[a-zA-Z0-9_-]*\n?/, "")
       .replace(/```$/, "")
-.trim();
+      .trim();
   }
+
   return cleaned;
 }
 
-/* -------------------------------------------------- */
+async function readExistingFileContent(workspaceRoot, relativeFile) {
+  const fullPath = resolveFilePath(workspaceRoot, relativeFile);
+  if (!fs.existsSync(fullPath)) return "";
 
-async function generateCode(relativeFile, stepDescription, projectContext) {
-  const prompt = `
+  try {
+    const res = await readProjectFile({
+      path: path.relative(PROJECT_ROOT, fullPath).replace(/\\/g, "/"),
+      maxBytes: 200000,
+    });
+
+    if (!res?.success) return "";
+    return String(res.content || "");
+  } catch {
+    return "";
+  }
+}
+
+function formatSmartContext(ctx, title = "context") {
+  if (!ctx) return "";
+
+  const parts = [];
+
+  if (Array.isArray(ctx.relevantFiles) && ctx.relevantFiles.length > 0) {
+    parts.push(`=== ${title}: relevant files ===\n${ctx.relevantFiles.join("\n")}`);
+  }
+
+  if (Array.isArray(ctx.files) && ctx.files.length > 0) {
+    parts.push(`=== ${title}: selected files ===\n${ctx.files.join("\n")}`);
+  }
+
+  if (Array.isArray(ctx.chunks) && ctx.chunks.length > 0) {
+    parts.push(
+      `=== ${title}: chunks ===\n${ctx.chunks
+        .map((c) => `FILE: ${c.path}\n${String(c.content || "").slice(0, 1800)}`)
+        .join("\n---\n")}`
+    );
+  }
+
+  if (ctx.dependencyGraph && Object.keys(ctx.dependencyGraph).length > 0) {
+    parts.push(
+      `=== ${title}: dependency graph ===\n${JSON.stringify(ctx.dependencyGraph, null, 2)}`
+    );
+  }
+
+  return parts.join("\n\n");
+}
+
+function buildPrompt({
+  relativeFile,
+  action,
+  stepDescription,
+  plannerDraft,
+  currentContent,
+  workspaceContext,
+  globalSmartContext,
+  fileSmartContext,
+  plan,
+  projectType,
+}) {
+  const planMeta = {
+    name: plan.name,
+    goal: plan.goal,
+    summary: plan.summary,
+    task_scope: plan.task_scope,
+    dependencies: plan.dependencies || [],
+    constraints: plan.constraints || [],
+    acceptance_criteria: plan.acceptance_criteria || [],
+    notes: plan.notes || "",
+  };
+
+  return `
 Target file:
 ${relativeFile}
 
-Step description:
-${stepDescription}
+Action:
+${action}
 
-Project context:
-${projectContext}
+Task description:
+${stepDescription || ""}
+
+Planner draft (optional, may be partial):
+${plannerDraft || "<none>"}
+
+Current file content (if the file already exists):
+${currentContent || "<none>"}
+
+Plan metadata:
+${JSON.stringify(planMeta, null, 2)}
+
+Workspace context:
+${workspaceContext}
+
+Global semantic context:
+${formatSmartContext(globalSmartContext, "global")}
+
+File-specific semantic context:
+${formatSmartContext(fileSmartContext, "file")}
+
+Project type:
+${projectType}
 
 Strict requirements:
-- Only use existing files from Project Structure.
-- Do not invent new modules.
-- All imports must be valid.
-- Code must compile with tsc.
-- No explanations, only pure code.
+- Use only existing project structure and valid imports.
+- Do not invent paths or modules that do not exist.
+- If modifying a file, preserve the intended behavior and update it cleanly.
+- Make the file production-ready and complete.
+- Output ONLY the source code for the target file.
 `.trim();
+}
+
+async function generateCode(
+  client,
+  config,
+  entry,
+  plan,
+  workspaceRoot,
+  workspaceContext,
+  globalSmartContext,
+  projectType,
+  currentContent
+) {
+  const systemPrompt = SYSTEM_PROMPTS[projectType] || SYSTEM_PROMPTS.fullstack;
+
+  const fileQuery = [
+    entry.path,
+    entry.description,
+    plan.goal,
+    plan.summary,
+    plan.name,
+    plan.task_scope,
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const fileSmartContext = await buildSmartContext({
+    userMessage: fileQuery,
+    maxFiles: config.perFileMaxContextFiles,
+    dependencyDepth: config.perFileDependencyDepth,
+  });
+
+  const prompt = buildPrompt({
+    relativeFile: entry.path,
+    action: entry.action || "generate",
+    stepDescription: entry.description || plan.goal || "",
+    plannerDraft: entry.content || "",
+    currentContent,
+    workspaceContext,
+    globalSmartContext,
+    fileSmartContext,
+    plan,
+    projectType,
+  });
 
   const response = await client.chat.completions.create({
-model: "gpt-4.1",
-temperature: 0.1,
-messages: [
-{ role: "system", content: SYSTEM_PROMPT },
-{ role: "user", content: prompt },
-],
+    model: config.model,
+    temperature: config.temperature,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: prompt },
+    ],
   });
 
   const raw = response.choices?.[0]?.message?.content || "";
   return cleanGeneratedCode(raw);
 }
 
-/* -------------------------------------------------- */
-
 function writeFile(filePath, content) {
-  fs.writeFileSync(filePath, content);
+  ensureDirForFile(filePath);
+  fs.writeFileSync(filePath, content, "utf8");
 }
 
 /* -------------------------------------------------- */
+/* ---------------- MAIN FUNCTION ------------------- */
+/* -------------------------------------------------- */
 
-async function run() {
-  console.log("⚙️ Starting enhanced code generation...\n");
+export async function runCodegen(options = {}) {
+  const config = { ...DEFAULT_CONFIG, ...options };
 
-  const plan = readPlan();
-  const projectContext = readProjectContext();
+  console.log("⚙️ Starting code generation...\n");
+  console.log(`📁 Workspace: ${config.workspace}`);
+  console.log(`📋 Plan: ${config.planPath}`);
+  console.log(`🎯 Project Type: ${config.projectType || "fullstack"}\n`);
 
-  if (!plan.phases || !Array.isArray(plan.phases)) {
-throw new Error("Invalid plan structure: phases missing or not array");
+  const client = new OpenAI({
+    apiKey: config.apiKey,
+    baseURL: config.baseURL,
+  });
+
+  if (!fs.existsSync(config.planPath)) {
+    throw new Error(`Plan file not found: ${config.planPath}`);
   }
 
-  for (const phase of plan.phases) {
-console.log(`\n🚀 PHASE: ${phase.title}`);
+  const plan = JSON.parse(fs.readFileSync(config.planPath, "utf8"));
 
-if (!phase.steps || !Array.isArray(phase.steps)) continue;
+  const isTaskMode =
+    plan.task_type === "task" ||
+    Array.isArray(plan.files_to_create) ||
+    Array.isArray(plan.files_to_modify);
 
-for (const step of phase.steps) {
-console.log(`   🔹 STEP: ${step.id}`);
+  console.log(`📊 Plan mode: ${isTaskMode ? "task-level" : "project-level"}`);
 
-if (!step.files || !Array.isArray(step.files)) continue;
+  const workspaceRoot = isTaskMode
+    ? normalizeWorkspaceRoot(config.taskWorkspace || "./")
+    : normalizeWorkspaceRoot(config.workspace);
 
-for (const relativeFile of step.files) {
-const fullPath = fileFullPath(relativeFile);
+  console.log(`📁 Effective workspace: ${workspaceRoot || "."}\n`);
 
-if (!fileNeedsGeneration(fullPath)) {
-console.log(`   ⚠️ Skipping (already implemented): ${relativeFile}`);
-continue;
-}
+  const workspaceContext = await readWorkspaceContext(workspaceRoot);
 
-console.log(`   🤖 Generating: ${relativeFile}`);
+  const globalSmartContext = await buildSmartContext({
+    userMessage: [plan.name, plan.goal, plan.summary, plan.task_scope]
+      .filter(Boolean)
+      .join(" "),
+    maxFiles: config.maxContextFiles,
+    dependencyDepth: config.dependencyDepth,
+  });
 
-try {
-const code = await generateCode(
-relativeFile,
-step.description || "",
-projectContext
-);
+  const results = {
+    success: true,
+    filesGenerated: [],
+    filesSkipped: [],
+    errors: [],
+    stats: {
+      totalFiles: 0,
+      generated: 0,
+      skipped: 0,
+      failed: 0,
+    },
+  };
 
-if (!code.trim()) {
-console.error(`   ❌ Empty output for ${relativeFile}`);
-continue;
-}
+  const fileEntries = extractFilesFromPlan(plan);
 
-writeFile(fullPath, code);
-console.log(`   ✅ Written: ${relativeFile}`);
-} catch (err) {
-console.error(`   ❌ Error on ${relativeFile}:`, err.message);
-}
-}
-}
+  if (fileEntries.length === 0) {
+    console.warn("⚠️  No files found in plan. Check plan structure.");
+    return results;
   }
 
-  console.log("\n✅ Code generation complete.");
+  console.log(`📝 Files to process: ${fileEntries.length}\n`);
+
+  for (let i = 0; i < fileEntries.length; i++) {
+    const entry = fileEntries[i];
+    results.stats.totalFiles++;
+
+    const relativeFile = normalizeRelativePath(entry.path);
+    const fullPath = resolveFilePath(workspaceRoot, relativeFile);
+    const progress = `[${i + 1}/${fileEntries.length}]`;
+
+    const currentContent = await readExistingFileContent(workspaceRoot, relativeFile);
+
+    const isModifyAction = entry.action === "modify";
+    const shouldSkip =
+      config.skipExisting &&
+      !isModifyAction &&
+      !fileNeedsGeneration(fullPath);
+
+    if (shouldSkip) {
+      console.log(`   ⏭️  ${progress} Skipping (already implemented): ${relativeFile}`);
+      results.filesSkipped.push(relativeFile);
+      results.stats.skipped++;
+
+      if (config.onProgress) {
+        config.onProgress({ type: "file_skipped", file: relativeFile });
+      }
+      continue;
+    }
+
+    console.log(`   🤖 ${progress} Generating: ${relativeFile}`);
+
+    if (config.onProgress) {
+      config.onProgress({ type: "file_generating", file: relativeFile });
+    }
+
+    try {
+      const projectType = config.projectType || plan.task_scope || plan.project_type || "fullstack";
+
+      const code = await generateCode(
+        client,
+        config,
+        entry,
+        plan,
+        workspaceRoot,
+        workspaceContext,
+        globalSmartContext,
+        projectType,
+        currentContent
+      );
+
+      if (!code.trim()) {
+        throw new Error("Empty output from AI");
+      }
+
+      writeFile(fullPath, code);
+
+      console.log(`   ✅ ${progress} Written: ${relativeFile}`);
+      results.filesGenerated.push(relativeFile);
+      results.stats.generated++;
+
+      if (config.onProgress) {
+        config.onProgress({ type: "file_generated", file: relativeFile });
+      }
+    } catch (err) {
+      console.error(`   ❌ ${progress} Error on ${relativeFile}:`, err.message);
+      results.errors.push({ file: relativeFile, error: err.message });
+      results.stats.failed++;
+
+      if (config.onProgress) {
+        config.onProgress({
+          type: "file_error",
+          file: relativeFile,
+          error: err.message,
+        });
+      }
+    }
+  }
+
+  console.log("\n" + "=".repeat(50));
+  console.log("✅ Code generation complete!");
+  console.log(`📊 Stats:`);
+  console.log(`   Total files: ${results.stats.totalFiles}`);
+  console.log(`   Generated: ${results.stats.generated}`);
+  console.log(`   Skipped: ${results.stats.skipped}`);
+  console.log(`   Failed: ${results.stats.failed}`);
+  console.log("=".repeat(50) + "\n");
+
+  results.success = results.stats.failed === 0;
+  return results;
 }
 
-run();
+/* -------------------------------------------------- */
+/* ------------ STANDALONE EXECUTION ---------------- */
+/* -------------------------------------------------- */
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  runCodegen({
+    planPath: "./planner_plan.json",
+    workspace: "./backend",
+    taskWorkspace: "./",
+    projectType: "backend",
+    skipExisting: true,
+  }).catch((err) => {
+    console.error("❌ Fatal error:", err);
+    process.exit(1);
+  });
+}
