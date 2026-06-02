@@ -1,16 +1,14 @@
 import path from "path";
-import fs from "fs/promises";
+import fsSync from "fs";
+import { promises as fs } from "fs";
 
 import { listBackendFiles } from "./list_backend_files.js";
 import { readProjectFile } from "./readProjectFile.js";
 
 const PROJECT_ROOT = process.cwd();
 
-const IMPORT_REGEX =
-  /import\s+(?:.+?\s+from\s+)?["'](.+?)["']/g;
-
-const REQUIRE_REGEX =
-  /require\(["'](.+?)["']\)/g;
+const IMPORT_REGEX = /import\s+(?:.+?\s+from\s+)?["'](.+?)["']/g;
+const REQUIRE_REGEX = /require\(["'](.+?)["']\)/g;
 
 const SUPPORTED_EXTENSIONS = [
   ".ts",
@@ -19,6 +17,10 @@ const SUPPORTED_EXTENSIONS = [
   ".jsx",
   ".mjs",
   ".cjs",
+  ".json",
+  ".md",
+  ".css",
+  ".scss",
 ];
 
 const IGNORE_DIRS = new Set([
@@ -28,11 +30,10 @@ const IGNORE_DIRS = new Set([
   "dist",
   "build",
   "coverage",
+  ".turbo",
+  ".cache",
+  "out",
 ]);
-
-/* -------------------------------------------------- */
-/* ---------------- BASIC HELPERS ------------------- */
-/* -------------------------------------------------- */
 
 function normalize(p) {
   return String(p || "")
@@ -45,49 +46,16 @@ function uniq(arr) {
   return [...new Set(arr.filter(Boolean))];
 }
 
-function safeJson(obj) {
-  try {
-    return JSON.stringify(obj);
-  } catch {
-    return "";
-  }
-}
-
 function looksLikeCodeFile(file) {
-  return SUPPORTED_EXTENSIONS.some((ext) =>
-    file.endsWith(ext)
-  );
+  return SUPPORTED_EXTENSIONS.some((ext) => file.endsWith(ext));
 }
-
-/* -------------------------------------------------- */
-/* ---------------- FILE DISCOVERY ------------------ */
-/* -------------------------------------------------- */
-
-async function getAllProjectFiles() {
-  const result = await listBackendFiles({
-    dir: "",
-    maxDepth: 12,
-    includeMeta: false,
-  });
-
-  if (!result.success) {
-    return [];
-  }
-
-  return result.files
-    .filter((f) => !f.is_dir)
-    .map((f) => normalize(f.path))
-    .filter(looksLikeCodeFile);
-}
-
-/* -------------------------------------------------- */
-/* ---------------- IMPORT PARSING ------------------ */
-/* -------------------------------------------------- */
 
 function extractImports(content) {
   const imports = [];
-
   let match;
+
+  IMPORT_REGEX.lastIndex = 0;
+  REQUIRE_REGEX.lastIndex = 0;
 
   while ((match = IMPORT_REGEX.exec(content))) {
     imports.push(match[1]);
@@ -100,101 +68,95 @@ function extractImports(content) {
   return uniq(imports);
 }
 
-/* -------------------------------------------------- */
-/* ---------------- RESOLVE IMPORTS ----------------- */
-/* -------------------------------------------------- */
+function extractFilenameHints(userMessage) {
+  const msg = String(userMessage || "");
 
-function resolveImport(fromFile, importPath) {
-  if (!importPath.startsWith(".")) {
-    return null;
-  }
+  const pathRegex =
+    /(?:\/?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js))/g;
 
-  const baseDir = path.dirname(fromFile);
+  const filenameRegex =
+    /\b[A-Za-z0-9._-]+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js)\b/g;
 
-  for (const ext of SUPPORTED_EXTENSIONS) {
-    const full = normalize(
-      path.join(baseDir, importPath + ext)
-    );
+  const matches = uniq([
+    ...(msg.match(pathRegex) || []),
+    ...(msg.match(filenameRegex) || []),
+  ]);
 
-    const abs = path.join(PROJECT_ROOT, full);
-
-    try {
-      if (require("fs").existsSync(abs)) {
-        return full;
-      }
-    } catch {}
-  }
-
-  for (const ext of SUPPORTED_EXTENSIONS) {
-    const full = normalize(
-      path.join(baseDir, importPath, "index" + ext)
-    );
-
-    const abs = path.join(PROJECT_ROOT, full);
-
-    try {
-      if (require("fs").existsSync(abs)) {
-        return full;
-      }
-    } catch {}
-  }
-
-  return null;
+  return matches.map((m) => normalize(m));
 }
 
-/* -------------------------------------------------- */
-/* ---------------- KEYWORD SCORING ----------------- */
-/* -------------------------------------------------- */
+async function getAllProjectFiles() {
+  const result = await listBackendFiles({
+    dir: "",
+    maxDepth: 12,
+    includeMeta: true,
+    includeFiles: true,
+    includeDirs: false,
+  });
+
+  if (!result?.success || !Array.isArray(result.files)) {
+    return [];
+  }
+
+  return result.files
+    .filter((f) => !f.is_dir)
+    .map((f) => normalize(f.path))
+    .filter(looksLikeCodeFile);
+}
 
 function scoreFile(filePath, userMessage) {
-  const msg = userMessage.toLowerCase();
+  const msg = normalize(String(userMessage || "").toLowerCase());
 
   let score = 0;
 
-  const tokens = normalize(filePath)
-    .split("/")
-    .join(" ")
-    .split(/[\s\-_]+/);
+  const fileLower = normalize(filePath).toLowerCase();
+  const baseName = path.basename(filePath).toLowerCase();
+
+  if (msg.includes(baseName)) score += 80;
+
+  const tokens = fileLower.split("/").join(" ").split(/[\s\-_]+/);
 
   for (const token of tokens) {
     if (!token) continue;
-
     if (msg.includes(token.toLowerCase())) {
       score += 5;
     }
   }
 
-  if (msg.includes("page") && filePath.includes("page.")) {
-    score += 10;
+  if (msg.includes("page") && baseName.includes("page.")) {
+    score += 20;
   }
 
-  if (
-    msg.includes("component") &&
-    filePath.includes("components")
-  ) {
-    score += 8;
+  if (msg.includes("component") && fileLower.includes("components")) {
+    score += 18;
   }
 
-  if (
-    msg.includes("api") &&
-    filePath.includes("api")
-  ) {
-    score += 8;
+  if (msg.includes("login") && fileLower.includes("login")) {
+    score += 20;
   }
 
-  if (
-    msg.includes("route") &&
-    filePath.includes("routes")
-  ) {
-    score += 8;
+  if (msg.includes("sidebar") && fileLower.includes("sidebar")) {
+    score += 20;
+  }
+
+  if (msg.includes("chat") && fileLower.includes("chat")) {
+    score += 15;
+  }
+
+  if (msg.includes("api") && fileLower.includes("api")) {
+    score += 15;
+  }
+
+  if (msg.includes("route") && fileLower.includes("route")) {
+    score += 15;
+  }
+
+  if (msg.includes("layout") && fileLower.includes("layout")) {
+    score += 12;
   }
 
   return score;
 }
-
-/* -------------------------------------------------- */
-/* ---------------- FILE RANKER --------------------- */
-/* -------------------------------------------------- */
 
 async function rankRelevantFiles(userMessage, limit = 8) {
   const allFiles = await getAllProjectFiles();
@@ -211,13 +173,38 @@ async function rankRelevantFiles(userMessage, limit = 8) {
   return scored.map((x) => x.file);
 }
 
-/* -------------------------------------------------- */
-/* ------------- IMPORT GRAPH WALKER ---------------- */
-/* -------------------------------------------------- */
+function resolveImport(fromFile, importPath) {
+  if (!importPath || !importPath.startsWith(".")) {
+    return null;
+  }
+
+  const baseDir = path.dirname(fromFile);
+
+  const candidates = [];
+
+  const base = normalize(path.join(baseDir, importPath));
+  candidates.push(base);
+
+  for (const ext of SUPPORTED_EXTENSIONS) {
+    candidates.push(base + ext);
+  }
+
+  for (const ext of SUPPORTED_EXTENSIONS) {
+    candidates.push(path.join(base, "index" + ext));
+  }
+
+  for (const candidate of candidates) {
+    const abs = path.resolve(PROJECT_ROOT, candidate);
+    if (fsSync.existsSync(abs)) {
+      return normalize(candidate);
+    }
+  }
+
+  return null;
+}
 
 async function collectDependencyGraph(entryFiles, maxDepth = 3) {
   const visited = new Set();
-
   const graph = {};
 
   async function walk(file, depth) {
@@ -225,32 +212,27 @@ async function collectDependencyGraph(entryFiles, maxDepth = 3) {
 
     const normalized = normalize(file);
 
-    if (visited.has(normalized)) {
-      return;
-    }
-
+    if (visited.has(normalized)) return;
     visited.add(normalized);
 
     const res = await readProjectFile({
       path: normalized,
-      maxBytes: 120000,
+      maxBytes: 150000,
     });
 
-    if (!res.success) {
+    if (!res?.success || !res.content) {
+      graph[normalized] = [];
       return;
     }
 
     const imports = extractImports(res.content);
-
     graph[normalized] = [];
 
     for (const imp of imports) {
       const resolved = resolveImport(normalized, imp);
-
       if (!resolved) continue;
 
       graph[normalized].push(resolved);
-
       await walk(resolved, depth + 1);
     }
   }
@@ -262,20 +244,16 @@ async function collectDependencyGraph(entryFiles, maxDepth = 3) {
   return graph;
 }
 
-/* -------------------------------------------------- */
-/* ---------------- CONTEXT CHUNKS ------------------ */
-/* -------------------------------------------------- */
-
 async function buildContextChunks(files) {
   const chunks = [];
 
   for (const file of files) {
     const res = await readProjectFile({
       path: file,
-      maxBytes: 150000,
+      maxBytes: 180000,
     });
 
-    if (!res.success) continue;
+    if (!res?.success || !res.content) continue;
 
     chunks.push({
       path: file,
@@ -286,31 +264,45 @@ async function buildContextChunks(files) {
   return chunks;
 }
 
-/* -------------------------------------------------- */
-/* ---------------- PUBLIC ENGINE ------------------- */
-/* -------------------------------------------------- */
+async function resolveFilenameHints(userMessage) {
+  const hints = extractFilenameHints(userMessage);
+  if (!hints.length) return [];
+
+  const allFiles = await getAllProjectFiles();
+  const matches = [];
+
+  for (const hint of hints) {
+    const base = path.basename(hint).toLowerCase();
+    const exact = allFiles.filter(
+      (f) => path.basename(f).toLowerCase() === base
+    );
+
+    const partial = allFiles.filter((f) =>
+      path.basename(f).toLowerCase().includes(base)
+    );
+
+    matches.push(...exact, ...partial);
+  }
+
+  return uniq(matches);
+}
 
 export async function buildSmartContext({
   userMessage,
   maxFiles = 12,
   dependencyDepth = 2,
 } = {}) {
-  const relevantFiles = await rankRelevantFiles(
-    userMessage,
-    maxFiles
-  );
+  const rankedFiles = await rankRelevantFiles(userMessage, maxFiles);
+  const filenameMatches = await resolveFilenameHints(userMessage);
 
-  const dependencyGraph = await collectDependencyGraph(
-    relevantFiles,
-    dependencyDepth
-  );
+  const seedFiles = uniq([...filenameMatches, ...rankedFiles]).slice(0, maxFiles);
 
-  const dependencyFiles = uniq(
-    Object.values(dependencyGraph).flat()
-  );
+  const dependencyGraph = await collectDependencyGraph(seedFiles, dependencyDepth);
+
+  const dependencyFiles = uniq(Object.values(dependencyGraph).flat());
 
   const finalFiles = uniq([
-    ...relevantFiles,
+    ...seedFiles,
     ...dependencyFiles,
   ]).slice(0, maxFiles);
 
@@ -318,7 +310,8 @@ export async function buildSmartContext({
 
   return {
     success: true,
-    relevantFiles,
+    relevantFiles: rankedFiles,
+    filenameMatches,
     dependencyGraph,
     files: finalFiles,
     chunks,

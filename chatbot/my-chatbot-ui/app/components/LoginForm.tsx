@@ -1,47 +1,90 @@
-import React from 'react';
-import { motion } from 'framer-motion';
+'use client';
+
+import React, { useState } from 'react';
+import { useRouter } from 'next/navigation';
 
 export default function LoginForm() {
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const router = useRouter();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setSubmitting(true);
+    try {
+      // TODO: Implement actual login logic
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      // On success, redirect to home
+      router.push('/');
+    } catch (err) {
+      setError('Invalid credentials.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   return (
-    <form className="flex flex-col gap-7 font-sans">
+    <form
+      className="flex flex-col gap-7 font-sans"
+      autoComplete="off"
+      onSubmit={handleSubmit}
+      spellCheck={false}
+    >
       <div className="flex flex-col gap-2">
-        <label
-          className="text-sm font-medium text-white/80"
-          htmlFor="email"
-        >
+        <label htmlFor="email" className="text-sm text-white/70 font-medium px-1">
           Email
         </label>
         <input
-          className="border border-[#ff8a3d]/18 bg-white/[0.06] rounded-2xl px-3.5 py-2.5 text-white placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-[#ff8a3d]/30 focus:border-[#ff8a3d]/40 transition-all duration-150"
           id="email"
           type="email"
           autoComplete="email"
-          placeholder="Email"
+          className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-white/90 placeholder:text-white/30 focus:border-[#ff8a3d]/40 focus:outline-none transition"
+          placeholder="you@email.com"
+          value={email}
+          onChange={e => setEmail(e.target.value)}
+          disabled={submitting}
+          required
         />
       </div>
       <div className="flex flex-col gap-2">
-        <label
-          className="text-sm font-medium text-white/80"
-          htmlFor="password"
-        >
+        <label htmlFor="password" className="text-sm text-white/70 font-medium px-1">
           Password
         </label>
         <input
-          className="border border-[#ff8a3d]/18 bg-white/[0.06] rounded-2xl px-3.5 py-2.5 text-white placeholder:text-white/30 focus:outline-none focus:ring-2 focus:ring-[#ff8a3d]/30 focus:border-[#ff8a3d]/40 transition-all duration-150"
           id="password"
           type="password"
           autoComplete="current-password"
-          placeholder="Password"
+          className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-white/90 placeholder:text-white/30 focus:border-[#ff8a3d]/40 focus:outline-none transition"
+          placeholder="Your password"
+          value={password}
+          onChange={e => setPassword(e.target.value)}
+          disabled={submitting}
+          required
         />
       </div>
-      <motion.button
-        whileHover={{ scale: 1.035 }}
-        whileTap={{ scale: 0.97 }}
-        className="mt-4 flex items-center justify-center bg-gradient-to-br from-[#ff6a3d] via-[#ff4d3d] to-[#ff2d2d] border border-[#ff8a3d]/20 text-white font-semibold py-2.5 rounded-2xl shadow-[0_8px_18px_rgba(255,77,61,0.18)] transition-all duration-200 hover:shadow-[0_12px_24px_rgba(255,77,61,0.22)] focus:outline-none focus:ring-2 focus:ring-[#ff8a3d]/30 focus:ring-offset-2 disabled:opacity-50"
+      {error && (
+        <div className="text-sm text-red-400 px-1 -mt-3">{error}</div>
+      )}
+      <button
+        className="mt-4 flex items-center justify-center bg-gradient-to-r from-[#ff8a3d] via-[#ff5e4d] to-[#ff2d2d] text-white font-semibold rounded-2xl py-2.5 px-6 shadow-lg transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-[#ff8a3d]/40 focus:ring-offset-2 disabled:opacity-60 disabled:cursor-not-allowed"
         type="submit"
+        disabled={submitting}
       >
-        Sign In
-      </motion.button>
+        {submitting ? 'Signing in…' : 'Sign in'}
+      </button>
+      <div className="mt-2 flex items-center justify-center">
+        <span className="text-sm text-white/60">Don't have an account?</span>
+        <button
+          type="button"
+          className="ml-2 text-sm font-medium text-[#ff8a3d] hover:underline focus:outline-none"
+          onClick={() => router.push('/signup')}
+        >
+          Sign up
+        </button>
+      </div>
     </form>
   );
 }

@@ -27,6 +27,17 @@ const DEFAULT_CONFIG = {
   perFileDependencyDepth: 2,
 };
 
+const DESIGN_REFERENCE_FILENAMES = [
+  "page.tsx",
+  "layout.tsx",
+  "globals.css",
+  "page.jsx",
+  "layout.jsx",
+  "globals.scss",
+  "globals.sass",
+  "globals.less",
+];
+
 /* -------------------------------------------------- */
 /* ---------------- SYSTEM PROMPTS ------------------ */
 /* -------------------------------------------------- */
@@ -231,7 +242,177 @@ function ensureDirForFile(filePath) {
   }
 }
 
-async function readWorkspaceContext(workspaceRoot) {
+function cleanGeneratedCode(content) {
+  let cleaned = String(content || "").trim();
+
+  if (cleaned.startsWith("```")) {
+    cleaned = cleaned
+      .replace(/^```[a-zA-Z0-9_-]*\n?/, "")
+      .replace(/```$/, "")
+      .trim();
+  }
+
+  return cleaned;
+}
+
+function uniq(values) {
+  return [...new Set(values.filter(Boolean))];
+}
+
+function basenameScore(candidateName, targetName) {
+  const candidate = candidateName.toLowerCase();
+  const target = targetName.toLowerCase();
+
+  if (candidate === target) return 100;
+  if (candidate.endsWith(target)) return 85;
+  if (candidate.includes(target)) return 65;
+  return 0;
+}
+
+function collectFilenameHints(text) {
+  const msg = String(text || "");
+
+  const pathRegex =
+    /(?:\/?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js))/g;
+
+  const filenameRegex =
+    /\b[A-Za-z0-9._-]+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js)\b/g;
+
+  const matches = uniq([
+    ...(msg.match(pathRegex) || []),
+    ...(msg.match(filenameRegex) || []),
+  ]);
+
+  return matches.map(normalizeRelativePath);
+}
+
+async function findFilesByName(filename, { dir = "", limit = 10 } = {}) {
+  const target = normalizeRelativePath(filename);
+  if (!target) return [];
+
+  const baseName = path.basename(target).toLowerCase();
+  const searchDir = normalizeWorkspaceRoot(dir);
+
+  const res = await listBackendFiles({
+    dir: searchDir,
+    maxDepth: 12,
+    includeFiles: true,
+    includeDirs: false,
+    includeMeta: true,
+  });
+
+  if (!res?.success || !Array.isArray(res.files)) return [];
+
+  const scored = res.files
+    .filter((item) => !item.is_dir)
+    .map((item) => {
+      const filePath = normalizeRelativePath(item.path);
+      const name = path.basename(filePath).toLowerCase();
+      const score = basenameScore(name, baseName);
+
+      const depthPenalty = filePath.split("/").length;
+      const areaBonus =
+        filePath.includes("frontend/") || filePath.includes("app/") || filePath.includes("src/")
+          ? 5
+          : 0;
+
+      return {
+        path: filePath,
+        score: score + areaBonus - Math.min(depthPenalty, 8),
+      };
+    })
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit);
+
+  return uniq(scored.map((x) => x.path));
+}
+
+async function resolveExistingPathByName(workspaceRoot, relativePath) {
+  const normalized = normalizeRelativePath(relativePath);
+  if (!normalized) return null;
+
+  const direct = resolveFilePath(workspaceRoot, normalized);
+  if (fs.existsSync(direct)) {
+    return direct;
+  }
+
+  const baseName = path.basename(normalized);
+  const matches = await findFilesByName(baseName, {
+    dir: workspaceRoot,
+    limit: 10,
+  });
+
+  if (matches.length > 0) {
+    return path.resolve(PROJECT_ROOT, matches[0]);
+  }
+
+  return null;
+}
+
+async function readFileAsContext(relativePath, maxBytes = 200000) {
+  try {
+    const res = await readProjectFile({
+      path: relativePath,
+      maxBytes,
+    });
+
+    if (!res?.success) return null;
+
+    return String(res.content || "");
+  } catch {
+    return null;
+  }
+}
+
+async function readExistingFileContent(workspaceRoot, relativeFile) {
+  const fullPath = await resolveExistingPathByName(workspaceRoot, relativeFile);
+  if (!fullPath) return "";
+
+  try {
+    const rel = path.relative(PROJECT_ROOT, fullPath).replace(/\\/g, "/");
+    const content = await readFileAsContext(rel, 200000);
+    return content || "";
+  } catch {
+    return "";
+  }
+}
+
+async function collectReferenceSnippets(workspaceRoot, planText = "") {
+  const seen = new Set();
+  const snippets = [];
+
+  const hints = uniq([
+    ...DESIGN_REFERENCE_FILENAMES,
+    ...collectFilenameHints(planText),
+  ]);
+
+  for (const name of hints) {
+    const matches = await findFilesByName(name, {
+      dir: workspaceRoot,
+      limit: 3,
+    });
+
+    for (const relPath of matches) {
+      if (seen.has(relPath)) continue;
+      seen.add(relPath);
+
+      const content = await readFileAsContext(relPath, 140000);
+      if (!content) continue;
+
+      snippets.push({
+        path: relPath,
+        content: content.slice(0, 3500),
+      });
+
+      if (snippets.length >= 8) return snippets;
+    }
+  }
+
+  return snippets;
+}
+
+async function readWorkspaceContext(workspaceRoot, planText = "") {
   const rootRel = normalizeWorkspaceRoot(workspaceRoot);
   let context = "";
 
@@ -274,74 +455,17 @@ async function readWorkspaceContext(workspaceRoot) {
     context += "<tree unavailable>\n";
   }
 
+  const referenceSnippets = await collectReferenceSnippets(rootRel, planText);
+  if (referenceSnippets.length > 0) {
+    context += "\n--- Reference Files ---\n";
+    for (const ref of referenceSnippets) {
+      context += `FILE: ${ref.path}\n`;
+      context += `${ref.content.slice(0, 5000)}\n`;
+      context += `---\n`;
+    }
+  }
+
   return context;
-}
-
-function mergeContexts(...contexts) {
-  return contexts
-    .filter(Boolean)
-    .join("\n\n")
-    .trim();
-}
-
-function cleanGeneratedCode(content) {
-  let cleaned = String(content || "").trim();
-
-  if (cleaned.startsWith("```")) {
-    cleaned = cleaned
-      .replace(/^```[a-zA-Z0-9_-]*\n?/, "")
-      .replace(/```$/, "")
-      .trim();
-  }
-
-  return cleaned;
-}
-
-async function readExistingFileContent(workspaceRoot, relativeFile) {
-  const fullPath = resolveFilePath(workspaceRoot, relativeFile);
-  if (!fs.existsSync(fullPath)) return "";
-
-  try {
-    const res = await readProjectFile({
-      path: path.relative(PROJECT_ROOT, fullPath).replace(/\\/g, "/"),
-      maxBytes: 200000,
-    });
-
-    if (!res?.success) return "";
-    return String(res.content || "");
-  } catch {
-    return "";
-  }
-}
-
-function formatSmartContext(ctx, title = "context") {
-  if (!ctx) return "";
-
-  const parts = [];
-
-  if (Array.isArray(ctx.relevantFiles) && ctx.relevantFiles.length > 0) {
-    parts.push(`=== ${title}: relevant files ===\n${ctx.relevantFiles.join("\n")}`);
-  }
-
-  if (Array.isArray(ctx.files) && ctx.files.length > 0) {
-    parts.push(`=== ${title}: selected files ===\n${ctx.files.join("\n")}`);
-  }
-
-  if (Array.isArray(ctx.chunks) && ctx.chunks.length > 0) {
-    parts.push(
-      `=== ${title}: chunks ===\n${ctx.chunks
-        .map((c) => `FILE: ${c.path}\n${String(c.content || "").slice(0, 1800)}`)
-        .join("\n---\n")}`
-    );
-  }
-
-  if (ctx.dependencyGraph && Object.keys(ctx.dependencyGraph).length > 0) {
-    parts.push(
-      `=== ${title}: dependency graph ===\n${JSON.stringify(ctx.dependencyGraph, null, 2)}`
-    );
-  }
-
-  return parts.join("\n\n");
 }
 
 function buildPrompt({
@@ -390,10 +514,10 @@ Workspace context:
 ${workspaceContext}
 
 Global semantic context:
-${formatSmartContext(globalSmartContext, "global")}
+${JSON.stringify(globalSmartContext, null, 2)}
 
 File-specific semantic context:
-${formatSmartContext(fileSmartContext, "file")}
+${JSON.stringify(fileSmartContext, null, 2)}
 
 Project type:
 ${projectType}
@@ -463,6 +587,12 @@ async function generateCode(
   return cleanGeneratedCode(raw);
 }
 
+function findBestOutputPath(workspaceRoot, relativeFile) {
+  const normalized = normalizeRelativePath(relativeFile);
+  const direct = resolveFilePath(workspaceRoot, normalized);
+  return direct;
+}
+
 function writeFile(filePath, content) {
   ensureDirForFile(filePath);
   fs.writeFileSync(filePath, content, "utf8");
@@ -504,12 +634,23 @@ export async function runCodegen(options = {}) {
 
   console.log(`📁 Effective workspace: ${workspaceRoot || "."}\n`);
 
-  const workspaceContext = await readWorkspaceContext(workspaceRoot);
+  const planText = [
+    plan.name,
+    plan.goal,
+    plan.summary,
+    plan.task_scope,
+    plan.notes,
+    JSON.stringify(plan.context_assumptions || []),
+    JSON.stringify(plan.files_to_create || []),
+    JSON.stringify(plan.files_to_modify || []),
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  const workspaceContext = await readWorkspaceContext(workspaceRoot, planText);
 
   const globalSmartContext = await buildSmartContext({
-    userMessage: [plan.name, plan.goal, plan.summary, plan.task_scope]
-      .filter(Boolean)
-      .join(" "),
+    userMessage: planText,
     maxFiles: config.maxContextFiles,
     dependencyDepth: config.dependencyDepth,
   });
@@ -541,7 +682,7 @@ export async function runCodegen(options = {}) {
     results.stats.totalFiles++;
 
     const relativeFile = normalizeRelativePath(entry.path);
-    const fullPath = resolveFilePath(workspaceRoot, relativeFile);
+    const fullPath = findBestOutputPath(workspaceRoot, relativeFile);
     const progress = `[${i + 1}/${fileEntries.length}]`;
 
     const currentContent = await readExistingFileContent(workspaceRoot, relativeFile);
@@ -570,7 +711,8 @@ export async function runCodegen(options = {}) {
     }
 
     try {
-      const projectType = config.projectType || plan.task_scope || plan.project_type || "fullstack";
+      const projectType =
+        config.projectType || plan.task_scope || plan.project_type || "fullstack";
 
       const code = await generateCode(
         client,
