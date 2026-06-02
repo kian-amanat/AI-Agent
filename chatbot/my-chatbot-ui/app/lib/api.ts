@@ -1,6 +1,6 @@
-// src/api.ts
+const BASE_URL = "http://localhost:9000/api/agent";
 
-const BASE_URL = 'http://localhost:9000/api/agent';
+const UPLOAD_URL = `${BASE_URL}/upload`;
 
 export interface Session {
   id: string;
@@ -13,38 +13,188 @@ export interface Session {
 export interface Message {
   id: number;
   session_id: string;
-  role: 'user' | 'assistant';
+  role: "user" | "assistant";
   content: string;
   intent: string | null;
   created_at: string;
 }
 
-// List all sessions
+type SessionsResponse = {
+  ok: boolean;
+  error?: string;
+  sessions?: Session[];
+};
+
+type MessagesResponse = {
+  ok: boolean;
+  error?: string;
+  messages?: Message[];
+};
+
+type DeleteResponse = {
+  ok: boolean;
+  error?: string;
+};
+
+type UploadResponse = {
+  ok: boolean;
+  error?: string;
+  path?: string;
+  filename?: string;
+  url?: string;
+};
+
+type RunPayload = {
+  message: string;
+  session_id?: string;
+  attachment_paths?: string[];
+};
+
+async function readJson<T>(res: Response): Promise<T> {
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    throw new Error(text || res.statusText || "Invalid server response");
+  }
+}
+
+async function uploadAttachment(file: File): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(UPLOAD_URL, {
+    method: "POST",
+    body: formData,
+  });
+
+  const data = await readJson<UploadResponse>(res);
+
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || `Upload failed with status ${res.status}`);
+  }
+
+  if (!data.path) {
+    throw new Error("Upload succeeded, but no file path was returned.");
+  }
+
+  return data.path;
+}
+
+async function parseSSE(
+  res: Response,
+  onChunk: (chunk: string) => void,
+  onDone: (sessionId: string) => void,
+  onError: (err: string) => void,
+  fallbackSessionId: string | null
+) {
+  if (!res.body) {
+    throw new Error("No response body received");
+  }
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let returnedSessionId = fallbackSessionId ?? "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+
+    buffer += decoder.decode(value, { stream: true });
+
+    const chunks = buffer.split("\n\n");
+    buffer = chunks.pop() ?? "";
+
+    for (const chunk of chunks) {
+      const lines = chunk.split("\n");
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+
+        const raw = trimmed.slice(5).trim();
+        if (!raw) continue;
+
+        try {
+          const parsed = JSON.parse(raw);
+
+          if (parsed?.session_id) {
+            returnedSessionId = String(parsed.session_id);
+          }
+
+          if (parsed?.type === "start") {
+            if (parsed.session_id) {
+              returnedSessionId = String(parsed.session_id);
+            }
+          } else if (parsed?.type === "content") {
+            if (typeof parsed.content === "string" && parsed.content) {
+              onChunk(parsed.content);
+            }
+          } else if (parsed?.type === "done") {
+            onDone(returnedSessionId || fallbackSessionId || "");
+          } else if (parsed?.type === "error") {
+            throw new Error(parsed.details || parsed.error || "Unknown error");
+          }
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Malformed server event";
+          onError(message);
+          throw err;
+        }
+      }
+    }
+  }
+
+  if (returnedSessionId) {
+    onDone(returnedSessionId);
+  }
+}
+
 export async function fetchSessions(): Promise<Session[]> {
-  const res = await fetch(`${BASE_URL}/sessions`);
-  const data = await res.json();
-  if (!data.ok) throw new Error(data.error);
-  return data.sessions;
+  const res = await fetch(`${BASE_URL}/sessions`, {
+    method: "GET",
+    cache: "no-store",
+  });
+
+  const data = await readJson<SessionsResponse>(res);
+
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || "Failed to fetch sessions");
+  }
+
+  return Array.isArray(data.sessions) ? data.sessions : [];
 }
 
-// Get messages for a session
 export async function fetchSessionMessages(sessionId: string): Promise<Message[]> {
-  const res = await fetch(`${BASE_URL}/sessions/${sessionId}`);
-  const data = await res.json();
-  if (!data.ok) throw new Error(data.error);
-  return data.messages;
+  const res = await fetch(`${BASE_URL}/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "GET",
+    cache: "no-store",
+  });
+
+  const data = await readJson<MessagesResponse>(res);
+
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || "Failed to fetch session messages");
+  }
+
+  return Array.isArray(data.messages) ? data.messages : [];
 }
 
-// Delete a session
 export async function deleteSession(sessionId: string): Promise<void> {
-  const res = await fetch(`${BASE_URL}/sessions/${sessionId}`, { method: 'DELETE' });
-  const data = await res.json();
-  if (!data.ok) throw new Error(data.error);
+  const res = await fetch(`${BASE_URL}/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "DELETE",
+  });
+
+  const data = await readJson<DeleteResponse>(res);
+
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || "Failed to delete session");
+  }
 }
 
-// Send a message (SSE stream)
 export function sendMessage(
   message: string,
+  file: File | null,
   sessionId: string | null,
   onChunk: (chunk: string) => void,
   onDone: (sessionId: string) => void,
@@ -52,42 +202,41 @@ export function sendMessage(
 ): () => void {
   const controller = new AbortController();
 
-  fetch(`${BASE_URL}/run`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, session_id: sessionId }),
-    signal: controller.signal,
-  }).then(async (res) => {
-    const reader = res.body!.getReader();
-    const decoder = new TextDecoder();
-    let returnedSessionId = sessionId ?? '';
+  void (async () => {
+    try {
+      let attachmentPaths: string[] = [];
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      const lines = decoder.decode(value).split('\n');
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        try {
-          const parsed = JSON.parse(line.slice(6));
-          if (parsed.type === 'start') {
-            returnedSessionId = parsed.session_id ?? returnedSessionId;
-          } else if (parsed.type === 'content') {
-            onChunk(parsed.content);
-          } else if (parsed.type === 'done') {
-            onDone(returnedSessionId);
-          } else if (parsed.type === 'error') {
-            onError(parsed.error);
-          }
-        } catch {
-          // skip malformed lines
-        }
+      if (file) {
+        const uploadedPath = await uploadAttachment(file);
+        attachmentPaths = [uploadedPath];
       }
+
+      const payload: RunPayload = {
+        message,
+        ...(sessionId ? { session_id: sessionId } : {}),
+        ...(attachmentPaths.length ? { attachment_paths: attachmentPaths } : {}),
+      };
+
+      const res = await fetch(`${BASE_URL}/run`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        const data = await readJson<{ error?: string; details?: string }>(res);
+        throw new Error(data.details || data.error || `Request failed with status ${res.status}`);
+      }
+
+      await parseSSE(res, onChunk, onDone, onError, sessionId);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      onError(err instanceof Error ? err.message : "Unknown error");
     }
-  }).catch((err) => {
-    if (err.name !== 'AbortError') onError(err.message);
-  });
+  })();
 
   return () => controller.abort();
 }
