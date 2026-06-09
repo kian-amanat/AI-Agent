@@ -9,7 +9,7 @@ const OPENAI_BASE_URL =
 const OPENAI_API_KEY =
   process.env.OPENAI_API_KEY ||
   "***REMOVED-SECRET***";
-const MODEL = process.env.OPENAI_MODEL || "gpt-4.1";
+const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 const client = new OpenAI({
   apiKey: OPENAI_API_KEY,
