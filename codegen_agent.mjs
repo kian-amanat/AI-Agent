@@ -16,7 +16,7 @@ const DEFAULT_CONFIG = {
   planPath: "./planner_plan.json",
   workspace: "./",
   taskWorkspace: "./",
-  model: "gpt-4.1",
+  model: "gpt-4o-mini",
   temperature: 0.1,
   apiKey: process.env.OPENAI_API_KEY || "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
   baseURL: process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1",
