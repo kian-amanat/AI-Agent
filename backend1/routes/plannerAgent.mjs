@@ -278,6 +278,7 @@ export default async function plannerAgentRoute(fastify) {
 
         // 🔹 ساخت requestId یکتا برای این اجرای pipeline
         const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        console.log("[AGENT /run] pipeline call", { sessionId, requestId });
 
         reply.raw.write(
           `data: ${JSON.stringify({

@@ -1,5 +1,5 @@
 import React from "react";
-import { RotateCcw, Loader2 } from "lucide-react";
+import { RotateCcw, Loader2, Check } from "lucide-react";
 
 type ParsedSection = {
   type: "text" | "bullet" | "numbered" | "code" | "header" | "divider";
@@ -135,6 +135,15 @@ export default function AssistantMessage({
 
   const undoResult = metadata?.undoResult;
 
+  // حالت موفقیت دائمی بعد از اتمام Undo (تا وقتی metadata عوض نشه)
+  const [undoSucceeded, setUndoSucceeded] = React.useState(false);
+
+  React.useEffect(() => {
+    if (undoResult && !undoResult.error) {
+      setUndoSucceeded(true);
+    }
+  }, [undoResult]);
+
   return (
     <div className="space-y-3">
       {sections.map((section, idx) => {
@@ -251,17 +260,34 @@ export default function AssistantMessage({
 
       {/* دکمه Undo برای پیام‌های technical با requestId */}
       {canShowUndo && (
-        <div className="mt-3 flex items-center gap-3">
+        <div className="mt-3">
           <button
             type="button"
             onClick={onUndoClick}
-            disabled={isUndoing}
-            className="inline-flex items-center gap-1.5 rounded-full border border-white/14 bg-white/[0.02] px-3 py-1.5 text-xs font-medium text-white/80 transition-colors hover:border-white/26 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-60"
+            disabled={isUndoing || undoSucceeded}
+            className={[
+              "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium",
+              // ترنزیشن نرم برای رنگ، بوردِر، سایه و scale
+              "transition-all duration-300 ease-out",
+              isUndoing
+                ? "border border-amber-400/60 bg-amber-400/10 text-amber-50 shadow-[0_0_0_1px_rgba(251,191,36,0.25)] scale-[0.98]"
+                : undoSucceeded
+                ? "border border-emerald-400/80 bg-emerald-400/10 text-emerald-50 shadow-[0_0_18px_rgba(16,185,129,0.25)]"
+                : "border border-white/14 bg-white/[0.02] text-white/80 hover:border-white/26 hover:bg-white/[0.06]",
+              (isUndoing || undoSucceeded) && "cursor-default",
+            ]
+              .filter(Boolean)
+              .join(" ")}
           >
             {isUndoing ? (
               <>
                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
                 <span>Reverting changes…</span>
+              </>
+            ) : undoSucceeded ? (
+              <>
+                <Check className="h-3.5 w-3.5" />
+                <span>Changes reverted</span>
               </>
             ) : (
               <>
@@ -270,89 +296,6 @@ export default function AssistantMessage({
               </>
             )}
           </button>
-
-          <span className="text-[11px] text-white/35">
-            Request ID: {metadata?.requestId}
-          </span>
-        </div>
-      )}
-
-      {/* نمایش نتیجه Undo اگر وجود داشته باشد */}
-      {undoResult && (
-        <div className="mt-3 rounded-xl border border-emerald-400/20 bg-emerald-400/5 p-3">
-          {undoResult.error ? (
-            <div className="text-xs text-red-300">
-              Undo failed: {undoResult.error}
-            </div>
-          ) : (
-            <>
-              {undoResult.stats && (
-                <div className="mb-2 text-xs text-emerald-100">
-                  <div className="font-semibold text-emerald-200">
-                    Undo completed
-                  </div>
-                  <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1">
-                    <span>
-                      Files touched:{" "}
-                      <span className="font-mono">
-                        {undoResult.stats.filesTouched}
-                      </span>
-                    </span>
-                    <span>
-                      Files reverted:{" "}
-                      <span className="font-mono">
-                        {undoResult.stats.filesReverted}
-                      </span>
-                    </span>
-                    <span>
-                      Errors:{" "}
-                      <span className="font-mono">
-                        {undoResult.stats.errors}
-                      </span>
-                    </span>
-                  </div>
-                </div>
-              )}
-
-              {undoResult.files && undoResult.files.length > 0 && (
-                <details className="mt-1 text-xs text-emerald-100">
-                  <summary className="cursor-pointer text-emerald-200">
-                    View file-level details
-                  </summary>
-                  <ul className="mt-1 space-y-1.5">
-                    {undoResult.files.map((f) => (
-                      <li
-                        key={f.path}
-                        className="flex flex-wrap items-center justify-between gap-1 rounded-lg bg-black/20 px-2 py-1"
-                      >
-                        <span className="font-mono text-[11px] text-emerald-50">
-                          {f.path}
-                        </span>
-                        <span className="text-[11px]">
-                          <span
-                            className={
-                              f.status === "reverted"
-                                ? "text-emerald-300"
-                                : f.status === "skipped"
-                                ? "text-yellow-300"
-                                : "text-red-300"
-                            }
-                          >
-                            {f.status}
-                          </span>
-                          {f.reason && (
-                            <span className="ml-1 text-white/60">
-                              — {f.reason}
-                            </span>
-                          )}
-                        </span>
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-            </>
-          )}
         </div>
       )}
     </div>

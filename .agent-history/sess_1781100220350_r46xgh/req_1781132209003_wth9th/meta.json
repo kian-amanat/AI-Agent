@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess_1781100220350_r46xgh",
+  "requestId": "req_1781132209003_wth9th",
+  "createdAt": "2026-06-10T22:58:00.713Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/components/LoginForm.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/components/LoginForm.tsx",
+      "existedBefore": true,
+      "snapshotPath": ".agent-history/sess_1781100220350_r46xgh/req_1781132209003_wth9th/files/chatbot/my-chatbot-ui/app/components/LoginForm.tsx.before"
+    }
+  ]
+}
