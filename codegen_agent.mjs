@@ -12,6 +12,13 @@ import { readProjectFile } from "./tools/readProjectFile.js";
 
 const PROJECT_ROOT = process.cwd();
 
+// 🆔 شناسه‌های سشن و ریکوئست (از env)
+const USER_SESSION_ID = process.env.USER_SESSION_ID || null;
+const USER_REQUEST_ID = process.env.USER_REQUEST_ID || null;
+
+// ریشه‌ی ذخیره‌سازی تاریخچه
+const HISTORY_ROOT = path.resolve(PROJECT_ROOT, ".agent-history");
+
 const DEFAULT_CONFIG = {
   planPath: "./planner_plan.json",
   workspace: "./",
@@ -25,6 +32,10 @@ const DEFAULT_CONFIG = {
   perFileMaxContextFiles: 8,
   dependencyDepth: 2,
   perFileDependencyDepth: 2,
+
+  // اختیاری: امکان پاس‌دادن session/request از بیرون (مثلاً برای تست)
+  sessionId: USER_SESSION_ID,
+  requestId: USER_REQUEST_ID,
 };
 
 const DESIGN_REFERENCE_FILENAMES = [
@@ -246,10 +257,8 @@ function cleanGeneratedCode(content) {
   let cleaned = String(content || "").trim();
 
   if (cleaned.startsWith("```")) {
-    cleaned = cleaned
-      .replace(/^```[a-zA-Z0-9_-]*\n?/, "")
-      .replace(/```$/, "")
-      .trim();
+cleaned = cleaned
+.replace(/^```[a-zA-Z0-9_-]*\n?/, "").replace(/```$/, "").trim();
   }
 
   return cleaned;
@@ -273,14 +282,14 @@ function collectFilenameHints(text) {
   const msg = String(text || "");
 
   const pathRegex =
-    /(?:\/?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js))/g;
+/(?:\/?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js))/g;
 
   const filenameRegex =
-    /\b[A-Za-z0-9._-]+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js)\b/g;
+/\b[A-Za-z0-9._-]+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js)\b/g;
 
   const matches = uniq([
-    ...(msg.match(pathRegex) || []),
-    ...(msg.match(filenameRegex) || []),
+...(msg.match(pathRegex) || []),
+...(msg.match(filenameRegex) || []),
   ]);
 
   return matches.map(normalizeRelativePath);
@@ -294,36 +303,36 @@ async function findFilesByName(filename, { dir = "", limit = 10 } = {}) {
   const searchDir = normalizeWorkspaceRoot(dir);
 
   const res = await listBackendFiles({
-    dir: searchDir,
-    maxDepth: 12,
-    includeFiles: true,
-    includeDirs: false,
-    includeMeta: true,
+dir: searchDir,
+maxDepth: 12,
+includeFiles: true,
+includeDirs: false,
+includeMeta: true,
   });
 
   if (!res?.success || !Array.isArray(res.files)) return [];
 
   const scored = res.files
-    .filter((item) => !item.is_dir)
-    .map((item) => {
-      const filePath = normalizeRelativePath(item.path);
-      const name = path.basename(filePath).toLowerCase();
-      const score = basenameScore(name, baseName);
+.filter((item) => !item.is_dir)
+.map((item) => {
+const filePath = normalizeRelativePath(item.path);
+const name = path.basename(filePath).toLowerCase();
+const score = basenameScore(name, baseName);
 
-      const depthPenalty = filePath.split("/").length;
-      const areaBonus =
-        filePath.includes("frontend/") || filePath.includes("app/") || filePath.includes("src/")
-          ? 5
-          : 0;
+const depthPenalty = filePath.split("/").length;
+const areaBonus =
+filePath.includes("frontend/") || filePath.includes("app/") || filePath.includes("src/")
+? 5
+: 0;
 
-      return {
-        path: filePath,
-        score: score + areaBonus - Math.min(depthPenalty, 8),
-      };
-    })
-    .filter((x) => x.score > 0)
-    .sort((a, b) => b.score - a.score)
-    .slice(0, limit);
+return {
+path: filePath,
+score: score + areaBonus - Math.min(depthPenalty, 8),
+};
+})
+.filter((x) => x.score > 0)
+.sort((a, b) => b.score - a.score)
+.slice(0, limit);
 
   return uniq(scored.map((x) => x.path));
 }
@@ -334,17 +343,17 @@ async function resolveExistingPathByName(workspaceRoot, relativePath) {
 
   const direct = resolveFilePath(workspaceRoot, normalized);
   if (fs.existsSync(direct)) {
-    return direct;
+return direct;
   }
 
   const baseName = path.basename(normalized);
   const matches = await findFilesByName(baseName, {
-    dir: workspaceRoot,
-    limit: 10,
+dir: workspaceRoot,
+limit: 10,
   });
 
   if (matches.length > 0) {
-    return path.resolve(PROJECT_ROOT, matches[0]);
+return path.resolve(PROJECT_ROOT, matches[0]);
   }
 
   return null;
@@ -352,16 +361,16 @@ async function resolveExistingPathByName(workspaceRoot, relativePath) {
 
 async function readFileAsContext(relativePath, maxBytes = 200000) {
   try {
-    const res = await readProjectFile({
-      path: relativePath,
-      maxBytes,
-    });
+const res = await readProjectFile({
+path: relativePath,
+maxBytes,
+});
 
-    if (!res?.success) return null;
+if (!res?.success) return null;
 
-    return String(res.content || "");
+return String(res.content || "");
   } catch {
-    return null;
+return null;
   }
 }
 
@@ -370,11 +379,11 @@ async function readExistingFileContent(workspaceRoot, relativeFile) {
   if (!fullPath) return "";
 
   try {
-    const rel = path.relative(PROJECT_ROOT, fullPath).replace(/\\/g, "/");
-    const content = await readFileAsContext(rel, 200000);
-    return content || "";
+const rel = path.relative(PROJECT_ROOT, fullPath).replace(/\\/g, "/");
+const content = await readFileAsContext(rel, 200000);
+return content || "";
   } catch {
-    return "";
+return "";
   }
 }
 
@@ -383,30 +392,30 @@ async function collectReferenceSnippets(workspaceRoot, planText = "") {
   const snippets = [];
 
   const hints = uniq([
-    ...DESIGN_REFERENCE_FILENAMES,
-    ...collectFilenameHints(planText),
+...DESIGN_REFERENCE_FILENAMES,
+...collectFilenameHints(planText),
   ]);
 
   for (const name of hints) {
-    const matches = await findFilesByName(name, {
-      dir: workspaceRoot,
-      limit: 3,
-    });
+const matches = await findFilesByName(name, {
+dir: workspaceRoot,
+limit: 3,
+});
 
-    for (const relPath of matches) {
-      if (seen.has(relPath)) continue;
-      seen.add(relPath);
+for (const relPath of matches) {
+if (seen.has(relPath)) continue;
+seen.add(relPath);
 
-      const content = await readFileAsContext(relPath, 140000);
-      if (!content) continue;
+const content = await readFileAsContext(relPath, 140000);
+if (!content) continue;
 
-      snippets.push({
-        path: relPath,
-        content: content.slice(0, 3500),
-      });
+snippets.push({
+path: relPath,
+content: content.slice(0, 3500),
+});
 
-      if (snippets.length >= 8) return snippets;
-    }
+if (snippets.length >= 8) return snippets;
+}
   }
 
   return snippets;
@@ -417,52 +426,52 @@ async function readWorkspaceContext(workspaceRoot, planText = "") {
   let context = "";
 
   const configs = [
-    "package.json",
-    "tsconfig.json",
-    "vite.config.ts",
-    "next.config.ts",
-    "next.config.js",
-    "tailwind.config.ts",
-    "tailwind.config.js",
-    "biome.json",
+"package.json",
+"tsconfig.json",
+"vite.config.ts",
+"next.config.ts",
+"next.config.js",
+"tailwind.config.ts",
+"tailwind.config.js",
+"biome.json",
   ];
 
   for (const cfg of configs) {
-    const cfgPath = resolveFilePath(rootRel, cfg);
-    if (fs.existsSync(cfgPath)) {
-      context += `\n--- ${cfg} ---\n`;
-      context += fs.readFileSync(cfgPath, "utf8");
-    }
+const cfgPath = resolveFilePath(rootRel, cfg);
+if (fs.existsSync(cfgPath)) {
+context += `\n--- ${cfg} ---\n`;
+context += fs.readFileSync(cfgPath, "utf8");
+}
   }
 
   const treeRes = await listBackendFiles({
-    dir: rootRel,
-    maxDepth: 5,
-    includeFiles: true,
-    includeDirs: true,
-    includeMeta: true,
+dir: rootRel,
+maxDepth: 5,
+includeFiles: true,
+includeDirs: true,
+includeMeta: true,
   });
 
   context += "\n--- Project Structure ---\n";
   if (treeRes?.success && Array.isArray(treeRes.files)) {
-    for (const item of treeRes.files) {
-      const meta = [];
-      if (typeof item.size === "number") meta.push(`size=${item.size}`);
-      if (typeof item.ext === "string" && item.ext) meta.push(`ext=${item.ext}`);
-      context += `${item.is_dir ? "DIR " : "FILE"}: ${item.path}${meta.length ? ` (${meta.join(", ")})` : ""}\n`;
-    }
+for (const item of treeRes.files) {
+const meta = [];
+if (typeof item.size === "number") meta.push(`size=${item.size}`);
+if (typeof item.ext === "string" && item.ext) meta.push(`ext=${item.ext}`);
+context += `${item.is_dir ? "DIR " : "FILE"}: ${item.path}${meta.length ? ` (${meta.join(", ")})` : ""}\n`;
+}
   } else {
-    context += "<tree unavailable>\n";
+context += "<tree unavailable>\n";
   }
 
   const referenceSnippets = await collectReferenceSnippets(rootRel, planText);
   if (referenceSnippets.length > 0) {
-    context += "\n--- Reference Files ---\n";
-    for (const ref of referenceSnippets) {
-      context += `FILE: ${ref.path}\n`;
-      context += `${ref.content.slice(0, 5000)}\n`;
-      context += `---\n`;
-    }
+context += "\n--- Reference Files ---\n";
+for (const ref of referenceSnippets) {
+context += `FILE: ${ref.path}\n`;
+context += `${ref.content.slice(0, 5000)}\n`;
+context += `---\n`;
+}
   }
 
   return context;
@@ -481,14 +490,14 @@ function buildPrompt({
   projectType,
 }) {
   const planMeta = {
-    name: plan.name,
-    goal: plan.goal,
-    summary: plan.summary,
-    task_scope: plan.task_scope,
-    dependencies: plan.dependencies || [],
-    constraints: plan.constraints || [],
-    acceptance_criteria: plan.acceptance_criteria || [],
-    notes: plan.notes || "",
+name: plan.name,
+goal: plan.goal,
+summary: plan.summary,
+task_scope: plan.task_scope,
+dependencies: plan.dependencies || [],
+constraints: plan.constraints || [],
+acceptance_criteria: plan.acceptance_criteria || [],
+notes: plan.notes || "",
   };
 
   return `
@@ -545,42 +554,42 @@ async function generateCode(
   const systemPrompt = SYSTEM_PROMPTS[projectType] || SYSTEM_PROMPTS.fullstack;
 
   const fileQuery = [
-    entry.path,
-    entry.description,
-    plan.goal,
-    plan.summary,
-    plan.name,
-    plan.task_scope,
+entry.path,
+entry.description,
+plan.goal,
+plan.summary,
+plan.name,
+plan.task_scope,
   ]
-    .filter(Boolean)
-    .join(" ");
+.filter(Boolean)
+.join(" ");
 
   const fileSmartContext = await buildSmartContext({
-    userMessage: fileQuery,
-    maxFiles: config.perFileMaxContextFiles,
-    dependencyDepth: config.perFileDependencyDepth,
+userMessage: fileQuery,
+maxFiles: config.perFileMaxContextFiles,
+dependencyDepth: config.perFileDependencyDepth,
   });
 
   const prompt = buildPrompt({
-    relativeFile: entry.path,
-    action: entry.action || "generate",
-    stepDescription: entry.description || plan.goal || "",
-    plannerDraft: entry.content || "",
-    currentContent,
-    workspaceContext,
-    globalSmartContext,
-    fileSmartContext,
-    plan,
-    projectType,
+relativeFile: entry.path,
+action: entry.action || "generate",
+stepDescription: entry.description || plan.goal || "",
+plannerDraft: entry.content || "",
+currentContent,
+workspaceContext,
+globalSmartContext,
+fileSmartContext,
+plan,
+projectType,
   });
 
   const response = await client.chat.completions.create({
-    model: config.model,
-    temperature: config.temperature,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: prompt },
-    ],
+model: config.model,
+temperature: config.temperature,
+messages: [
+{ role: "system", content: systemPrompt },
+{ role: "user", content: prompt },
+],
   });
 
   const raw = response.choices?.[0]?.message?.content || "";
@@ -593,9 +602,118 @@ function findBestOutputPath(workspaceRoot, relativeFile) {
   return direct;
 }
 
-function writeFile(filePath, content) {
-  ensureDirForFile(filePath);
-  fs.writeFileSync(filePath, content, "utf8");
+/* -------------------------------------------------- */
+/* --------- HISTORY / CHECKPOINT HELPERS ----------- */
+/* -------------------------------------------------- */
+
+function getHistoryBaseDir() {
+  return HISTORY_ROOT;
+}
+
+function getRequestHistoryDir(sessionId, requestId) {
+  const sid = sessionId || "anonymous";
+  const rid = requestId || `req_${Date.now()}`;
+  return path.join(getHistoryBaseDir(), sid, rid);
+}
+
+function loadRequestMeta(sessionId, requestId) {
+  const dir = getRequestHistoryDir(sessionId, requestId);
+  const metaPath = path.join(dir, "meta.json");
+  if (!fs.existsSync(metaPath)) {
+return {
+sessionId,
+requestId,
+createdAt: new Date().toISOString(),
+files: [],
+};
+  }
+  try {
+const raw = fs.readFileSync(metaPath, "utf8");
+return JSON.parse(raw);
+  } catch {
+return {
+sessionId,
+requestId,
+createdAt: new Date().toISOString(),
+files: [],
+};
+  }
+}
+
+function saveRequestMeta(sessionId, requestId, meta) {
+  const dir = getRequestHistoryDir(sessionId, requestId);
+  if (!fs.existsSync(dir)) {
+fs.mkdirSync(dir, { recursive: true });
+  }
+  const metaPath = path.join(dir, "meta.json");
+  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+}
+
+/**
+ * قبل از نوشتن فایل، snapshot می‌گیرد (در صورت وجود).
+ * - اگر فایل وجود دارد: محتوا را در `.agent-history/<session>/<request>/files/...` ذخیره می‌کند.
+ * - اگر وجود ندارد: فقط متادیتا ثبت می‌شود با `existedBefore = false`.
+ */
+function recordFileCheckpoint({
+  fullPath,
+  relativePath,
+  sessionId,
+  requestId,
+}) {
+  try {
+const sid = sessionId || USER_SESSION_ID || "anonymous";
+const rid =
+requestId ||
+USER_REQUEST_ID ||
+`req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+const relNorm = normalizeRelativePath(
+relativePath || path.relative(PROJECT_ROOT, fullPath).replace(/\\/g, "/")
+);
+
+const historyDir = getRequestHistoryDir(sid, rid);
+const filesDir = path.join(historyDir, "files");
+if (!fs.existsSync(filesDir)) {
+fs.mkdirSync(filesDir, { recursive: true });
+}
+
+const meta = loadRequestMeta(sid, rid);
+
+const existedBefore = fs.existsSync(fullPath);
+let snapshotPath = null;
+
+if (existedBefore) {
+const snapshotFullPath = path.join(filesDir, `${relNorm}.before`);
+const snapshotDir = path.dirname(snapshotFullPath);
+if (!fs.existsSync(snapshotDir)) {
+fs.mkdirSync(snapshotDir, { recursive: true });
+}
+const currentContent = fs.readFileSync(fullPath, "utf8");
+fs.writeFileSync(snapshotFullPath, currentContent, "utf8");
+snapshotPath = path.relative(PROJECT_ROOT, snapshotFullPath).replace(/\\/g, "/");
+console.log(
+`   💾 Checkpoint saved for ${relNorm} -> ${snapshotPath} (session=${sid}, request=${rid})`
+);
+} else {
+console.log(
+`   💾 Marking new file for undo: ${relNorm} (session=${sid}, request=${rid})`
+);
+}
+
+// اگر قبلاً این فایل در meta ثبت شده، overwrite نکنیم (اولین وضعیت قبل از تغییر مهم است)
+const already = meta.files.find((f) => f.relativePath === relNorm);
+if (!already) {
+meta.files.push({
+relativePath: relNorm,
+fullPath,
+existedBefore,
+snapshotPath,
+});
+saveRequestMeta(sid, rid, meta);
+}
+  } catch (err) {
+console.warn("⚠️  Failed to record file checkpoint:", err.message);
+  }
 }
 
 /* -------------------------------------------------- */
@@ -605,153 +723,170 @@ function writeFile(filePath, content) {
 export async function runCodegen(options = {}) {
   const config = { ...DEFAULT_CONFIG, ...options };
 
+  // sessionId / requestId ممکن است از options override شوند
+  const effectiveSessionId = config.sessionId || USER_SESSION_ID || "anonymous";
+  const effectiveRequestId =
+config.requestId ||
+USER_REQUEST_ID ||
+`req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
   console.log("⚙️ Starting code generation...\n");
   console.log(`📁 Workspace: ${config.workspace}`);
   console.log(`📋 Plan: ${config.planPath}`);
-  console.log(`🎯 Project Type: ${config.projectType || "fullstack"}\n`);
+  console.log(`🎯 Project Type: ${config.projectType || "fullstack"}`);
+  console.log(`🧾 Session ID: ${effectiveSessionId}`);
+  console.log(`🔁 Request ID: ${effectiveRequestId}\n`);
 
   const client = new OpenAI({
-    apiKey: config.apiKey,
-    baseURL: config.baseURL,
+apiKey: config.apiKey,
+baseURL: config.baseURL,
   });
 
   if (!fs.existsSync(config.planPath)) {
-    throw new Error(`Plan file not found: ${config.planPath}`);
+throw new Error(`Plan file not found: ${config.planPath}`);
   }
 
   const plan = JSON.parse(fs.readFileSync(config.planPath, "utf8"));
 
   const isTaskMode =
-    plan.task_type === "task" ||
-    Array.isArray(plan.files_to_create) ||
-    Array.isArray(plan.files_to_modify);
+plan.task_type === "task" ||
+Array.isArray(plan.files_to_create) ||
+Array.isArray(plan.files_to_modify);
 
   console.log(`📊 Plan mode: ${isTaskMode ? "task-level" : "project-level"}`);
 
   const workspaceRoot = isTaskMode
-    ? normalizeWorkspaceRoot(config.taskWorkspace || "./")
-    : normalizeWorkspaceRoot(config.workspace);
+? normalizeWorkspaceRoot(config.taskWorkspace || "./")
+: normalizeWorkspaceRoot(config.workspace);
 
   console.log(`📁 Effective workspace: ${workspaceRoot || "."}\n`);
 
   const planText = [
-    plan.name,
-    plan.goal,
-    plan.summary,
-    plan.task_scope,
-    plan.notes,
-    JSON.stringify(plan.context_assumptions || []),
-    JSON.stringify(plan.files_to_create || []),
-    JSON.stringify(plan.files_to_modify || []),
+plan.name,
+plan.goal,
+plan.summary,
+plan.task_scope,
+plan.notes,
+JSON.stringify(plan.context_assumptions || []),
+JSON.stringify(plan.files_to_create || []),
+JSON.stringify(plan.files_to_modify || []),
   ]
-    .filter(Boolean)
-    .join(" ");
+.filter(Boolean)
+.join(" ");
 
   const workspaceContext = await readWorkspaceContext(workspaceRoot, planText);
 
   const globalSmartContext = await buildSmartContext({
-    userMessage: planText,
-    maxFiles: config.maxContextFiles,
-    dependencyDepth: config.dependencyDepth,
+userMessage: planText,
+maxFiles: config.maxContextFiles,
+dependencyDepth: config.dependencyDepth,
   });
 
   const results = {
-    success: true,
-    filesGenerated: [],
-    filesSkipped: [],
-    errors: [],
-    stats: {
-      totalFiles: 0,
-      generated: 0,
-      skipped: 0,
-      failed: 0,
-    },
+success: true,
+filesGenerated: [],
+filesSkipped: [],
+errors: [],
+stats: {
+totalFiles: 0,
+generated: 0,
+skipped: 0,
+failed: 0,
+},
   };
 
   const fileEntries = extractFilesFromPlan(plan);
 
   if (fileEntries.length === 0) {
-    console.warn("⚠️  No files found in plan. Check plan structure.");
-    return results;
+console.warn("⚠️  No files found in plan. Check plan structure.");
+return results;
   }
 
   console.log(`📝 Files to process: ${fileEntries.length}\n`);
 
   for (let i = 0; i < fileEntries.length; i++) {
-    const entry = fileEntries[i];
-    results.stats.totalFiles++;
+const entry = fileEntries[i];
+results.stats.totalFiles++;
 
-    const relativeFile = normalizeRelativePath(entry.path);
-    const fullPath = findBestOutputPath(workspaceRoot, relativeFile);
-    const progress = `[${i + 1}/${fileEntries.length}]`;
+const relativeFile = normalizeRelativePath(entry.path);
+const fullPath = findBestOutputPath(workspaceRoot, relativeFile);
+const progress = `[${i + 1}/${fileEntries.length}]`;
 
-    const currentContent = await readExistingFileContent(workspaceRoot, relativeFile);
+const currentContent = await readExistingFileContent(workspaceRoot, relativeFile);
 
-    const isModifyAction = entry.action === "modify";
-    const shouldSkip =
-      config.skipExisting &&
-      !isModifyAction &&
-      !fileNeedsGeneration(fullPath);
+const isModifyAction = entry.action === "modify";
+const shouldSkip =
+config.skipExisting && !isModifyAction && !fileNeedsGeneration(fullPath);
 
-    if (shouldSkip) {
-      console.log(`   ⏭️  ${progress} Skipping (already implemented): ${relativeFile}`);
-      results.filesSkipped.push(relativeFile);
-      results.stats.skipped++;
+if (shouldSkip) {
+console.log(`   ⏭️  ${progress} Skipping (already implemented): ${relativeFile}`);
+results.filesSkipped.push(relativeFile);
+results.stats.skipped++;
 
-      if (config.onProgress) {
-        config.onProgress({ type: "file_skipped", file: relativeFile });
-      }
-      continue;
-    }
+if (config.onProgress) {
+config.onProgress({ type: "file_skipped", file: relativeFile });
+}
+continue;
+}
 
-    console.log(`   🤖 ${progress} Generating: ${relativeFile}`);
+console.log(`   🤖 ${progress} Generating: ${relativeFile}`);
 
-    if (config.onProgress) {
-      config.onProgress({ type: "file_generating", file: relativeFile });
-    }
+if (config.onProgress) {
+config.onProgress({ type: "file_generating", file: relativeFile });
+}
 
-    try {
-      const projectType =
-        config.projectType || plan.task_scope || plan.project_type || "fullstack";
+try {
+const projectType =
+config.projectType || plan.task_scope || plan.project_type || "fullstack";
 
-      const code = await generateCode(
-        client,
-        config,
-        entry,
-        plan,
-        workspaceRoot,
-        workspaceContext,
-        globalSmartContext,
-        projectType,
-        currentContent
-      );
+const code = await generateCode(
+client,
+config,
+entry,
+plan,
+workspaceRoot,
+workspaceContext,
+globalSmartContext,
+projectType,
+currentContent
+);
 
-      if (!code.trim()) {
-        throw new Error("Empty output from AI");
-      }
+if (!code.trim()) {
+throw new Error("Empty output from AI");
+}
 
-      writeFile(fullPath, code);
+// 🔴 اینجاست که قبل از نوشتن، checkpoint می‌گیریم
+recordFileCheckpoint({
+fullPath,
+relativePath: relativeFile,
+sessionId: effectiveSessionId,
+requestId: effectiveRequestId,
+});
 
-      console.log(`   ✅ ${progress} Written: ${relativeFile}`);
-      results.filesGenerated.push(relativeFile);
-      results.stats.generated++;
+// سپس نوشتن واقعی
+ensureDirForFile(fullPath);
+fs.writeFileSync(fullPath, code, "utf8");
 
-      if (config.onProgress) {
-        config.onProgress({ type: "file_generated", file: relativeFile });
-      }
-    } catch (err) {
-      console.error(`   ❌ ${progress} Error on ${relativeFile}:`, err.message);
-      results.errors.push({ file: relativeFile, error: err.message });
-      results.stats.failed++;
+console.log(`   ✅ ${progress} Written: ${relativeFile}`);
+results.filesGenerated.push(relativeFile);
+results.stats.generated++;
 
-      if (config.onProgress) {
-        config.onProgress({
-          type: "file_error",
-          file: relativeFile,
-          error: err.message,
-        });
-      }
-    }
+if (config.onProgress) {
+config.onProgress({ type: "file_generated", file: relativeFile });
+}
+} catch (err) {
+console.error(`   ❌ ${progress} Error on ${relativeFile}:`, err.message);
+results.errors.push({ file: relativeFile, error: err.message });
+results.stats.failed++;
+
+if (config.onProgress) {
+config.onProgress({
+type: "file_error",
+file: relativeFile,
+error: err.message,
+});
+}
+}
   }
 
   console.log("\n" + "=".repeat(50));
@@ -773,13 +908,16 @@ export async function runCodegen(options = {}) {
 
 if (import.meta.url === `file://${process.argv[1]}`) {
   runCodegen({
-    planPath: "./planner_plan.json",
-    workspace: "./backend",
-    taskWorkspace: "./",
-    projectType: "backend",
-    skipExisting: true,
+planPath: "./planner_plan.json",
+workspace: "./backend",
+taskWorkspace: "./",
+projectType: "backend",
+skipExisting: true,
+// در حالت CLI هم اگر env ست باشد، همان‌ها استفاده می‌شوند
+sessionId: USER_SESSION_ID,
+requestId: USER_REQUEST_ID,
   }).catch((err) => {
-    console.error("❌ Fatal error:", err);
-    process.exit(1);
+console.error("❌ Fatal error:", err);
+process.exit(1);
   });
 }

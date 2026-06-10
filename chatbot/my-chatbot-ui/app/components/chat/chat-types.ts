@@ -3,6 +3,22 @@ import React from "react";
 
 export type Role = "user" | "assistant";
 
+export interface UndoStats {
+  filesTouched: number;
+  filesReverted: number;
+  errors: number;
+}
+
+export interface UndoResult {
+  stats?: UndoStats;
+  files?: Array<{
+    path: string;
+    status: "reverted" | "skipped" | "error";
+    reason?: string;
+  }>;
+  error?: string;
+}
+
 export interface Message {
   id: string;
   role: Role;
@@ -11,6 +27,7 @@ export interface Message {
   metadata?: {
     type?: string;
     intent?: string;
+    requestId?: string; // برای Undo
     plan_file?: string;
     plan_path?: string;
     plan_summary?: {
@@ -23,6 +40,7 @@ export interface Message {
     };
     plan?: any;
     stage?: "analyzing" | "planning" | "validating" | "complete";
+    undoResult?: UndoResult; // نتیجه Undo روی این پیام
   };
 }
 
