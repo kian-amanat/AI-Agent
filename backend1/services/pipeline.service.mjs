@@ -7,12 +7,33 @@ const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, "..");
 const PIPELINE_SCRIPT = path.resolve(process.cwd(), "../pipeline_agent.mjs");
 
-export async function runPipeline(message) {
+export async function runPipeline({ message, sessionId, requestId }) {
   console.log("🚀 Starting full pipeline...");
+
+  const userMessage =
+    typeof message === "string" && message.trim()
+      ? message
+      : process.env.USER_MESSAGE || "";
+
+  const userSessionId =
+    typeof sessionId === "string" && sessionId.trim()
+      ? sessionId
+      : process.env.USER_SESSION_ID || "";
+
+  const userRequestId =
+    typeof requestId === "string" && requestId.trim()
+      ? requestId
+      : process.env.USER_REQUEST_ID ||
+        `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
   return new Promise((resolve, reject) => {
     const child = spawn("node", [PIPELINE_SCRIPT], {
-      env: { ...process.env, USER_MESSAGE: message },
+      env: {
+        ...process.env,
+        USER_MESSAGE: userMessage,
+        USER_SESSION_ID: userSessionId,
+        USER_REQUEST_ID: userRequestId,
+      },
       cwd: PROJECT_ROOT,
       stdio: ["ignore", "pipe", "pipe"],
     });

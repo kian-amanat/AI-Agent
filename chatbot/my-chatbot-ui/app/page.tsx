@@ -12,6 +12,7 @@ import {
   sendMessage,
   type Session,
   type Message as ApiMessage,
+  type SSEEvent,
 } from "./lib/api";
 
 import type { Conversation, Message } from "./components/chat/chat-types";
@@ -31,10 +32,16 @@ function toUiMessage(message: ApiMessage): Message {
   return {
     id: message.id != null ? String(message.id) : crypto.randomUUID(),
     role: message.role,
-    content: message.content,
+    content: typeof message.content === "string" ? message.content : String(message.content ?? ""),
     createdAt: message.created_at,
     metadata: {
       intent: message.intent ?? undefined,
+      // این دو فیلد به‌صورت رسمی در ApiMessage نیستند،
+      // ولی اگر بک‌اند اضافه‌شان کند، اینجا می‌گیریم:
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      requestId: (message as any).requestId ?? undefined,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      undoResult: (message as any).undoResult ?? undefined,
     },
   };
 }
@@ -81,7 +88,9 @@ export default function MinimalChatComponent() {
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [sessionMessagesCache, setSessionMessagesCache] = useState<Record<string, Message[]>>({});
+  const [sessionMessagesCache, setSessionMessagesCache] = useState<
+    Record<string, Message[]>
+  >({});
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
 
@@ -97,6 +106,9 @@ export default function MinimalChatComponent() {
   const abortRequestRef = useRef<null | (() => void)>(null);
   const messagesRef = useRef<Message[]>([]);
   const selectedSessionIdRef = useRef<string | null>(null);
+
+  // state مربوط به Undo
+  const [undoingMessageId, setUndoingMessageId] = useState<string | null>(null);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -234,7 +246,7 @@ export default function MinimalChatComponent() {
         setMessageInput("");
 
         if (nextSessions.length > 0) {
-          await openSession(nextSessions[0].id);
+          void openSession(nextSessions[0].id);
         } else {
           router.push("/", { scroll: false });
         }
@@ -265,6 +277,41 @@ export default function MinimalChatComponent() {
     setTimeout(() => textareaRef.current?.focus(), 50);
   }
 
+  async function handleUndoClick(messageId: string) {
+    const target = messagesRef.current.find((m) => m.id === messageId);
+    if (!target?.metadata?.requestId) return;
+
+    try {
+      setUndoingMessageId(messageId);
+
+      // TODO: در مرحله بعدی این را به callUndo(...) وصل کن
+      const fakeUndoResult = {
+        status: "success",
+        restoredFiles: ["src/app/page.tsx"],
+        deletedFiles: [],
+        failedFiles: [],
+      };
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === messageId
+            ? {
+                ...m,
+                metadata: {
+                  ...(m.metadata || {}),
+                  undoResult: fakeUndoResult,
+                },
+              }
+            : m
+        )
+      );
+    } catch (e) {
+      console.error("Undo failed", e);
+    } finally {
+      setUndoingMessageId(null);
+    }
+  }
+
   async function handleSendMessage() {
     const text = messageInput.trim();
     if ((!text && !selectedFile) || isSending) return;
@@ -288,6 +335,7 @@ export default function MinimalChatComponent() {
       role: "assistant",
       content: "",
       createdAt: nowIso(),
+      metadata: undefined,
     };
 
     const nextMessages = [...messagesRef.current, userMessage, assistantMessage];
@@ -311,31 +359,95 @@ export default function MinimalChatComponent() {
     }
 
     setMessageInput("");
-
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
     const cleanup = sendMessage(
       text,
       selectedFile,
       selectedSessionIdRef.current,
-      (chunk) => {
-        setMessages((prev) => {
-          const updated = prev.map((msg) =>
-            msg.id === assistantMessageId ? { ...msg, content: msg.content + chunk } : msg
+      (event: SSEEvent) => {
+        if (event.type === "content") {
+          // فقط chunk متن را اضافه کن
+          setMessages((prev) => {
+            const updated = prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? { ...msg, content: msg.content + event.chunk }
+                : msg
+            );
+
+            const activeSessionId = selectedSessionIdRef.current;
+            if (activeSessionId) {
+              setSessionMessagesCache((prevCache) => ({
+                ...prevCache,
+                [activeSessionId]: updated,
+              }));
+            }
+
+            return updated;
+          });
+          return;
+        }
+
+        if (event.type === "start") {
+          // intent و requestId اولیه
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? {
+                    ...msg,
+                    metadata: {
+                      ...(msg.metadata || {}),
+                      intent: event.intent ?? msg.metadata?.intent,
+                      requestId: event.requestId ?? msg.metadata?.requestId,
+                    },
+                  }
+                : msg
+            )
           );
+          return;
+        }
 
-          const activeSessionId = selectedSessionIdRef.current;
-          if (activeSessionId) {
-            setSessionMessagesCache((prevCache) => ({
-              ...prevCache,
-              [activeSessionId]: updated,
-            }));
-          }
+        if (event.type === "done") {
+          // requestId نهایی
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? {
+                    ...msg,
+                    metadata: {
+                      ...(msg.metadata || {}),
+                      requestId: event.requestId ?? msg.metadata?.requestId,
+                    },
+                  }
+                : msg
+            )
+          );
+          return;
+        }
 
-          return updated;
-        });
+        if (event.type === "plan_metadata") {
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? {
+                    ...msg,
+                    metadata: {
+                      ...(msg.metadata || {}),
+                      planMetadata: event.raw,
+                    },
+                  }
+                : msg
+            )
+          );
+          return;
+        }
+
+        if (event.type === "progress") {
+          // در حال حاضر AgentPipelinePanel مستقل است، اینجا کاری نمی‌کنیم
+          return;
+        }
       },
-      (returnedSessionId) => {
+      (returnedSessionId, requestId) => {
         const finalSessionId = returnedSessionId || selectedSessionIdRef.current;
 
         if (finalSessionId) {
@@ -345,6 +457,22 @@ export default function MinimalChatComponent() {
             [finalSessionId]: messagesRef.current,
           }));
           void refreshSessions(finalSessionId);
+        }
+
+        if (requestId) {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessageId
+                ? {
+                    ...m,
+                    metadata: {
+                      ...(m.metadata || {}),
+                      requestId,
+                    },
+                  }
+                : m
+            )
+          );
         }
 
         setSelectedFile(null);
@@ -461,7 +589,10 @@ export default function MinimalChatComponent() {
             )}
           </AnimatePresence>
 
-          <div ref={scrollRef} className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8">
+          <div
+            ref={scrollRef}
+            className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8"
+          >
             <div className="mx-auto flex w-full max-w-4xl flex-col">
               <AnimatePresence mode="wait">
                 {isEmpty ? (
@@ -512,7 +643,9 @@ export default function MinimalChatComponent() {
                           animate={{ opacity: 1, y: 0, scale: 1 }}
                           exit={{ opacity: 0, y: -8, scale: 0.99 }}
                           transition={{ type: "spring", stiffness: 240, damping: 24 }}
-                          className={`flex w-full ${m.role === "user" ? "justify-end" : "justify-start"}`}
+                          className={`flex w-full ${
+                            m.role === "user" ? "justify-end" : "justify-start"
+                          }`}
                         >
                           <div className="group max-w-[min(92%,48rem)]">
                             <div
@@ -538,7 +671,17 @@ export default function MinimalChatComponent() {
 
                               {m.role === "assistant" ? (
                                 m.content ? (
-                                  <AssistantMessage content={m.content} />
+                                  <AssistantMessage
+                                    content={m.content}
+                                    metadata={m.metadata}
+                                    onUndoClick={
+                                      m.metadata?.intent === "technical" &&
+                                      m.metadata?.requestId
+                                        ? () => handleUndoClick(m.id)
+                                        : undefined
+                                    }
+                                    isUndoing={undoingMessageId === m.id}
+                                  />
                                 ) : (
                                   <div className="flex items-center gap-2 text-white/40">
                                     <TypingIndicator />
