@@ -276,24 +276,45 @@ export async function deleteSession(sessionId: string): Promise<void> {
 }
 
 // 🔹 API فراخوانی Undo
+// 🔹 API فراخوانی Undo
 export async function callUndo(
   sessionId: string,
   requestId: string
 ): Promise<UndoResult> {
+  console.log("[UNDO] request payload", { sessionId, requestId });
+
   const res = await fetch(`${BASE_URL}/undo`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ session_id: sessionId, request_id: requestId }),
   });
 
-  const data = await readJson<UndoResult & { error?: string }>(res);
+  // برای دیباگ: متن خام پاسخ را لاگ کن
+  const text = await res.text();
+  console.log("[UNDO] raw response", text);
+
+  let data: UndoResult & { error?: string; details?: string; message?: string };
+  try {
+    data = text ? JSON.parse(text) : ({ ok: false } as any);
+  } catch {
+    throw new Error(
+      text || `Undo failed with non-JSON response (status ${res.status})`
+    );
+  }
 
   if (!res.ok || !data.ok) {
-    throw new Error(data.error || "Failed to undo changes");
+    throw new Error(
+      data.details ||
+        data.error ||
+        (data as any).message ||
+        `Failed to undo changes (status ${res.status})`
+    );
   }
 
   return data;
 }
+
+
 
 // 🔹 sendMessage: کار با SSEEvent
 export function sendMessage(

@@ -10,9 +10,11 @@ import {
   fetchSessionMessages,
   deleteSession,
   sendMessage,
+  callUndo,
   type Session,
   type Message as ApiMessage,
   type SSEEvent,
+  type UndoResult,
 } from "./lib/api";
 
 import type { Conversation, Message } from "./components/chat/chat-types";
@@ -28,11 +30,16 @@ import ChatComposer from "./components/chat/ChatComposer";
 
 const nowIso = () => new Date().toISOString();
 
+type MessageUndoResult = UndoResult | { error: string };
+
 function toUiMessage(message: ApiMessage): Message {
   return {
     id: message.id != null ? String(message.id) : crypto.randomUUID(),
     role: message.role,
-    content: typeof message.content === "string" ? message.content : String(message.content ?? ""),
+    content:
+      typeof message.content === "string"
+        ? message.content
+        : String(message.content ?? ""),
     createdAt: message.created_at,
     metadata: {
       intent: message.intent ?? undefined,
@@ -41,7 +48,9 @@ function toUiMessage(message: ApiMessage): Message {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       requestId: (message as any).requestId ?? undefined,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      undoResult: (message as any).undoResult ?? undefined,
+      undoResult: ((message as any).undoResult as MessageUndoResult | undefined) ?? undefined,
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      planMetadata: (message as any).planMetadata ?? undefined,
     },
   };
 }
@@ -107,7 +116,6 @@ export default function MinimalChatComponent() {
   const messagesRef = useRef<Message[]>([]);
   const selectedSessionIdRef = useRef<string | null>(null);
 
-  // state مربوط به Undo
   const [undoingMessageId, setUndoingMessageId] = useState<string | null>(null);
 
   const router = useRouter();
@@ -188,7 +196,10 @@ export default function MinimalChatComponent() {
       const data = await fetchSessions();
       setSessions(data);
 
-      if (preferredSessionId && data.some((session) => session.id === preferredSessionId)) {
+      if (
+        preferredSessionId &&
+        data.some((session) => session.id === preferredSessionId)
+      ) {
         setSelectedSessionId(preferredSessionId);
       }
 
@@ -277,36 +288,60 @@ export default function MinimalChatComponent() {
     setTimeout(() => textareaRef.current?.focus(), 50);
   }
 
+  function applyUndoResultToMessage(
+    list: Message[],
+    messageId: string,
+    undoResult: MessageUndoResult
+  ) {
+    return list.map((message) =>
+      message.id === messageId
+        ? {
+            ...message,
+            metadata: {
+              ...(message.metadata || {}),
+              undoResult,
+            },
+          }
+        : message
+    );
+  }
+
   async function handleUndoClick(messageId: string) {
-    const target = messagesRef.current.find((m) => m.id === messageId);
-    if (!target?.metadata?.requestId) return;
+    const target = messagesRef.current.find((message) => message.id === messageId);
+    const sessionId = selectedSessionIdRef.current;
+    const requestId = target?.metadata?.requestId;
+
+    if (!target || !requestId || !sessionId) {
+      console.warn("Undo skipped: missing target, sessionId, or requestId");
+      return;
+    }
 
     try {
       setUndoingMessageId(messageId);
 
-      // TODO: در مرحله بعدی این را به callUndo(...) وصل کن
-      const fakeUndoResult = {
-        status: "success",
-        restoredFiles: ["src/app/page.tsx"],
-        deletedFiles: [],
-        failedFiles: [],
+      const result: UndoResult = await callUndo(sessionId, requestId);
+
+      setMessages((prev) => applyUndoResultToMessage(prev, messageId, result));
+      setSessionMessagesCache((prevCache) => ({
+        ...prevCache,
+        [sessionId]: applyUndoResultToMessage(prevCache[sessionId] ?? [], messageId, result),
+      }));
+    } catch (error) {
+      console.error("Undo failed", error);
+
+      const undoError: MessageUndoResult = {
+        error: error instanceof Error ? error.message : String(error ?? "Undo failed"),
       };
 
-      setMessages((prev) =>
-        prev.map((m) =>
-          m.id === messageId
-            ? {
-                ...m,
-                metadata: {
-                  ...(m.metadata || {}),
-                  undoResult: fakeUndoResult,
-                },
-              }
-            : m
-        )
-      );
-    } catch (e) {
-      console.error("Undo failed", e);
+      setMessages((prev) => applyUndoResultToMessage(prev, messageId, undoError));
+      setSessionMessagesCache((prevCache) => ({
+        ...prevCache,
+        [sessionId]: applyUndoResultToMessage(
+          prevCache[sessionId] ?? [],
+          messageId,
+          undoError
+        ),
+      }));
     } finally {
       setUndoingMessageId(null);
     }
@@ -367,7 +402,6 @@ export default function MinimalChatComponent() {
       selectedSessionIdRef.current,
       (event: SSEEvent) => {
         if (event.type === "content") {
-          // فقط chunk متن را اضافه کن
           setMessages((prev) => {
             const updated = prev.map((msg) =>
               msg.id === assistantMessageId
@@ -389,7 +423,6 @@ export default function MinimalChatComponent() {
         }
 
         if (event.type === "start") {
-          // intent و requestId اولیه
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantMessageId
@@ -408,7 +441,6 @@ export default function MinimalChatComponent() {
         }
 
         if (event.type === "done") {
-          // requestId نهایی
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantMessageId
@@ -443,7 +475,6 @@ export default function MinimalChatComponent() {
         }
 
         if (event.type === "progress") {
-          // در حال حاضر AgentPipelinePanel مستقل است، اینجا کاری نمی‌کنیم
           return;
         }
       },

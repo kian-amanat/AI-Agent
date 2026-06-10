@@ -6,19 +6,48 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// PROJECT_ROOT همان منطق سایر سرویس‌ها
-const PROJECT_ROOT = path.resolve(__dirname, "..");
-// دایرکتوری اصلی history که در codegen_agent تعریف کردیم
+const PROJECT_ROOT = path.resolve(__dirname, "..", "..");
 const HISTORY_ROOT = path.resolve(PROJECT_ROOT, ".agent-history");
+
+console.log("[UNDO] PROJECT_ROOT =", PROJECT_ROOT);
+console.log("[UNDO] HISTORY_ROOT  =", HISTORY_ROOT);
+
+
+/**
+ * نرمال‌سازی شناسه‌ها:
+ * - اگر از قبل با prefix شروع شود (مثلاً sess_...)، همان را برمی‌گرداند.
+ * - اگر نه، prefix را اضافه می‌کند (sess_${id} / req_${id}).
+ */
+function normalizeId(prefix, id) {
+  if (!id) {
+    throw new Error(`${prefix.toUpperCase()}_ID is required for undo`);
+  }
+  const prefixed = `${prefix}_`;
+  return id.startsWith(prefixed) ? id : `${prefixed}${id}`;
+}
 
 /**
  * مسیر history برای یک session/request
+ *
+ * توجه: این تابع مطمئن می‌شود که شناسه‌ها
+ * دقیقاً با چیزی که در codegen/history روی دیسک نوشته شده یکی باشند:
+ *   .agent-history/sess_.../req_...
  */
 function getRequestHistoryDir(sessionId, requestId) {
   if (!sessionId) throw new Error("sessionId is required for undo");
   if (!requestId) throw new Error("requestId is required for undo");
 
-  return path.join(HISTORY_ROOT, sessionId, requestId);
+  const normalizedSessionId = normalizeId("sess", sessionId);
+  const normalizedRequestId = normalizeId("req", requestId);
+
+  const dir = path.join(HISTORY_ROOT, normalizedSessionId, normalizedRequestId);
+
+  // لاگ تشخیصی برای کمک به دیباگ
+  console.log(
+    `[UNDO] History dir for undo: ${dir} (sessionId=${normalizedSessionId}, requestId=${normalizedRequestId})`
+  );
+
+  return dir;
 }
 
 /**
@@ -27,6 +56,10 @@ function getRequestHistoryDir(sessionId, requestId) {
 function loadRequestMeta(sessionId, requestId) {
   const dir = getRequestHistoryDir(sessionId, requestId);
   const metaPath = path.join(dir, "meta.json");
+
+  console.log(
+    `[UNDO] Looking for meta at: ${metaPath} (sessionId=${sessionId}, requestId=${requestId})`
+  );
 
   if (!fs.existsSync(metaPath)) {
     throw new Error(

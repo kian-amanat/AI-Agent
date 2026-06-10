@@ -1,42 +1,30 @@
 {
   "task_type": "task",
   "request_mode": "modification",
-  "name": "Lower and reduce font weight of 'Welcome back' text on login page",
+  "name": "Update LoginForm Component",
   "task_scope": "frontend",
-  "goal": "Make the 'Welcome back' text appear lower and with a smaller font weight on the login page.",
-  "summary": "Adjust the 'Welcome back' heading in the login page to have a lighter font weight and be positioned lower (more vertical margin above it).",
+  "goal": "Remove 'Welcome Back' text and center the form in LoginForm.tsx",
+  "summary": "Modify the LoginPage to remove the 'Welcome Back' heading and ensure the LoginForm is centered.",
   "target_files": [
-    "chatbot/my-chatbot-ui/app/login/page.tsx"
-  ],
-  "reference_files": [
     "chatbot/my-chatbot-ui/app/login/page.tsx",
-    "chatbot/my-chatbot-ui/app/signup/page.tsx"
+    "chatbot/my-chatbot-ui/app/components/LoginForm.tsx"
   ],
-  "context_assumptions": [
-    "Tailwind CSS is used for styling.",
-    "The 'Welcome back' text is currently an <h1> with 'text-2xl font-normal mt-3'.",
-    "Lowering the text means increasing the top margin (mt-3 to a higher value, e.g., mt-8).",
-    "Smaller font weight means using 'font-light' instead of 'font-normal'."
-  ],
+  "reference_files": [],
+  "context_assumptions": [],
   "files_to_create": [],
   "files_to_modify": [
     {
       "path": "chatbot/my-chatbot-ui/app/login/page.tsx",
-      "purpose": "Update the 'Welcome back' <h1> to have a lighter font weight and be positioned lower.",
-      "content": "          <h1 className=\"text-2xl font-light text-white tracking-tight mt-8\">Welcome back</h1>"
+      "purpose": "Remove the 'Welcome Back' heading and ensure the form is centered.",
+      "content": "'use client';\n\nimport React from 'react';\nimport LoginForm from '../components/LoginForm';\n\nexport default function LoginPage() {\n  return (\n    <div className=\"min-h-screen flex items-center justify-center bg-[#161616] font-sans\">\n      <LoginForm />\n    </div>\n  );\n}\n"
     }
   ],
   "dependencies": [],
-  "constraints": [
-    "Only modify the <h1> for 'Welcome back'.",
-    "Do not change unrelated styles or structure.",
-    "Keep visual consistency with the rest of the UI."
-  ],
+  "constraints": [],
   "acceptance_criteria": [
-    "'Welcome back' text is visually lower (more space above).",
-    "'Welcome back' text uses a lighter font weight.",
-    "No other elements are affected."
+    "The 'Welcome Back' heading is removed from the LoginPage.",
+    "The LoginForm is centered within the page."
   ],
-  "notes": "This change is minimal and focused only on the login page's heading.",
+  "notes": "Ensure that the visual style remains consistent with the existing design.",
   "response_style": "plan"
 }

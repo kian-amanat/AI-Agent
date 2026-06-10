@@ -12,18 +12,25 @@ import { readProjectFile } from "./tools/readProjectFile.js";
 
 const PROJECT_ROOT = process.cwd();
 
-// 🆔 شناسه‌های سشن و ریکوئست (از env)
-const USER_SESSION_ID = process.env.USER_SESSION_ID || null;
-const USER_REQUEST_ID = process.env.USER_REQUEST_ID || null;
+const USER_SESSION_ID =
+  typeof process.env.USER_SESSION_ID === "string" &&
+  process.env.USER_SESSION_ID.trim()
+    ? process.env.USER_SESSION_ID.trim()
+    : null;
 
-// ریشه‌ی ذخیره‌سازی تاریخچه
+const USER_REQUEST_ID =
+  typeof process.env.USER_REQUEST_ID === "string" &&
+  process.env.USER_REQUEST_ID.trim()
+    ? process.env.USER_REQUEST_ID.trim()
+    : null;
+
 const HISTORY_ROOT = path.resolve(PROJECT_ROOT, ".agent-history");
 
 const DEFAULT_CONFIG = {
   planPath: "./planner_plan.json",
   workspace: "./",
   taskWorkspace: "./",
-  model: "gpt-4o-mini",
+  model: "gpt-4.1",
   temperature: 0.1,
   apiKey: process.env.OPENAI_API_KEY || "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
   baseURL: process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1",
@@ -32,8 +39,6 @@ const DEFAULT_CONFIG = {
   perFileMaxContextFiles: 8,
   dependencyDepth: 2,
   perFileDependencyDepth: 2,
-
-  // اختیاری: امکان پاس‌دادن session/request از بیرون (مثلاً برای تست)
   sessionId: USER_SESSION_ID,
   requestId: USER_REQUEST_ID,
 };
@@ -44,6 +49,7 @@ const DESIGN_REFERENCE_FILENAMES = [
   "globals.css",
   "page.jsx",
   "layout.jsx",
+  "globals.jsx",
   "globals.scss",
   "globals.sass",
   "globals.less",
@@ -258,7 +264,9 @@ function cleanGeneratedCode(content) {
 
   if (cleaned.startsWith("```")) {
 cleaned = cleaned
-.replace(/^```[a-zA-Z0-9_-]*\n?/, "").replace(/```$/, "").trim();
+.replace(/^```[a-zA-Z0-9_-]*\n?/, "")
+      .replace(/```$/, "")
+.trim();
   }
 
   return cleaned;
@@ -318,10 +326,11 @@ includeMeta: true,
 const filePath = normalizeRelativePath(item.path);
 const name = path.basename(filePath).toLowerCase();
 const score = basenameScore(name, baseName);
-
 const depthPenalty = filePath.split("/").length;
 const areaBonus =
-filePath.includes("frontend/") || filePath.includes("app/") || filePath.includes("src/")
+filePath.includes("frontend/") ||
+filePath.includes("app/") ||
+filePath.includes("src/")
 ? 5
 : 0;
 
@@ -367,7 +376,6 @@ maxBytes,
 });
 
 if (!res?.success) return null;
-
 return String(res.content || "");
   } catch {
 return null;
@@ -458,7 +466,9 @@ for (const item of treeRes.files) {
 const meta = [];
 if (typeof item.size === "number") meta.push(`size=${item.size}`);
 if (typeof item.ext === "string" && item.ext) meta.push(`ext=${item.ext}`);
-context += `${item.is_dir ? "DIR " : "FILE"}: ${item.path}${meta.length ? ` (${meta.join(", ")})` : ""}\n`;
+context += `${item.is_dir ? "DIR " : "FILE"}: ${item.path}${
+meta.length ? ` (${meta.join(", ")})` : ""
+}\n`;
 }
   } else {
 context += "<tree unavailable>\n";
@@ -598,8 +608,7 @@ messages: [
 
 function findBestOutputPath(workspaceRoot, relativeFile) {
   const normalized = normalizeRelativePath(relativeFile);
-  const direct = resolveFilePath(workspaceRoot, normalized);
-  return direct;
+  return resolveFilePath(workspaceRoot, normalized);
 }
 
 /* -------------------------------------------------- */
@@ -610,15 +619,37 @@ function getHistoryBaseDir() {
   return HISTORY_ROOT;
 }
 
+function requireHistoryIds(sessionId, requestId) {
+  const sid =
+typeof sessionId === "string" && sessionId.trim()
+? sessionId.trim()
+: null;
+
+  const rid =
+typeof requestId === "string" && requestId.trim()
+? requestId.trim()
+: null;
+
+  if (!sid || !rid) {
+return null;
+  }
+
+  return { sessionId: sid, requestId: rid };
+}
+
 function getRequestHistoryDir(sessionId, requestId) {
-  const sid = sessionId || "anonymous";
-  const rid = requestId || `req_${Date.now()}`;
-  return path.join(getHistoryBaseDir(), sid, rid);
+  const ids = requireHistoryIds(sessionId, requestId);
+  if (!ids) {
+throw new Error("sessionId and requestId are required for history storage");
+  }
+
+  return path.join(getHistoryBaseDir(), ids.sessionId, ids.requestId);
 }
 
 function loadRequestMeta(sessionId, requestId) {
   const dir = getRequestHistoryDir(sessionId, requestId);
   const metaPath = path.join(dir, "meta.json");
+
   if (!fs.existsSync(metaPath)) {
 return {
 sessionId,
@@ -627,9 +658,17 @@ createdAt: new Date().toISOString(),
 files: [],
 };
   }
+
   try {
 const raw = fs.readFileSync(metaPath, "utf8");
-return JSON.parse(raw);
+const parsed = JSON.parse(raw);
+
+return {
+sessionId,
+requestId,
+createdAt: parsed.createdAt || new Date().toISOString(),
+files: Array.isArray(parsed.files) ? parsed.files : [],
+};
   } catch {
 return {
 sessionId,
@@ -645,15 +684,18 @@ function saveRequestMeta(sessionId, requestId, meta) {
   if (!fs.existsSync(dir)) {
 fs.mkdirSync(dir, { recursive: true });
   }
+
+  const safeMeta = {
+sessionId,
+requestId,
+createdAt: meta.createdAt || new Date().toISOString(),
+files: Array.isArray(meta.files) ? meta.files : [],
+  };
+
   const metaPath = path.join(dir, "meta.json");
-  fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), "utf8");
+  fs.writeFileSync(metaPath, JSON.stringify(safeMeta, null, 2), "utf8");
 }
 
-/**
- * قبل از نوشتن فایل، snapshot می‌گیرد (در صورت وجود).
- * - اگر فایل وجود دارد: محتوا را در `.agent-history/<session>/<request>/files/...` ذخیره می‌کند.
- * - اگر وجود ندارد: فقط متادیتا ثبت می‌شود با `existedBefore = false`.
- */
 function recordFileCheckpoint({
   fullPath,
   relativePath,
@@ -661,46 +703,57 @@ function recordFileCheckpoint({
   requestId,
 }) {
   try {
-const sid = sessionId || USER_SESSION_ID || "anonymous";
-const rid =
-requestId ||
-USER_REQUEST_ID ||
-`req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-const relNorm = normalizeRelativePath(
-relativePath || path.relative(PROJECT_ROOT, fullPath).replace(/\\/g, "/")
+const ids = requireHistoryIds(
+sessionId || USER_SESSION_ID,
+requestId || USER_REQUEST_ID
 );
 
-const historyDir = getRequestHistoryDir(sid, rid);
+if (!ids) {
+console.warn(
+`⚠️  Skipping checkpoint for ${relativePath}: missing sessionId/requestId`
+);
+return;
+}
+
+const relNorm = normalizeRelativePath(
+relativePath ||
+path.relative(PROJECT_ROOT, fullPath).replace(/\\/g, "/")
+);
+
+const historyDir = getRequestHistoryDir(ids.sessionId, ids.requestId);
 const filesDir = path.join(historyDir, "files");
+
 if (!fs.existsSync(filesDir)) {
 fs.mkdirSync(filesDir, { recursive: true });
 }
 
-const meta = loadRequestMeta(sid, rid);
-
+const meta = loadRequestMeta(ids.sessionId, ids.requestId);
 const existedBefore = fs.existsSync(fullPath);
 let snapshotPath = null;
 
 if (existedBefore) {
 const snapshotFullPath = path.join(filesDir, `${relNorm}.before`);
 const snapshotDir = path.dirname(snapshotFullPath);
+
 if (!fs.existsSync(snapshotDir)) {
 fs.mkdirSync(snapshotDir, { recursive: true });
 }
+
 const currentContent = fs.readFileSync(fullPath, "utf8");
 fs.writeFileSync(snapshotFullPath, currentContent, "utf8");
-snapshotPath = path.relative(PROJECT_ROOT, snapshotFullPath).replace(/\\/g, "/");
+snapshotPath = path
+.relative(PROJECT_ROOT, snapshotFullPath)
+.replace(/\\/g, "/");
+
 console.log(
-`   💾 Checkpoint saved for ${relNorm} -> ${snapshotPath} (session=${sid}, request=${rid})`
+`   💾 Checkpoint saved for ${relNorm} -> ${snapshotPath} (session=${ids.sessionId}, request=${ids.requestId})`
 );
 } else {
 console.log(
-`   💾 Marking new file for undo: ${relNorm} (session=${sid}, request=${rid})`
+`   💾 Marking new file for undo: ${relNorm} (session=${ids.sessionId}, request=${ids.requestId})`
 );
 }
 
-// اگر قبلاً این فایل در meta ثبت شده، overwrite نکنیم (اولین وضعیت قبل از تغییر مهم است)
 const already = meta.files.find((f) => f.relativePath === relNorm);
 if (!already) {
 meta.files.push({
@@ -709,7 +762,7 @@ fullPath,
 existedBefore,
 snapshotPath,
 });
-saveRequestMeta(sid, rid, meta);
+saveRequestMeta(ids.sessionId, ids.requestId, meta);
 }
   } catch (err) {
 console.warn("⚠️  Failed to record file checkpoint:", err.message);
@@ -723,19 +776,22 @@ console.warn("⚠️  Failed to record file checkpoint:", err.message);
 export async function runCodegen(options = {}) {
   const config = { ...DEFAULT_CONFIG, ...options };
 
-  // sessionId / requestId ممکن است از options override شوند
-  const effectiveSessionId = config.sessionId || USER_SESSION_ID || "anonymous";
+  const effectiveSessionId =
+(typeof config.sessionId === "string" && config.sessionId.trim()
+? config.sessionId.trim()
+: USER_SESSION_ID) || null;
+
   const effectiveRequestId =
-config.requestId ||
-USER_REQUEST_ID ||
-`req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+(typeof config.requestId === "string" && config.requestId.trim()
+? config.requestId.trim()
+: USER_REQUEST_ID) || null;
 
   console.log("⚙️ Starting code generation...\n");
   console.log(`📁 Workspace: ${config.workspace}`);
   console.log(`📋 Plan: ${config.planPath}`);
   console.log(`🎯 Project Type: ${config.projectType || "fullstack"}`);
-  console.log(`🧾 Session ID: ${effectiveSessionId}`);
-  console.log(`🔁 Request ID: ${effectiveRequestId}\n`);
+  console.log(`🧾 Session ID: ${effectiveSessionId || "<missing>"}`);
+  console.log(`🔁 Request ID: ${effectiveRequestId || "<missing>"}\n`);
 
   const client = new OpenAI({
 apiKey: config.apiKey,
@@ -812,14 +868,19 @@ const relativeFile = normalizeRelativePath(entry.path);
 const fullPath = findBestOutputPath(workspaceRoot, relativeFile);
 const progress = `[${i + 1}/${fileEntries.length}]`;
 
-const currentContent = await readExistingFileContent(workspaceRoot, relativeFile);
+const currentContent = await readExistingFileContent(
+workspaceRoot,
+relativeFile
+);
 
 const isModifyAction = entry.action === "modify";
 const shouldSkip =
 config.skipExisting && !isModifyAction && !fileNeedsGeneration(fullPath);
 
 if (shouldSkip) {
-console.log(`   ⏭️  ${progress} Skipping (already implemented): ${relativeFile}`);
+console.log(
+`   ⏭️  ${progress} Skipping (already implemented): ${relativeFile}`
+);
 results.filesSkipped.push(relativeFile);
 results.stats.skipped++;
 
@@ -855,7 +916,6 @@ if (!code.trim()) {
 throw new Error("Empty output from AI");
 }
 
-// 🔴 اینجاست که قبل از نوشتن، checkpoint می‌گیریم
 recordFileCheckpoint({
 fullPath,
 relativePath: relativeFile,
@@ -863,7 +923,6 @@ sessionId: effectiveSessionId,
 requestId: effectiveRequestId,
 });
 
-// سپس نوشتن واقعی
 ensureDirForFile(fullPath);
 fs.writeFileSync(fullPath, code, "utf8");
 
@@ -891,7 +950,7 @@ error: err.message,
 
   console.log("\n" + "=".repeat(50));
   console.log("✅ Code generation complete!");
-  console.log(`📊 Stats:`);
+  console.log("📊 Stats:");
   console.log(`   Total files: ${results.stats.totalFiles}`);
   console.log(`   Generated: ${results.stats.generated}`);
   console.log(`   Skipped: ${results.stats.skipped}`);
@@ -913,7 +972,6 @@ workspace: "./backend",
 taskWorkspace: "./",
 projectType: "backend",
 skipExisting: true,
-// در حالت CLI هم اگر env ست باشد، همان‌ها استفاده می‌شوند
 sessionId: USER_SESSION_ID,
 requestId: USER_REQUEST_ID,
   }).catch((err) => {
