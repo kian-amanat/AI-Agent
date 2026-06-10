@@ -7,7 +7,7 @@ import { Loader2, Mic, Paperclip, Send, StopCircle, X } from "lucide-react";
 type ChatComposerProps = {
   messageInput: string;
   setMessageInput: (value: string) => void;
-  textareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  textareaRef: React.RefObject<HTMLTextAreaElement>;
   isInputFocused: boolean;
   setIsInputFocused: (value: boolean) => void;
   isSending: boolean;
@@ -88,7 +88,10 @@ export default function ChatComposer({
                 onChange={(e) => {
                   setMessageInput(e.target.value);
                   e.target.style.height = "auto";
-                  e.target.style.height = `${Math.min(e.target.scrollHeight, 180)}px`;
+                  e.target.style.height = `${Math.min(
+                    e.target.scrollHeight,
+                    180,
+                  )}px`;
                 }}
                 onKeyDown={onMessageKeyDown}
                 placeholder="Message AI Assistant"

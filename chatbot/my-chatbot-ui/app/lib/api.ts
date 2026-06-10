@@ -1,5 +1,6 @@
-const BASE_URL = "http://localhost:9000/api/agent";
+// ./lib/api.ts
 
+const BASE_URL = "http://localhost:9000/api/agent";
 const UPLOAD_URL = `${BASE_URL}/upload`;
 
 export interface Session {
@@ -50,6 +51,39 @@ type RunPayload = {
   attachment_paths?: string[];
 };
 
+// 🔹 نوع رویدادهایی که از SSE می‌گیریم
+export type SSEEvent =
+  | { type: "start"; sessionId: string; requestId?: string; intent?: string | null }
+  | { type: "content"; chunk: string }
+  | { type: "done"; sessionId: string; requestId?: string | null }
+  | { type: "progress"; stage?: string; message?: string }
+  | { type: "plan_metadata"; raw: any };
+
+export type UndoStats = {
+  total: number;
+  restored: number;
+  deleted: number;
+  no_op: number;
+  failed: number;
+};
+
+export type UndoFileResult = {
+  file: string;
+  action: string;
+  reason?: string;
+  error?: string;
+};
+
+export type UndoResult = {
+  ok: boolean;
+  session_id: string;
+  request_id: string;
+  result: {
+    stats: UndoStats;
+    files: UndoFileResult[];
+  };
+};
+
 async function readJson<T>(res: Response): Promise<T> {
   const text = await res.text();
   try {
@@ -81,72 +115,121 @@ async function uploadAttachment(file: File): Promise<string> {
   return data.path;
 }
 
+// 🔹 parseSSE: event-based + نگه‌داشتن sessionId/requestId
 async function parseSSE(
   res: Response,
-  onChunk: (chunk: string) => void,
-  onDone: (sessionId: string) => void,
+  onEvent: (event: SSEEvent) => void,
+  onDone: (sessionId: string, requestId?: string | null) => void,
   onError: (err: string) => void,
   fallbackSessionId: string | null
 ) {
   if (!res.body) {
-    throw new Error("No response body received");
+    onError("No response body received");
+    return;
   }
 
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
   let returnedSessionId = fallbackSessionId ?? "";
+  let returnedRequestId: string | null = null;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
+      buffer += decoder.decode(value, { stream: true });
 
-    const chunks = buffer.split("\n\n");
-    buffer = chunks.pop() ?? "";
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() ?? "";
 
-    for (const chunk of chunks) {
-      const lines = chunk.split("\n");
+      for (const chunk of chunks) {
+        const lines = chunk.split("\n");
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith("data:")) continue;
 
-        const raw = trimmed.slice(5).trim();
-        if (!raw) continue;
+          const raw = trimmed.slice(5).trim();
+          if (!raw) continue;
 
-        try {
-          const parsed = JSON.parse(raw);
+          let parsed: any;
+          try {
+            parsed = JSON.parse(raw);
+          } catch {
+            const msg = "Malformed server event (invalid JSON)";
+            onError(msg);
+            continue;
+          }
 
           if (parsed?.session_id) {
             returnedSessionId = String(parsed.session_id);
           }
+          if (parsed?.request_id) {
+            returnedRequestId = String(parsed.request_id);
+          }
 
-          if (parsed?.type === "start") {
+          const type = parsed?.type;
+
+          if (type === "start") {
             if (parsed.session_id) {
               returnedSessionId = String(parsed.session_id);
             }
-          } else if (parsed?.type === "content") {
-            if (typeof parsed.content === "string" && parsed.content) {
-              onChunk(parsed.content);
+            if (parsed.request_id) {
+              returnedRequestId = String(parsed.request_id);
             }
-          } else if (parsed?.type === "done") {
-            onDone(returnedSessionId || fallbackSessionId || "");
-          } else if (parsed?.type === "error") {
-            throw new Error(parsed.details || parsed.error || "Unknown error");
+
+            onEvent({
+              type: "start",
+              sessionId: returnedSessionId,
+              requestId: returnedRequestId ?? undefined,
+              intent: parsed.metadata?.intent ?? null,
+            });
+          } else if (type === "content") {
+            const content = parsed.content;
+            if (typeof content === "string" && content) {
+              onEvent({ type: "content", chunk: content });
+            }
+          } else if (type === "progress") {
+            onEvent({
+              type: "progress",
+              stage: parsed.stage,
+              message: parsed.message,
+            });
+          } else if (type === "plan_metadata") {
+            onEvent({ type: "plan_metadata", raw: parsed });
+          } else if (type === "done") {
+            if (parsed.metadata?.request_id && !returnedRequestId) {
+              returnedRequestId = String(parsed.metadata.request_id);
+            }
+
+            const finalSessionId = returnedSessionId || fallbackSessionId || "";
+
+            const event: SSEEvent = {
+              type: "done",
+              sessionId: finalSessionId,
+              requestId: returnedRequestId,
+            };
+
+            onEvent(event);
+            onDone(finalSessionId, returnedRequestId);
+          } else if (type === "error") {
+            const msg = parsed.details || parsed.error || "Unknown error from server";
+            onError(msg);
+            throw new Error(msg);
           }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : "Malformed server event";
-          onError(message);
-          throw err;
         }
       }
     }
-  }
 
-  if (returnedSessionId) {
-    onDone(returnedSessionId);
+    if (returnedSessionId) {
+      onDone(returnedSessionId, returnedRequestId);
+    }
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Malformed server event / SSE error";
+    onError(message);
   }
 }
 
@@ -192,12 +275,54 @@ export async function deleteSession(sessionId: string): Promise<void> {
   }
 }
 
+// 🔹 API فراخوانی Undo
+// 🔹 API فراخوانی Undo
+export async function callUndo(
+  sessionId: string,
+  requestId: string
+): Promise<UndoResult> {
+  console.log("[UNDO] request payload", { sessionId, requestId });
+
+  const res = await fetch(`${BASE_URL}/undo`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, request_id: requestId }),
+  });
+
+  // برای دیباگ: متن خام پاسخ را لاگ کن
+  const text = await res.text();
+  console.log("[UNDO] raw response", text);
+
+  let data: UndoResult & { error?: string; details?: string; message?: string };
+  try {
+    data = text ? JSON.parse(text) : ({ ok: false } as any);
+  } catch {
+    throw new Error(
+      text || `Undo failed with non-JSON response (status ${res.status})`
+    );
+  }
+
+  if (!res.ok || !data.ok) {
+    throw new Error(
+      data.details ||
+        data.error ||
+        (data as any).message ||
+        `Failed to undo changes (status ${res.status})`
+    );
+  }
+
+  return data;
+}
+
+
+
+// 🔹 sendMessage: کار با SSEEvent
 export function sendMessage(
   message: string,
   file: File | null,
   sessionId: string | null,
-  onChunk: (chunk: string) => void,
-  onDone: (sessionId: string) => void,
+  onEvent: (event: SSEEvent) => void,
+  onDone: (sessionId: string, requestId?: string | null) => void,
   onError: (err: string) => void
 ): () => void {
   const controller = new AbortController();
@@ -228,10 +353,12 @@ export function sendMessage(
 
       if (!res.ok) {
         const data = await readJson<{ error?: string; details?: string }>(res);
-        throw new Error(data.details || data.error || `Request failed with status ${res.status}`);
+        throw new Error(
+          data.details || data.error || `Request failed with status ${res.status}`
+        );
       }
 
-      await parseSSE(res, onChunk, onDone, onError, sessionId);
+      await parseSSE(res, onEvent, onDone, onError, sessionId);
     } catch (err) {
       if (err instanceof DOMException && err.name === "AbortError") return;
       onError(err instanceof Error ? err.message : "Unknown error");

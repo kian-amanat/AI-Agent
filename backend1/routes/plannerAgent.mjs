@@ -24,6 +24,8 @@ import {
 import { runPipeline } from "../services/pipeline.service.mjs";
 import { PLANS_DIR } from "../config/openai.mjs";
 import { uniq } from "../utils/text.util.mjs";
+// 🔄 UNDO: سرویس undo
+import { undoRequestChanges } from "../services/undo.service.mjs";
 
 function startSSE(reply) {
   reply.raw.setHeader("Access-Control-Allow-Origin", "*");
@@ -80,10 +82,10 @@ export default async function plannerAgentRoute(fastify) {
       typeof body.message === "string"
         ? body.message.trim()
         : typeof body.text === "string"
-          ? body.text.trim()
-          : typeof body.prompt === "string"
-            ? body.prompt.trim()
-            : "";
+        ? body.text.trim()
+        : typeof body.prompt === "string"
+        ? body.prompt.trim()
+        : "";
 
     const session_id =
       typeof body.session_id === "string" && body.session_id.trim()
@@ -150,7 +152,12 @@ export default async function plannerAgentRoute(fastify) {
           })}\n\n`
         );
         reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "crisis" } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "done",
+            metadata: { type: "crisis" },
+          })}\n\n`
+        );
         reply.raw.end();
 
         saveMessage(sessionId, "assistant", content, "crisis");
@@ -172,7 +179,12 @@ export default async function plannerAgentRoute(fastify) {
           })}\n\n`
         );
         reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "inspection" } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "done",
+            metadata: { type: "inspection" },
+          })}\n\n`
+        );
         reply.raw.end();
 
         saveMessage(sessionId, "assistant", content, "inspection");
@@ -194,7 +206,12 @@ export default async function plannerAgentRoute(fastify) {
           })}\n\n`
         );
         reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "code_request" } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "done",
+            metadata: { type: "code_request" },
+          })}\n\n`
+        );
         reply.raw.end();
 
         saveMessage(sessionId, "assistant", content, "code_request");
@@ -216,7 +233,12 @@ export default async function plannerAgentRoute(fastify) {
           })}\n\n`
         );
         reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "greeting" } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "done",
+            metadata: { type: "greeting" },
+          })}\n\n`
+        );
         reply.raw.end();
 
         saveMessage(sessionId, "assistant", content, "greeting");
@@ -238,7 +260,12 @@ export default async function plannerAgentRoute(fastify) {
           })}\n\n`
         );
         reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "clarification" } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "done",
+            metadata: { type: "clarification" },
+          })}\n\n`
+        );
         reply.raw.end();
 
         saveMessage(sessionId, "assistant", content, "clarification");
@@ -249,11 +276,16 @@ export default async function plannerAgentRoute(fastify) {
       if (intent.type === "technical") {
         startSSE(reply);
 
+        // 🔹 ساخت requestId یکتا برای این اجرای pipeline
+        const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        console.log("[AGENT /run] pipeline call", { sessionId, requestId });
+
         reply.raw.write(
           `data: ${JSON.stringify({
             type: "start",
             id: msgId,
             session_id: sessionId,
+            request_id: requestId,
             createdAt: timestamp,
             metadata: { intent: intent.type },
           })}\n\n`
@@ -282,13 +314,19 @@ export default async function plannerAgentRoute(fastify) {
         );
 
         try {
-          await runPipeline(effectiveMessage);
+          // 🔹 پاس دادن sessionId و requestId به pipeline
+          await runPipeline({
+            message: effectiveMessage,
+            sessionId,
+            requestId,
+          });
         } catch (pipelineError) {
           reply.raw.write(
             `data: ${JSON.stringify({
               type: "error",
               error: "Pipeline execution failed",
               details: pipelineError.message,
+              request_id: requestId,
             })}\n\n`
           );
           reply.raw.end();
@@ -356,6 +394,7 @@ export default async function plannerAgentRoute(fastify) {
               },
               plan,
               full_plan_url: `/api/agent/plan/${latestPlan}`,
+              request_id: requestId,
             },
           })}\n\n`
         );
@@ -366,6 +405,7 @@ export default async function plannerAgentRoute(fastify) {
         return reply;
       }
 
+      // fallback: casual
       startSSE(reply);
       const content = await generateCasualResponse(effectiveMessage);
 
@@ -379,7 +419,12 @@ export default async function plannerAgentRoute(fastify) {
         })}\n\n`
       );
       reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-      reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "casual" } })}\n\n`);
+      reply.raw.write(
+        `data: ${JSON.stringify({
+          type: "done",
+          metadata: { type: "casual" },
+        })}\n\n`
+      );
       reply.raw.end();
 
       saveMessage(sessionId, "assistant", content, "casual");
@@ -472,6 +517,53 @@ export default async function plannerAgentRoute(fastify) {
         ok: false,
         error: "Failed to delete session",
         details: error.message,
+      });
+    }
+  });
+
+  // 🔄 UNDO: endpoint مخصوص undo per request
+  fastify.post("/undo", async (request, reply) => {
+    setCors(reply);
+
+    try {
+      const body = await parseIncomingPayload(request);
+
+      const sessionId =
+        typeof body.session_id === "string" && body.session_id.trim()
+          ? body.session_id.trim()
+          : null;
+
+      const requestId =
+        typeof body.request_id === "string" && body.request_id.trim()
+          ? body.request_id.trim()
+          : null;
+
+      if (!sessionId || !requestId) {
+        return reply.code(400).send({
+          ok: false,
+          error: "session_id and request_id are required",
+        });
+      }
+
+      console.log(
+        `🕙 Undo requested for session=${sessionId}, request=${requestId}`
+      );
+
+      const result = undoRequestChanges({ sessionId, requestId });
+
+      return reply.send({
+        ok: true,
+        session_id: sessionId,
+        request_id: requestId,
+        result,
+      });
+    } catch (err) {
+      console.error("❌ Error in /undo route:", err);
+
+      return reply.code(500).send({
+        ok: false,
+        error: "Failed to undo changes",
+        details: err.message,
       });
     }
   });

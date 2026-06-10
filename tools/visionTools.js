@@ -262,7 +262,7 @@ Return JSON exactly as specified.
  */
 export async function analyzeScreenshotAdvanced(imagePath, options = {}) {
   const {
-    model = "gpt-4o",
+    model = "gpt-4o-mini",
     max_tokens = 2200, // استفاده نمی‌شود ولی برای هم‌خوانی با agent.js نگه می‌داریم
     temperature = 0.0,
     debugOutDir = null, // e.g. "/abs/path/layout-debug"
@@ -453,7 +453,7 @@ export async function analyzeUIWithDiff(
   options = {}
 ) {
   const {
-    model = "gpt-4o",
+    model = "gpt-4o-mini",
     max_tokens = 2200,
     temperature = 0.0,
     debugOutPath = null,
