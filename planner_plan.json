@@ -1,12 +1,10 @@
 {
   "task_type": "task",
   "request_mode": "modification",
-  "name": "Update LoginForm Component",
   "task_scope": "frontend",
-  "goal": "Remove 'Welcome Back' text and center the form in LoginForm.tsx",
-  "summary": "Modify the LoginPage to remove the 'Welcome Back' heading and ensure the LoginForm is centered.",
+  "goal": "Add an excited hover effect to the sign-in button in LoginForm.tsx with a smooth gradient transition.",
+  "summary": "Implement a hover effect on the sign-in button that animates the gradient colors with a smooth transition.",
   "target_files": [
-    "chatbot/my-chatbot-ui/app/login/page.tsx",
     "chatbot/my-chatbot-ui/app/components/LoginForm.tsx"
   ],
   "reference_files": [],
@@ -14,17 +12,17 @@
   "files_to_create": [],
   "files_to_modify": [
     {
-      "path": "chatbot/my-chatbot-ui/app/login/page.tsx",
-      "purpose": "Remove the 'Welcome Back' heading and ensure the form is centered.",
-      "content": "'use client';\n\nimport React from 'react';\nimport LoginForm from '../components/LoginForm';\n\nexport default function LoginPage() {\n  return (\n    <div className=\"min-h-screen flex items-center justify-center bg-[#161616] font-sans\">\n      <LoginForm />\n    </div>\n  );\n}\n"
+      "path": "chatbot/my-chatbot-ui/app/components/LoginForm.tsx",
+      "purpose": "Add hover effect and transition to the sign-in button.",
+      "content": "      <button\n        className=\"mt-4 flex items-center justify-center bg-gradient-to-r from-[#ff8a3d] via-[#ff5e4d] to-[#ff2d2d] text-white font-semibold rounded-2xl py-2.5 px-6 shadow-lg transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-[#ff8a3d]/40 focus:ring-offset-2 disabled:opacity-60 disabled:cursor-not-allowed hover:bg-gradient-to-l hover:from-[#ff2d2d] hover:via-[#ff5e4d] hover:to-[#ff8a3d] hover:transition-all hover:duration-300\"\n        type=\"submit\"\n        disabled={submitting}\n      >\n        {submitting ? 'Signing in…' : 'Sign in'}\n      </button>"
     }
   ],
   "dependencies": [],
   "constraints": [],
   "acceptance_criteria": [
-    "The 'Welcome Back' heading is removed from the LoginPage.",
-    "The LoginForm is centered within the page."
+    "The sign-in button changes gradient direction on hover.",
+    "The transition is smooth and lasts 300ms."
   ],
-  "notes": "Ensure that the visual style remains consistent with the existing design.",
+  "notes": "Ensure that the button maintains accessibility features.",
   "response_style": "plan"
 }
