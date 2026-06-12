@@ -1,28 +1,29 @@
 {
   "task_type": "task",
   "request_mode": "modification",
+  "name": "Add Smooth Hover Effect to Sign Up Button",
   "task_scope": "frontend",
-  "goal": "Add an excited hover effect to the sign-in button in LoginForm.tsx with a smooth gradient transition.",
-  "summary": "Implement a hover effect on the sign-in button that animates the gradient colors with a smooth transition.",
+  "goal": "Implement a smooth hover effect on the sign-up button in SignUpForm.tsx.",
+  "summary": "Enhance the user experience by adding a smooth hover effect to the sign-up button.",
   "target_files": [
-    "chatbot/my-chatbot-ui/app/components/LoginForm.tsx"
+    "chatbot/my-chatbot-ui/app/components/SignUpForm.tsx"
   ],
   "reference_files": [],
   "context_assumptions": [],
   "files_to_create": [],
   "files_to_modify": [
     {
-      "path": "chatbot/my-chatbot-ui/app/components/LoginForm.tsx",
-      "purpose": "Add hover effect and transition to the sign-in button.",
-      "content": "      <button\n        className=\"mt-4 flex items-center justify-center bg-gradient-to-r from-[#ff8a3d] via-[#ff5e4d] to-[#ff2d2d] text-white font-semibold rounded-2xl py-2.5 px-6 shadow-lg transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-[#ff8a3d]/40 focus:ring-offset-2 disabled:opacity-60 disabled:cursor-not-allowed hover:bg-gradient-to-l hover:from-[#ff2d2d] hover:via-[#ff5e4d] hover:to-[#ff8a3d] hover:transition-all hover:duration-300\"\n        type=\"submit\"\n        disabled={submitting}\n      >\n        {submitting ? 'Signing in…' : 'Sign in'}\n      </button>"
+      "path": "chatbot/my-chatbot-ui/app/components/SignUpForm.tsx",
+      "purpose": "Add smooth hover effect to the sign-up button.",
+      "content": "const buttonClass = 'rounded-xl bg-[#ff8a3d] text-white px-4 py-2 transition duration-300 ease-in-out transform hover:scale-105 hover:bg-[#ff5e4d]';\n\n<button type=\"submit\" className={buttonClass} disabled={submitting}>Sign Up</button>"
     }
   ],
   "dependencies": [],
   "constraints": [],
   "acceptance_criteria": [
-    "The sign-in button changes gradient direction on hover.",
-    "The transition is smooth and lasts 300ms."
+    "The sign-up button should smoothly scale up and change color on hover.",
+    "The button should remain accessible and functional during the hover effect."
   ],
-  "notes": "Ensure that the button maintains accessibility features.",
+  "notes": "Ensure that the hover effect is consistent with the overall design language of the application.",
   "response_style": "plan"
 }

@@ -1,13 +1,13 @@
 "use client";
 
-import React from "react";
+import React, { useState } from "react";
 import { motion } from "framer-motion";
 import {
-  ChevronLeft,
-  ChevronRight,
+  Clock,
   Loader2,
-  MessageSquare,
-  MoreHorizontal,
+  MoreVertical,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Search,
   Sparkles,
@@ -15,6 +15,50 @@ import {
   User,
 } from "lucide-react";
 import type { Conversation } from "./chat-types";
+
+function GlowingPlusIcon({ compact = false }: { compact?: boolean }) {
+  if (compact) {
+    return (
+      <div
+        className="relative flex h-11 w-11 items-center justify-center rounded-full"
+        style={{
+          boxShadow:
+            "0 0 20px rgba(255,106,61,0.38), 0 0 38px rgba(255,45,85,0.22)",
+        }}
+      >
+        <div className="absolute inset-0 rounded-full bg-gradient-to-br from-[#ff7a3d] via-[#ff533d] to-[#ff2d55]" />
+        <div className="absolute inset-[1px] rounded-full bg-gradient-to-br from-white/18 to-white/6" />
+        <Plus className="relative z-10 h-5 w-5 text-white" strokeWidth={2.6} />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="relative flex h-9 w-9 items-center justify-center rounded-full"
+      style={{
+        boxShadow:
+          "0 0 18px rgba(255,106,61,0.34), 0 0 34px rgba(255,45,85,0.22)",
+      }}
+    >
+      <motion.div
+        className="absolute inset-0 rounded-full"
+        animate={{ rotate: [0, 360] }}
+        transition={{
+          duration: 6,
+          repeat: Infinity,
+          ease: "linear",
+        }}
+        style={{
+          background:
+            "conic-gradient(from 0deg, #ff7a3d 0deg, #ff533d 120deg, #ff2d55 240deg, #ff7a3d 360deg)",
+        }}
+      />
+      <div className="absolute inset-[1px] rounded-full bg-gradient-to-br from-white/20 to-white/8" />
+      <Plus className="relative z-10 h-4 w-4 text-white" strokeWidth={2.6} />
+    </div>
+  );
+}
 
 export default function ChatSidebar({
   isSidebarCollapsed,
@@ -39,154 +83,231 @@ export default function ChatSidebar({
   onDeleteSession: (sessionId: string) => void;
   loadingSessions: boolean;
 }) {
+  const [menuForId, setMenuForId] = useState<string | null>(null);
+
+  const openSidebarIfCollapsed = () => {
+    if (isSidebarCollapsed) onToggleSidebar();
+  };
+
   return (
     <motion.aside
       animate={{ width: isSidebarCollapsed ? 76 : 318 }}
       transition={{ type: "spring", stiffness: 260, damping: 30 }}
-      className="flex h-full shrink-0 flex-col border-r border-white/8 bg-[#151515]"
+      className="relative flex h-full shrink-0 flex-col border-r border-white/8 bg-[#151515]"
     >
-      <div className="flex items-center justify-between gap-2 border-b border-white/8 p-3">
-        <motion.button
-          whileTap={{ scale: 0.96 }}
-          onClick={onToggleSidebar}
-          className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/72 transition-colors duration-200 hover:border-white/12 hover:bg-white/[0.05] hover:text-white"
-          title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
-        >
-          {isSidebarCollapsed ? <ChevronRight className="h-5 w-5" /> : <ChevronLeft className="h-5 w-5" />}
-        </motion.button>
+      <div className="flex items-center justify-between gap-2 px-3 py-3">
+<motion.button
+  whileTap={{ scale: 0.96 }}
+  onClick={onToggleSidebar}
+  className={`flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/72 transition-colors duration-200 hover:border-white/14 hover:bg-white/[0.06] hover:text-white ${
+    isSidebarCollapsed ? "translate-x-[7px]" : ""
+  }`}
+  title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+  aria-label={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+>
+  {isSidebarCollapsed ? (
+    <PanelLeftOpen className="h-5 w-5" />
+  ) : (
+    <PanelLeftClose className="h-5 w-5" />
+  )}
+</motion.button>
 
         {!isSidebarCollapsed && (
           <div className="flex min-w-0 items-center gap-2">
-            <div className="flex h-9 w-9 items-center justify-center rounded-2xl border border-white/8 bg-gradient-to-br from-[#ff8a3d]/18 to-[#ff5e4d]/12 text-white/88">
+            <div className="flex h-9 w-9 items-center justify-center rounded-2xl border border-white/8 bg-gradient-to-br from-[#ff8a3d]/30 via-[#ff5e4d]/24 to-[#ff2d55]/20 text-white/88">
               <Sparkles className="h-4 w-4" />
             </div>
             <div className="min-w-0">
-              <p className="truncate text-sm font-medium text-white">AI Assistant</p>
-              <p className="truncate text-xs text-white/40">Minimal Chat Workspace</p>
+              <p className="truncate text-sm font-semibold text-white">
+                AI Assistant
+              </p>
+              <p className="truncate text-xs text-white/38">
+                Minimal chat interface
+              </p>
             </div>
           </div>
         )}
-
-        {!isSidebarCollapsed && (
-          <motion.button
-            whileHover={{ scale: 1.03 }}
-            whileTap={{ scale: 0.97 }}
-            onClick={onStartNewChat}
-            className="flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/72 transition-colors duration-200 hover:border-[#ff8a3d]/25 hover:bg-[#ff8a3d]/10 hover:text-white"
-            title="New chat"
-          >
-            <Plus className="h-5 w-5" />
-          </motion.button>
-        )}
       </div>
 
+{isSidebarCollapsed && (
+  <div className="flex flex-col items-center gap-3 pb-4 translate-x-[2px]">
+    <motion.button
+      whileHover={{ scale: 1.05, y: -1 }}
+      whileTap={{ scale: 0.95 }}
+      onClick={() => {
+        onStartNewChat();
+        openSidebarIfCollapsed();
+      }}
+      className="flex h-11 w-11 items-center justify-center rounded-2xl"
+      title="New chat"
+    >
+      <GlowingPlusIcon compact />
+    </motion.button>
+
+    <motion.button
+      whileHover={{ scale: 1.05 }}
+      whileTap={{ scale: 0.95 }}
+      onClick={openSidebarIfCollapsed}
+      className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/[0.06] text-white/80 transition-colors hover:bg-white/[0.10]"
+      title="Search"
+    >
+      <Search className="h-5 w-5" />
+    </motion.button>
+
+    <motion.button
+      whileHover={{ scale: 1.05 }}
+      whileTap={{ scale: 0.95 }}
+      onClick={openSidebarIfCollapsed}
+      className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/[0.06] text-white/80 transition-colors hover:bg-white/[0.10]"
+      title="Recent chats"
+    >
+      <Clock className="h-5 w-5" />
+    </motion.button>
+
+  </div>
+)}
+
       {!isSidebarCollapsed && (
-        <div className="border-b border-white/8 p-3">
-          <div className="relative">
+        <div className="px-3 pb-3">
+          <div className="relative mb-3">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/30" />
             <input
               value={conversationSearch}
               onChange={(e) => setConversationSearch(e.target.value)}
               placeholder="Search conversations"
-              className="h-11 w-full rounded-2xl border border-white/8 bg-white/[0.03] pl-9 pr-3 text-sm text-white outline-none transition-all duration-300 placeholder:text-white/25 focus:border-[#ff8a3d]/30 focus:bg-white/[0.05]"
+              className="h-11 w-full rounded-2xl border border-white/8 bg-white/[0.02] pl-9 pr-3 text-sm text-white outline-none transition-all duration-200 placeholder:text-white/28 focus:border-white/18 focus:bg-white/[0.04]"
             />
           </div>
 
           <motion.button
             whileHover={{ y: -1 }}
-            whileTap={{ scale: 0.99 }}
+            whileTap={{ scale: 0.98 }}
             onClick={onStartNewChat}
-            className="mt-3 flex w-full items-center gap-3 rounded-2xl border border-white/8 bg-white/[0.03] px-3 py-3 text-left transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-[#ff8a3d]/8"
+            className="flex w-full items-center gap-3 rounded-2xl bg-white/[0.03] px-4 py-3 text-left text-sm text-white/80 transition-all duration-200 hover:bg-white/[0.06]"
           >
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-[#ff6a3d] via-[#ff4d3d] to-[#ff2d2d] text-white shadow-[0_10px_22px_rgba(255,77,61,0.18)]">
-              <Plus className="h-4 w-4" />
-            </div>
+            <GlowingPlusIcon />
             <div className="min-w-0">
-              <p className="text-sm font-medium text-white">New chat</p>
-              <p className="truncate text-xs text-white/35">Start a fresh conversation</p>
+              <p className="truncate text-[13px] font-semibold text-white">
+                New chat
+              </p>
+              <p className="truncate text-[11px] text-white/60">
+                Start a fresh conversation
+              </p>
             </div>
           </motion.button>
         </div>
       )}
 
-      <div className="min-h-0 flex-1 overflow-y-auto p-2">
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 pt-1">
         {loadingSessions && filteredConversations.length === 0 ? (
-          <div className="flex items-center gap-2 px-3 py-4 text-sm text-white/40">
+          <div className="flex items-center gap-2 rounded-xl px-3 py-3 text-sm text-white/40">
             <Loader2 className="h-4 w-4 animate-spin" />
             Loading conversations...
+          </div>
+        ) : filteredConversations.length === 0 ? (
+          <div className="rounded-xl px-3 py-3 text-xs text-white/32">
+            No conversations yet. Start a new chat to begin.
           </div>
         ) : (
           filteredConversations.map((conversation) => {
             const isSelected = selectedSessionId === conversation.id;
 
+            if (isSidebarCollapsed) {
+              return null;
+            }
+
             return (
               <motion.div
                 key={conversation.id}
                 whileHover={{ x: 1 }}
-                whileTap={{ scale: 0.99 }}
-                onClick={() => onOpenSession(conversation.id)}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => e.key === "Enter" && onOpenSession(conversation.id)}
-                className={`group mb-1 flex w-full items-start gap-3 rounded-2xl px-3 py-3 text-left transition-all duration-200 ${
+                className={[
+                  "group mb-2 flex w-full items-stretch gap-2 rounded-xl px-3 py-3 text-sm transition-all duration-150",
                   isSelected
-                    ? "border border-[#ff8a3d]/20 bg-white/[0.06]"
-                    : "border border-transparent hover:bg-white/[0.04]"
-                }`}
-                title={conversation.title}
+                    ? "bg-white/[0.06] text-white"
+                    : "bg-transparent text-white/75 hover:bg-white/[0.04]",
+                ].join(" ")}
               >
-                <div className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/[0.03] text-white/70 transition-colors group-hover:border-white/12 group-hover:bg-white/[0.05] group-hover:text-white">
-                  <MessageSquare className="h-4 w-4" />
+                <span
+                  className={[
+                    "mt-0.5 h-9 w-0.5 rounded-full bg-transparent transition-colors duration-200",
+                    isSelected ? "bg-[#ff8a3d]" : "group-hover:bg-white/18",
+                  ].join(" ")}
+                />
+
+                <div className="flex min-w-0 flex-1 gap-3">
+                  <button
+                    onClick={() => onOpenSession(conversation.id)}
+                    className="min-w-0 flex-1 text-left"
+                    title={conversation.title}
+                  >
+                    <div className="flex items-baseline justify-between gap-2">
+                      <p className="truncate text-[13px] font-medium text-white/92">
+                        {conversation.title || "Untitled"}
+                      </p>
+                      {conversation.updatedAt && (
+                        <span className="shrink-0 text-[11px] text-white/32">
+                          {conversation.updatedAt}
+                        </span>
+                      )}
+                    </div>
+                    {conversation.preview && (
+                      <p className="mt-1 truncate text-[11px] leading-5 text-white/40">
+                        {conversation.preview}
+                      </p>
+                    )}
+                  </button>
                 </div>
 
-                {!isSidebarCollapsed && (
-                  <div className="min-w-0 flex-1">
-                    <div className="flex items-start justify-between gap-2">
-                      <p className="truncate text-sm font-medium text-white">{conversation.title}</p>
-                      <span className="shrink-0 text-[11px] text-white/28">{conversation.updatedAt}</span>
-                    </div>
-                    <p className="mt-1 truncate text-xs leading-5 text-white/38">
-                      {conversation.preview}
-                    </p>
-                  </div>
-                )}
+                <div className="relative ml-1 flex items-start justify-end">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMenuForId((prev) =>
+                        prev === conversation.id ? null : conversation.id
+                      );
+                    }}
+                    className="rounded-lg p-1 text-white/28 opacity-0 transition-all duration-150 group-hover:opacity-100 hover:bg-white/[0.05] hover:text-white/80"
+                    title="More actions"
+                    aria-label="More actions"
+                  >
+                    <MoreVertical className="h-4 w-4" />
+                  </button>
 
-                {!isSidebarCollapsed && (
-                  <div className="mt-1 flex items-center gap-1 opacity-0 transition-all duration-200 group-hover:opacity-100">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        void onDeleteSession(conversation.id);
-                      }}
-                      className="rounded-lg p-1 text-white/25 transition-colors hover:bg-white/[0.04] hover:text-white/75"
-                      title="Delete conversation"
+                  {menuForId === conversation.id && (
+                    <div
+                      className="absolute right-0 top-7 z-20 w-32 rounded-lg border border-white/10 bg-[#1b1b1b] py-1 text-xs text-white/80 shadow-lg"
+                      onClick={(e) => e.stopPropagation()}
                     >
-                      <Trash2 className="h-4 w-4" />
-                    </button>
-
-                    <div className="rounded-lg p-1 text-white/22 hover:bg-white/[0.04] hover:text-white/70">
-                      <MoreHorizontal className="h-4 w-4" />
+                      <button
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/[0.06]"
+                        onClick={() => {
+                          setMenuForId(null);
+                          onDeleteSession(conversation.id);
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                        <span>Delete</span>
+                      </button>
                     </div>
-                  </div>
-                )}
+                  )}
+                </div>
               </motion.div>
             );
           })
         )}
       </div>
 
-      <div className="border-t border-white/8 p-3">
-        <button className="flex w-full items-center gap-3 rounded-2xl border border-white/8 bg-white/[0.03] px-3 py-3 text-left transition-colors duration-200 hover:bg-white/[0.05]">
-          <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-white/8 bg-white/[0.04]">
+<div className="px-3 py-3">
+        <button className="flex w-full items-center gap-3 rounded-xl bg-white/[0.02] px-3 py-2.5 text-left text-sm text-white/80 transition-all duration-200 hover:bg-white/[0.05]">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06]">
             <User className="h-4 w-4 text-white/80" />
           </div>
           {!isSidebarCollapsed && (
             <div className="min-w-0 flex-1">
-              <p className="truncate text-sm font-medium text-white">Kian</p>
-              <p className="truncate text-xs text-white/35">Free plan</p>
+              <p className="truncate text-[13px] font-medium text-white">Kian</p>
+              <p className="truncate text-[11px] text-white/40">Free plan</p>
             </div>
           )}
-          {!isSidebarCollapsed && <MoreHorizontal className="h-4 w-4 text-white/25" />}
         </button>
       </div>
     </motion.aside>
