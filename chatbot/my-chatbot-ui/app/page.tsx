@@ -604,7 +604,7 @@ export default function MinimalChatComponent() {
         loadingSessions={loadingSessions}
       />
 
-      <section className="flex min-w-0 flex-1 flex-col bg-[#161616]">
+      <section className="flex min-w-0 flex-1 flex-col ">
         <ChatHeader onToggleSidebar={() => setIsSidebarCollapsed((p) => !p)} />
 
         <div className="flex min-h-0 flex-1 flex-col">
