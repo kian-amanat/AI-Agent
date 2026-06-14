@@ -85,10 +85,10 @@ async function runAgent(agentName, scriptPath, input) {
         if (!child.killed) {
           child.kill("SIGKILL");
         }
-      }, 5000);
+      }, 130000);
 
       reject(new Error(`${agentName} timed out after 2 minutes`));
-    }, 120000);
+    }, 130000);
 
     child.on("close", () => {
       clearTimeout(timeout);

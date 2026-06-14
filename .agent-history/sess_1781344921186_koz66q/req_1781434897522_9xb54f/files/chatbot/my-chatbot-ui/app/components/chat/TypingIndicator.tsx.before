@@ -1,0 +1,16 @@
+import React from "react";
+
+export default function TypingIndicator() {
+  return (
+    <div className="flex items-center justify-center py-2">
+      <div
+        className="h-5 w-5 animate-spin rounded-full border-2 border-transparent border-t-[#ff8a3d] border-r-[#ff5e4d]"
+        style={{
+          background: "conic-gradient(from 0deg, transparent 0%, transparent 270deg, #ff5e4d 360deg)",
+          mask: "radial-gradient(circle, transparent 55%, black 56%)",
+          WebkitMask: "radial-gradient(circle, transparent 55%, black 56%)",
+        }}
+      />
+    </div>
+  );
+}
