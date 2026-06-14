@@ -38,7 +38,7 @@ export default function ChatComposer({
   const canSend = Boolean(messageInput.trim() || selectedFile);
 
   return (
-    <div className="border-t border-white/8 bg-[#161616] px-4 pb-4 pt-3 md:px-8">
+    <div className="bg-transparent px-4 pb-4 pt-3 md:px-8">
       <div className="mx-auto w-full max-w-4xl">
         <motion.div
           animate={

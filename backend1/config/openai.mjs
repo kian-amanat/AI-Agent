@@ -31,6 +31,9 @@ export const PLANNING_MODEL =
 export const SUMMARY_MODEL =
   process.env.SUMMARY_MODEL || "gapgpt-qwen-3.6";
 
+export const WHISPER_MODEL =
+  process.env.WHISPER_MODEL || "gapgpt/whisper-1";
+
 // =========================
 // GapGPT
 // =========================
