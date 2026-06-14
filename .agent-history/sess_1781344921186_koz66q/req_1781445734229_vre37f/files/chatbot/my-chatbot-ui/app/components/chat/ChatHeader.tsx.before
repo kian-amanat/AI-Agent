@@ -1,4 +1,4 @@
-"use client";
+"useuse client";
 
 import { useEffect, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
@@ -64,7 +64,7 @@ export default function ChatHeader({
             whileHover={{ scale: 1.02, y: -0.5 }}
             whileTap={{ scale: 0.96 }}
             onClick={() => setOpen((prev) => !prev)}
-            className="flex h-[40px] w-[40px] items-center justify-center rounded-3xl border border-white/[0.07] bg-white/[0.03] text-white/82 transition-all duration-200 hover:bg-white/[0.07] active:rounded-3xl mr-2 mt-3.5"
+            className="flex h-[40px] w-[40px] items-center justify-center rounded-full border border-white/[0.07] bg-white/[0.03] text-white/82 transition-colors duration-150 hover:bg-white/[0.07] mr-2 mt-3.5"
             aria-label="Choose model"
             title="Choose model"
           >
@@ -74,9 +74,9 @@ export default function ChatHeader({
           <AnimatePresence>
             {open && (
               <motion.div
-                initial={{ opacity: 0, x: 20, scale: 0.95 }}
-                animate={{ opacity: 1, x: 0, scale: 1 }}
-                exit={{ opacity: 0, x: 20, scale: 0.95 }}
+                initial={{ opacity: 0, y: 10, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 10, scale: 0.95 }}
                 transition={{ duration: 0.2, ease: "easeOut" }}
                 className="absolute right-full top-0 mr-3 mt-2 flex gap-2 rounded-4xl border border-white/[0.15] bg-white/[0.05] p-2 shadow-[0_8px_32px_rgba(0,0,0,0.4),0_0_20px_rgba(255,138,61,0.15)] backdrop-blur-xl overflow-hidden"
               >
