@@ -1,0 +1,124 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { PanelLeftClose, Plus } from "lucide-react";
+
+type ModelOption = "pro" | "normal" | "fast";
+
+export default function ChatHeader({
+  onToggleSidebar,
+}: {
+  onToggleSidebar: () => void;
+}) {
+  const [model, setModel] = useState<ModelOption>("pro");
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function onPointerDown(e: MouseEvent) {
+      if (!menuRef.current) return;
+      if (!menuRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
+  const handleSelectModel = (value: ModelOption) => {
+    setModel(value);
+    setOpen(false);
+  };
+
+  return (
+    <header className="
+      fixed
+      top-0
+      right-0
+      left-[sidebarWidth]
+      z-20
+    ">
+      <div className="flex min-w-0 items-center gap-2.5">
+        <button
+          onClick={onToggleSidebar}
+          className="flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.06] bg-white/[0.03] text-white/65 transition-colors duration-200 hover:bg-white/[0.06] hover:text-white md:hidden"
+          title="Toggle sidebar"
+          aria-label="Toggle sidebar"
+        >
+          <PanelLeftClose className="h-4 w-4" />
+        </button>
+
+        <div ref={menuRef} className="relative flex items-center justify-end ml-auto">
+          <motion.button
+            whileHover={{ scale: 1.02, y: -0.5 }}
+            whileTap={{ scale: 0.96 }}
+            onClick={() => setOpen((prev) => !prev)}
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-white/[0.07] bg-white/[0.03] text-white/82 transition-colors duration-150 hover:bg-white/[0.07]"
+            aria-label="Choose model"
+            title="Choose model"
+          >
+            <Plus className="h-3.5 w-3.5" strokeWidth={2.4} />
+          </motion.button>
+
+          <AnimatePresence>
+            {open && (
+              <motion.div
+                initial={{ opacity: 0, y: 8, scale: 0.95 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 8, scale: 0.95 }}
+                transition={{ duration: 0.15 }}
+                className="absolute right-0 top-full mt-2 w-48 rounded-xl border border-white/[0.08] bg-[#1a1a1a]/95 p-1.5 shadow-xl backdrop-blur-md"
+              >
+                <div className="mb-1.5 px-2.5 pt-1 text-[11px] font-medium text-white/30 uppercase tracking-wider">
+                  Select Model
+                </div>
+                {(["pro", "normal", "fast"] as ModelOption[]).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => handleSelectModel(m)}
+                    className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${
+                      model === m
+                        ? "bg-white/[0.08] text-white"
+                        : "text-white/60 hover:bg-white/[0.04] hover:text-white/80"
+                    }`}
+                  >
+                    <div
+                      className={`h-2 w-2 rounded-full ${
+                        m === "pro"
+                          ? "bg-[#ffb26a]"
+                          : m === "fast"
+                          ? "bg-[#91ea92]"
+                          : "bg-[#ff9a6b]"
+                      }`}
+                    />
+                    <span className="flex-1 truncate">
+                      {m === "pro"
+                        ? "Pro · Max quality"
+                        : m === "fast"
+                        ? "Fast · Lowest latency"
+                        : "Normal · Balanced"}
+                    </span>
+                    {model === m && (
+                      <div className="h-1.5 w-1.5 rounded-full bg-white/80" />
+                    )}
+                  </button>
+                ))}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </header>
+  );
+}

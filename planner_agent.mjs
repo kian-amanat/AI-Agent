@@ -6,6 +6,7 @@ import OpenAI from "openai";
 import { buildSmartContext } from "./tools/context_engine.js";
 import { listBackendFiles } from "./tools/list_backend_files.js";
 import { readProjectFile } from "./tools/readProjectFile.js";
+import { PLANNING_MODEL } from "../ai-sandbox/backend1/config/openai.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,7 +18,7 @@ const FRONTEND_ROOT = path.join(PROJECT_ROOT, "frontend");
 const BACKEND_CWD_REL = path.relative(PROJECT_ROOT, BACKEND_ROOT) || "backend";
 const FRONTEND_CWD_REL = path.relative(PROJECT_ROOT, FRONTEND_ROOT) || "frontend";
 
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || PLANNING_MODEL;
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1";
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "***REMOVED-SECRET***";
 
