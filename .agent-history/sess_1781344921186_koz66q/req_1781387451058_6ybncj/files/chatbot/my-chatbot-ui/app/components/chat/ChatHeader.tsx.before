@@ -1,0 +1,114 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import { PanelLeftClose, Plus } from "lucide-react";
+
+type ModelOption = "pro" | "normal" | "fast";
+
+export default function ChatHeader({
+  onToggleSidebar,
+}: {
+  onToggleSidebar: () => void;
+}) {
+  const [model, setModel] = useState<ModelOption>("pro");
+  const [open, setOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    function onPointerDown(e: MouseEvent) {
+      if (!menuRef.current) return;
+      if (!menuRef.current.contains(e.target as Node)) {
+        setOpen(false);
+      }
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") setOpen(false);
+    }
+
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, []);
+
+  const handleSelectModel = (value: ModelOption) => {
+    setModel(value);
+    setOpen(false);
+  };
+
+  return (
+    <header className="
+      fixed
+      top-0
+      right-0
+      left-[sidebarWidth]
+      z-20
+    ">
+      <div className="flex min-w-0 items-center gap-2.5">
+        <button
+          onClick={onToggleSidebar}
+          className="flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.06] bg-white/[0.03] text-white/65 transition-colors duration-200 hover:bg-white/[0.06] hover:text-white md:hidden"
+          title="Toggle sidebar"
+          aria-label="Toggle sidebar"
+        >
+          <PanelLeftClose className="h-4 w-4" />
+        </button>
+
+        <div ref={menuRef} className="relative flex items-center justify-end ml-auto">
+          <motion.button
+            whileHover={{ scale: 1.02, y: -0.5 }}
+            whileTap={{ scale: 0.96 }}
+            onClick={() => setOpen((prev) => !prev)}
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-white/[0.07] bg-white/[0.03] text-white/82 transition-colors duration-150 hover:bg-white/[0.07] mr-2 mt-2"
+            aria-label="Choose model"
+            title="Choose model"
+          >
+            <Plus className="h-3.5 w-3.5" strokeWidth={2.4} />
+          </motion.button>
+
+          <AnimatePresence>
+            {open && (
+              <motion.div
+                initial={{ opacity: 0, x: 10, width: 0 }}
+                animate={{ opacity: 1, x: 0, width: 200 }}
+                exit={{ opacity: 0, x: 10, width: 0 }}
+                transition={{ duration: 0.2, ease: "easeOut" }}
+                className="absolute right-0 top-full mt-2 rounded-xl border border-white/[0.12] bg-gradient-to-br from-[#1a1a1a] to-[#2a2a2a] p-1.5 shadow-[0_10px_40px_rgba(0,0,0,0.5),0_0_20px_rgba(255,138,61,0.1)] backdrop-blur-md overflow-hidden"
+              >
+                <div className="absolute inset-0 bg-gradient-to-r from-[#ff8a3d]/10 via-[#ff5e4d]/5 to-transparent pointer-events-none" />
+                <div className="relative mb-1.5 px-2.5 pt-1 text-[11px] font-medium text-white/30 uppercase tracking-wider">
+                  Select Model
+                </div>
+                {(["pro", "normal", "fast"] as ModelOption[]).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => handleSelectModel(m)}
+                    className={`relative flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left text-sm transition-all duration-200 ${
+                      model === m
+                        ? "bg-white/[0.08] text-white shadow-inner"
+                        : "text-white/60 hover:bg-white/[0.04] hover:text-white/80"
+                    }`}
+                  >
+                    {model === m && (
+                      <motion.div
+                        layoutId="activeModel"
+                        className="absolute inset-0 rounded-lg bg-gradient-to-r from-[#ff8a3d]/20 to-transparent"
+                        transition={{ duration: 0.2 }}
+                      />
+                    )}
+                    <span className="relative z-10 capitalize">{m}</span>
+                  </button>
+                ))}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </header>
+  );
+}

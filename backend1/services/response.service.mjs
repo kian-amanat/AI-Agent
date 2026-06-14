@@ -1,4 +1,11 @@
-import { openai, PLANS_DIR } from "../config/openai.mjs";
+import {
+  openai,
+  CHAT_MODEL,
+  CODEGEN_MODEL,
+  PLANNING_MODEL,
+  SUMMARY_MODEL,
+  PLANS_DIR,
+} from "../config/openai.mjs";
 import { detectLanguage } from "./intent.service.mjs";
 import { getSessionMessages } from "./session.service.mjs";
 import { buildAttachmentContext } from "./attachments.service.mjs";
@@ -53,7 +60,7 @@ ${historyText ? "مکالمه قبلی وجود داره — بهش اشاره �
     const timeoutId = setTimeout(() => controller.abort(), 8000);
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: CHAT_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent },
@@ -62,9 +69,12 @@ ${historyText ? "مکالمه قبلی وجود داره — بهش اشاره �
       max_tokens: 120,
       signal: controller.signal,
     });
-
+console.log(JSON.stringify(response, null, 2));
     clearTimeout(timeoutId);
-    return response.choices[0].message.content.trim();
+    return (
+  response?.choices?.[0]?.message?.content?.trim()
+  || "No response"
+);
   } catch (err) {
     console.log("⚠️  Greeting AI failed, using fallback:", err.message);
     return fallbacks[lang];
@@ -192,7 +202,7 @@ export async function generateClarificationResponse(message) {
     const timeoutId = setTimeout(() => controller.abort(), 8000);
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: CHAT_MODEL,
       messages: [
         {
           role: "system",
@@ -230,7 +240,7 @@ export async function generateCasualResponse(message) {
     const timeoutId = setTimeout(() => controller.abort(), 8000);
 
     const response = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: CHAT_MODEL,
       messages: [
         {
           role: "system",
@@ -269,7 +279,7 @@ export async function streamPlanSummary(plan, userMessage, reply) {
     const timeoutId = setTimeout(() => controller.abort(), 25000);
 
     const stream = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+      model: SUMMARY_MODEL,
       messages: [
         {
           role: "system",

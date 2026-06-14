@@ -1,11 +1,11 @@
 'use client';
 
 import React, { useState } from 'react';
-import { motion } from 'framer-motion';
 import { useRouter } from 'next/navigation';
-import { Eye, EyeOff } from 'lucide-react';
+import { Eye, EyeOff, UserPlus } from 'lucide-react';
 
 export default function SignUpForm() {
+  const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [password, setPassword] = useState('');
@@ -33,12 +33,30 @@ export default function SignUpForm() {
   };
 
   return (
-    <form
-      className="flex flex-col gap-7 font-sans"
-      autoComplete="off"
-      onSubmit={handleSubmit}
-      spellCheck={false}
-    >
+    <div className="flex flex-col gap-5">
+      {error && (
+        <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-200 text-sm">
+          {error}
+        </div>
+      )}
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="name" className="text-sm text-white/70 font-medium px-1">
+          Name
+        </label>
+        <input
+          id="name"
+          type="text"
+          autoComplete="name"
+          className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-4 py-3 text-white/90 placeholder:text-white/30 focus:border-[#ff5e4d]/50 focus:outline-none focus:ring-1 focus:ring-[#ff5e4d]/30 transition-all duration-300"
+          placeholder="John Doe"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          disabled={submitting}
+          required
+        />
+      </div>
+
       <div className="flex flex-col gap-2">
         <label htmlFor="email" className="text-sm text-white/70 font-medium px-1">
           Email
@@ -47,7 +65,7 @@ export default function SignUpForm() {
           id="email"
           type="email"
           autoComplete="email"
-          className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-white/90 placeholder:text-white/30 focus:border-[#ff8a3d]/40 focus:outline-none transition"
+          className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-4 py-3 text-white/90 placeholder:text-white/30 focus:border-[#ff5e4d]/50 focus:outline-none focus:ring-1 focus:ring-[#ff5e4d]/30 transition-all duration-300"
           placeholder="you@email.com"
           value={email}
           onChange={e => setEmail(e.target.value)}
@@ -55,6 +73,7 @@ export default function SignUpForm() {
           required
         />
       </div>
+
       <div className="flex flex-col gap-2">
         <label htmlFor="phone" className="text-sm text-white/70 font-medium px-1">
           Phone (optional)
@@ -63,24 +82,25 @@ export default function SignUpForm() {
           id="phone"
           type="tel"
           autoComplete="tel"
-          className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-white/90 placeholder:text-white/30 focus:border-[#ff8a3d]/40 focus:outline-none transition"
-          placeholder="Your phone number"
+          className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-4 py-3 text-white/90 placeholder:text-white/30 focus:border-[#ff5e4d]/50 focus:outline-none focus:ring-1 focus:ring-[#ff5e4d]/30 transition-all duration-300"
+          placeholder="+1 (555) 000-0000"
           value={phone}
           onChange={e => setPhone(e.target.value)}
           disabled={submitting}
         />
       </div>
+
       <div className="flex flex-col gap-2">
         <label htmlFor="password" className="text-sm text-white/70 font-medium px-1">
           Password
         </label>
-        <div className="relative">
+        <div className="relative w-full">
           <input
             id="password"
             type={showPassword ? 'text' : 'password'}
             autoComplete="new-password"
-            className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-white/90 placeholder:text-white/30 focus:border-[#ff8a3d]/40 focus:outline-none transition w-full pr-12"
-            placeholder="Create a password"
+            className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-4 py-3 pr-10 text-white/90 placeholder:text-white/30 focus:border-[#ff5e4d]/50 focus:outline-none focus:ring-1 focus:ring-[#ff5e4d]/30 transition-all duration-300"
+            placeholder="••••••••"
             value={password}
             onChange={e => setPassword(e.target.value)}
             disabled={submitting}
@@ -88,26 +108,25 @@ export default function SignUpForm() {
           />
           <button
             type="button"
-            tabIndex={-1}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-white/50 hover:text-white/80 focus:outline-none"
-            onClick={() => setShowPassword(v => !v)}
-            aria-label={showPassword ? 'Hide password' : 'Show password'}
+            onClick={() => setShowPassword(!showPassword)}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
           >
-            {showPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+            {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
           </button>
         </div>
       </div>
+
       <div className="flex flex-col gap-2">
         <label htmlFor="confirmPassword" className="text-sm text-white/70 font-medium px-1">
-          Re-enter Password
+          Confirm Password
         </label>
-        <div className="relative">
+        <div className="relative w-full">
           <input
             id="confirmPassword"
             type={showConfirmPassword ? 'text' : 'password'}
             autoComplete="new-password"
-            className="rounded-xl border border-white/10 bg-white/[0.04] px-4 py-2.5 text-white/90 placeholder:text-white/30 focus:border-[#ff8a3d]/40 focus:outline-none transition w-full pr-12"
-            placeholder="Re-enter password"
+            className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-4 py-3 pr-10 text-white/90 placeholder:text-white/30 focus:border-[#ff5e4d]/50 focus:outline-none focus:ring-1 focus:ring-[#ff5e4d]/30 transition-all duration-300"
+            placeholder="••••••••"
             value={confirmPassword}
             onChange={e => setConfirmPassword(e.target.value)}
             disabled={submitting}
@@ -115,35 +134,33 @@ export default function SignUpForm() {
           />
           <button
             type="button"
-            tabIndex={-1}
-            className="absolute right-3 top-1/2 -translate-y-1/2 text-white/50 hover:text-white/80 focus:outline-none"
-            onClick={() => setShowConfirmPassword(v => !v)}
-            aria-label={showConfirmPassword ? 'Hide password' : 'Show password'}
+            onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
           >
-            {showConfirmPassword ? <EyeOff className="w-5 h-5" /> : <Eye className="w-5 h-5" />}
+            {showConfirmPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
           </button>
         </div>
       </div>
-      {error && (
-        <div className="text-sm text-red-400 px-1 -mt-3">{error}</div>
-      )}
+
       <button
-        className="mt-4 flex items-center justify-center bg-gradient-to-r from-[#ff8a3d] via-[#ff5e4d] to-[#ff2d2d] text-white font-semibold rounded-2xl py-2.5 px-6 shadow-lg transition-all duration-150 focus:outline-none focus:ring-2 focus:ring-[#ff8a3d]/40 focus:ring-offset-2 disabled:opacity-60 disabled:cursor-not-allowed"
         type="submit"
         disabled={submitting}
+        className="mt-2 w-full rounded-xl bg-gradient-to-r from-[#ff5e4d] to-[#ff2d2d] p-3.5 text-sm font-semibold text-white shadow-lg shadow-red-500/20 transition-all duration-300 hover:from-[#ff6e5d] hover:to-[#ff3d3d] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+        onClick={handleSubmit}
       >
-        {submitting ? 'Signing up…' : 'Sign up'}
+        {submitting ? (
+          <UserPlus className="h-5 w-5 animate-spin" />
+        ) : (
+          <UserPlus className="h-5 w-5" />
+        )}
+        {submitting ? 'Creating Account...' : 'Sign Up'}
       </button>
-      <div className="mt-2 flex items-center justify-center">
-        <span className="text-sm text-white/60">Already have an account?</span>
-        <button
-          type="button"
-          className="ml-2 text-sm font-medium text-[#ff8a3d] hover:underline focus:outline-none"
-          onClick={() => router.push('/login')}
-        >
-          Sign in
-        </button>
+
+      <div className="mt-4 text-center">
+        <a href="/login" className="text-sm text-white/50 hover:text-white transition-colors">
+          Already have an account? Sign In
+        </a>
       </div>
-    </form>
+    </div>
   );
 }

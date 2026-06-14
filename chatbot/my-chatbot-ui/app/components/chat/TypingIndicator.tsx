@@ -2,10 +2,13 @@ import React from "react";
 
 export default function TypingIndicator() {
   return (
-    <div className="flex items-center gap-1.5 py-1">
-      <span className="h-2 w-2 animate-bounce rounded-full bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d] [animation-delay:-0.2s]" />
-      <span className="h-2 w-2 animate-bounce rounded-full bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d] [animation-delay:-0.1s]" />
-      <span className="h-2 w-2 animate-bounce rounded-full bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d]" />
+    <div className="flex items-center justify-center py-2">
+      <div
+        className="h-5 w-5 animate-spin rounded-full border-4 border-white/10 border-t-[#ff5e4d]"
+        role="status"
+        aria-label="Loading"
+      />
+      <span className="sr-only">Loading...</span>
     </div>
   );
 }
