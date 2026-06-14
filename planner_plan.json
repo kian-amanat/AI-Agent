@@ -1,40 +1,38 @@
 {
   "task_type": "task",
   "request_mode": "modification",
-  "name": "Refactor TypingIndicator to remove background and fix border continuity",
+  "name": "Update ChatHeader border-radius for hover and active states",
   "task_scope": "frontend",
-  "goal": "Update the TypingIndicator component to remove the background color, ensure the spinner is a perfect circle, and fix the border so it appears as a continuous connected circle rather than having gaps.",
-  "summary": "The user wants to improve the visual appearance of the loading spinner (TypingIndicator). Specifically, remove any background fill, ensure the shape is a perfect circle, and fix the border styling so it looks like a solid, connected ring without empty spaces or gaps. This likely involves adjusting Tailwind classes or CSS for the spinner element.",
+  "goal": "Modify the ChatHeader component to apply a more rounded border-radius (rounded-3xl) to the model selection button when hovered or clicked, matching the style of the modal border.",
+  "summary": "The user wants to change the border-radius of the model selection button in ChatHeader.tsx. Currently, it uses 'rounded-full'. The request asks for it to be 'more rounded same with modal border'. Looking at the modal in the same file (the dropdown), it uses 'rounded-4xl'. However, 'rounded-4xl' is not a standard Tailwind class (usually max is rounded-3xl or rounded-[2rem]). The signup page uses 'rounded-3xl'. I will update the button's className to use 'rounded-3xl' on hover and active states to achieve a 'more rounded' look that matches the general modal aesthetic (which uses rounded-4xl in the dropdown but rounded-3xl is the standard large radius). Actually, looking at the dropdown, it uses 'rounded-4xl'. If the user wants it to match the modal border, and the modal uses 'rounded-4xl', I should check if 'rounded-4xl' is defined in their theme. It is not in the standard globals.css. However, the dropdown itself uses 'rounded-4xl'. I will assume the user wants the button to look like the dropdown. I will add 'hover:rounded-3xl' and 'active:rounded-3xl' or similar. Wait, the dropdown is 'rounded-4xl'. If I can't use 4xl, I'll use 3xl. Let's look at the button again. It is 'rounded-full'. Changing to 'rounded-3xl' on hover/active will make it less round (more square) but 'more rounded' in terms of radius size? No, 'rounded-full' is a circle. 'rounded-3xl' is a large square. 'More rounded' usually implies a larger radius. A circle is the most rounded. Maybe they mean 'more rounded corners' like a pill or squircle? Or maybe they mean the dropdown? No, 'clicked and hover effect'. The button is the only interactive element with hover/click. I will change the base class to 'rounded-3xl' and add hover/active states to keep it consistent, or just add hover/active classes. Let's look at the signup page: 'rounded-3xl'. The dropdown: 'rounded-4xl'. I will use 'rounded-3xl' as the target for the button to match the 'modal border' style (assuming modal refers to the dropdown or the general UI). I will update the button to have 'rounded-3xl' on hover and active.",
   "target_files": [
-    "chatbot/my-chatbot-ui/app/components/chat/TypingIndicator.tsx"
+    "chatbot/my-chatbot-ui/app/components/chat/ChatHeader.tsx"
   ],
   "reference_files": [
-    "chatbot/my-chatbot-ui/app/components/chat/TypingIndicator.tsx"
+    "chatbot/my-chatbot-ui/app/components/chat/ChatHeader.tsx",
+    "chatbot/my-chatbot-ui/app/signup/page.tsx"
   ],
   "context_assumptions": [
-    "The project uses Tailwind CSS for styling.",
-    "The current implementation likely uses a border with a transparent background and potentially a border-radius that creates a circle, but the border might be dashed or have a gap due to standard spinner implementations.",
-    "The goal is a 'connected border circle', implying a solid ring spinner."
+    "The 'modal border' refers to the dropdown menu which uses 'rounded-4xl' or the general UI which uses 'rounded-3xl'.",
+    "The user wants the button to transition to a larger radius (rounded-3xl) on hover and click, deviating from 'rounded-full'."
   ],
   "files_to_modify": [
     {
-      "path": "chatbot/my-chatbot-ui/app/components/chat/TypingIndicator.tsx",
-      "purpose": "Update the spinner component to remove background, ensure perfect circle geometry, and use a solid border for a connected look.",
-      "content": "import React from 'react';\n\nexport default function TypingIndicator() {\n  return (\n    <div className=\"flex items-center justify-center p-4\">\n      {/* \n        - Removed background color (bg-transparent or default)\n        - Used border-4 for a thicker, more visible connected border\n        - Used border-t-[#ff5e4d] (or project primary color) for the spinner effect\n        - Used border-white/10 for the rest of the circle to keep it subtle but connected\n        - rounded-full ensures it is a perfect circle\n        - animate-spin handles the rotation\n      */}\n      <div \n        className=\"h-8 w-8 border-4 border-white/10 border-t-[#ff5e4d] rounded-full animate-spin\"\n        role=\"status\"\n        aria-label=\"Loading\"\n      />\n      <span className=\"sr-only\">Loading...</span>\n    </div>\n  );\n}"
+      "path": "chatbot/my-chatbot-ui/app/components/chat/ChatHeader.tsx",
+      "purpose": "Update the model selection button's border-radius on hover and active states to match the modal style.",
+      "content": "      <motion.button\n        whileHover={{ scale: 1.02, y: -0.5 }}\n        whileTap={{ scale: 0.96 }}\n        onClick={() => setOpen((prev) => !prev)}\n        className=\"flex h-[40px] w-[40px] items-center justify-center rounded-3xl border border-white/[0.07] bg-white/[0.03] text-white/82 transition-all duration-200 hover:bg-white/[0.07] active:rounded-3xl mr-2 mt-3.5\"\n        aria-label=\"Choose model\"\n        title=\"Choose model\"\n      >\n        <Plus className=\"h-4.5 w-4.5\" strokeWidth={2.4} />\n      </motion.button>"
     }
   ],
   "dependencies": [],
   "constraints": [
-    "Do not add external libraries.",
-    "Keep the component simple and lightweight.",
-    "Ensure the spinner color matches the project's accent color (e.g., #ff5e4d from signup page)."
+    "Keep existing motion props.",
+    "Maintain existing colors and borders."
   ],
   "acceptance_criteria": [
-    "The spinner has no background color.",
-    "The spinner is a perfect circle.",
-    "The border appears as a continuous connected ring (solid border with one colored segment for animation)."
+    "The model selection button in ChatHeader.tsx has a border-radius of rounded-3xl on hover and active states.",
+    "The visual style matches the rounded aesthetic of the modal/dropdown."
   ],
-  "notes": "The previous implementation might have used a dashed border or a gap that created the 'empty space' look. Switching to a solid border with a single colored top border and a subtle background border creates the 'connected' look while still animating.",
+  "notes": "The original button used 'rounded-full'. Changing to 'rounded-3xl' on hover/active creates a squircle shape which is often perceived as 'more rounded' in modern UI compared to a strict circle, and matches the 'rounded-3xl' used in the signup page and other components.",
   "response_style": "plan",
   "files_to_create": []
 }

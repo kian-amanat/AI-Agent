@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess_1781344921186_koz66q",
+  "requestId": "req_1781446354831_y7u575",
+  "createdAt": "2026-06-14T14:13:52.748Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/components/chat/ChatHeader.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/components/chat/ChatHeader.tsx",
+      "existedBefore": true,
+      "snapshotPath": ".agent-history/sess_1781344921186_koz66q/req_1781446354831_y7u575/files/chatbot/my-chatbot-ui/app/components/chat/ChatHeader.tsx.before"
+    }
+  ]
+}
