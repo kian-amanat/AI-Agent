@@ -1,6 +1,7 @@
-import { promises as fs } from "fs";
+import { promises as fs, createReadStream, createWriteStream } from "fs";
 import path from "path";
-
+import { pipeline } from "stream/promises";
+import FormData from "form-data";
 import {
   createSession,
   saveMessage,
@@ -22,7 +23,13 @@ import {
   streamPlanSummary,
 } from "../services/response.service.mjs";
 import { runPipeline } from "../services/pipeline.service.mjs";
-import { PLANS_DIR } from "../config/openai.mjs";
+import {
+  PLANS_DIR,
+  OPENAI_API_KEY,
+  OPENAI_BASE_URL,
+  WHISPER_MODEL,
+  openai
+} from "../config/openai.mjs";
 import { uniq } from "../utils/text.util.mjs";
 // 🔄 UNDO: سرویس undo
 import { undoRequestChanges } from "../services/undo.service.mjs";
@@ -71,6 +78,45 @@ function toStringArray(value) {
 
   return [];
 }
+
+async function transcribeAudio(audioPath) {
+  console.log("🎙️ Using Whisper model:", WHISPER_MODEL);
+  console.log("📡 Base URL:", OPENAI_BASE_URL);
+
+  try {
+    const response = await openai.audio.transcriptions.create({
+      model: WHISPER_MODEL || "gapgpt/whisper-1",
+      file: createReadStream(audioPath),
+    });
+
+    console.log("📥 Whisper SDK response:", response);
+
+    const text = (response.text || "").trim();
+    if (!text) {
+      throw new Error("Empty transcription text returned from Whisper");
+    }
+
+    return text;
+  } catch (err) {
+    console.error("❌ Whisper transcription error via SDK:", err);
+
+    // اگر rate limit بود، یک خطا با پیام واضح‌تر برگردانیم
+    if (err?.code === "api_limit" || err?.status === 429) {
+      throw new Error(
+        "Whisper API rate limit reached (429). Please wait or check your GapGPT plan/quota."
+      );
+    }
+
+    const apiError = err?.error || err?.response || err;
+    throw new Error(
+      `Whisper transcription failed via SDK: ${
+        apiError?.message || String(apiError)
+      }`
+    );
+  }
+}
+
+
 
 export default async function plannerAgentRoute(fastify) {
   fastify.post("/run", async (request, reply) => {
@@ -521,6 +567,72 @@ export default async function plannerAgentRoute(fastify) {
     }
   });
 
+  fastify.post("/transcribe", async (request, reply) => {
+     console.log("🎙️ /transcribe hit");
+    setCors(reply);
+
+    try {
+      if (typeof request.file !== "function") {
+        return reply.code(400).send({
+          ok: false,
+          error:
+            "Multipart upload is not enabled. Install and register @fastify/multipart.",
+        });
+      }
+
+      const data = await request.file();
+      if (!data) {
+        return reply.code(400).send({
+          ok: false,
+          error: "No audio file provided. Upload audio file in 'audio' field.",
+        });
+      }
+
+      const tempDir = path.join(process.cwd(), "temp_audio");
+      await fs.mkdir(tempDir, { recursive: true });
+
+      const tempAudioPath = path.join(tempDir, `audio_${Date.now()}.webm`);
+
+      await pipeline(data.file, createWriteStream(tempAudioPath));
+
+      const transcript = await transcribeAudio(tempAudioPath);
+
+      await fs.unlink(tempAudioPath).catch(() => {});
+
+      const session_id = data.fields?.session_id?.[0]?.value || "";
+      const attachment_paths = uniq([
+        ...toStringArray(data.fields?.attachment_paths?.[0]?.value),
+        ...toStringArray(data.fields?.attachments?.[0]?.value),
+        ...toStringArray(data.fields?.files?.[0]?.value),
+      ]);
+
+      return reply.send({
+        ok: true,
+        transcribed_text: transcript,
+        session_id: session_id || undefined,
+        attachment_paths: attachment_paths.length > 0 ? attachment_paths : undefined,
+        message:
+          "Audio transcribed successfully. Use the 'transcribed_text' as the message for /run endpoint.",
+      });
+} catch (error) {
+  console.error("❌ Transcription endpoint error:", error);
+
+  const msg = error.message || "";
+  const isRateLimit =
+    msg.includes("rate limit") ||
+    msg.includes("429") ||
+    error.code === "api_limit";
+
+  return reply.code(isRateLimit ? 429 : 500).send({
+    ok: false,
+    error: isRateLimit
+      ? "Whisper API rate limit reached on GapGPT. Please try again later or check your plan/quota."
+      : "Failed to transcribe audio",
+    details: msg,
+  });
+}
+  });
+
   // 🔄 UNDO: endpoint مخصوص undo per request
   fastify.post("/undo", async (request, reply) => {
     setCors(reply);
@@ -545,9 +657,7 @@ export default async function plannerAgentRoute(fastify) {
         });
       }
 
-      console.log(
-        `🕙 Undo requested for session=${sessionId}, request=${requestId}`
-      );
+      console.log(`🕙 Undo requested for session=${sessionId}, request=${requestId}`);
 
       const result = undoRequestChanges({ sessionId, requestId });
 

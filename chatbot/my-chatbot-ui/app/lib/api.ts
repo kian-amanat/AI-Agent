@@ -1,7 +1,6 @@
-// ./lib/api.ts
-
 const BASE_URL = "http://localhost:9000/api/agent";
 const UPLOAD_URL = `${BASE_URL}/upload`;
+const TRANSCRIBE_URL = `${BASE_URL}/transcribe`;
 
 export interface Session {
   id: string;
@@ -43,6 +42,15 @@ type UploadResponse = {
   path?: string;
   filename?: string;
   url?: string;
+};
+
+type TranscribeResponse = {
+  ok: boolean;
+  error?: string;
+  transcribed_text?: string;
+  session_id?: string;
+  attachment_paths?: string[];
+  message?: string;
 };
 
 type RunPayload = {
@@ -113,6 +121,27 @@ async function uploadAttachment(file: File): Promise<string> {
   }
 
   return data.path;
+}
+
+export async function transcribeAudio(
+  audioBlob: Blob,
+  filename = "voice.webm"
+): Promise<string> {
+  const formData = new FormData();
+  formData.append("audio", audioBlob, filename);
+
+  const res = await fetch(TRANSCRIBE_URL, {
+    method: "POST",
+    body: formData,
+  });
+
+  const data = await readJson<TranscribeResponse>(res);
+
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || `Transcription failed with status ${res.status}`);
+  }
+
+  return (data.transcribed_text || "").trim();
 }
 
 // 🔹 parseSSE: event-based + نگه‌داشتن sessionId/requestId
@@ -276,7 +305,6 @@ export async function deleteSession(sessionId: string): Promise<void> {
 }
 
 // 🔹 API فراخوانی Undo
-// 🔹 API فراخوانی Undo
 export async function callUndo(
   sessionId: string,
   requestId: string
@@ -289,7 +317,6 @@ export async function callUndo(
     body: JSON.stringify({ session_id: sessionId, request_id: requestId }),
   });
 
-  // برای دیباگ: متن خام پاسخ را لاگ کن
   const text = await res.text();
   console.log("[UNDO] raw response", text);
 
@@ -313,8 +340,6 @@ export async function callUndo(
 
   return data;
 }
-
-
 
 // 🔹 sendMessage: کار با SSEEvent
 export function sendMessage(
