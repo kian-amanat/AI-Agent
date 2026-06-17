@@ -1,0 +1,171 @@
+'use client';
+
+import React, { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { Eye, EyeOff, UserPlus, Mail, Phone, Lock, CheckCircle2, AlertCircle } from 'lucide-react';
+
+export default function SignUpForm() {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const router = useRouter();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setSubmitting(true);
+    try {
+      // TODO: Implement actual signup logic
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      // On success, redirect to login or home
+      router.push('/login');
+    } catch (err) {
+      setError('Failed to sign up. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const inputBaseClass = "w-full rounded-2xl border bg-white/[0.03] px-4 py-3.5 text-white/90 placeholder:text-white/30 transition-all duration-300 outline-none focus:bg-white/[0.06]";
+  // Updated focus colors to match LoginForm (Orange theme)
+  const inputNormalClass = "border-white/10 focus:border-[#ff8a3d]/50 focus:ring-2 focus:ring-[#ff8a3d]/20";
+  const inputErrorClass = "border-red-500/50 focus:border-red-500/50 focus:ring-red-500/20";
+
+  return (
+    <form onSubmit={handleSubmit} className="flex flex-col gap-6">
+      {error && (
+        <div className="flex items-center gap-2 rounded-xl bg-red-500/10 border border-red-500/20 p-4 text-red-200 text-sm animate-in fade-in slide-in-from-top-2">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="name" className="text-sm font-medium text-white/80 ml-1">
+          Full Name
+        </label>
+        <div className="relative group">
+          <UserPlus className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#ff8a3d] transition-colors" />
+          <input
+            id="name"
+            type="text"
+            autoComplete="name"
+            className={`${inputBaseClass} ${inputNormalClass} pl-10 pr-4`}
+            placeholder="John Doe"
+            value={name}
+            onChange={e => setName(e.target.value)}
+            disabled={submitting}
+            required
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="email" className="text-sm font-medium text-white/80 ml-1">
+          Email Address
+        </label>
+        <div className="relative group">
+          <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#ff8a3d] transition-colors" />
+          <input
+            id="email"
+            type="email"
+            autoComplete="email"
+            className={`${inputBaseClass} ${inputNormalClass} pl-10 pr-4`}
+            placeholder="you@example.com"
+            value={email}
+            onChange={e => setEmail(e.target.value)}
+            disabled={submitting}
+            required
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="phone" className="text-sm font-medium text-white/80 ml-1">
+          Phone Number
+        </label>
+        <div className="relative group">
+          <Phone className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#ff8a3d] transition-colors" />
+          <input
+            id="phone"
+            type="tel"
+            autoComplete="tel"
+            className={`${inputBaseClass} ${inputNormalClass} pl-10 pr-4`}
+            placeholder="+1 (555) 000-0000"
+            value={phone}
+            onChange={e => setPhone(e.target.value)}
+            disabled={submitting}
+          />
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="password" className="text-sm font-medium text-white/80 ml-1">
+          Password
+        </label>
+        <div className="relative group">
+          <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#ff8a3d] transition-colors" />
+          <input
+            id="password"
+            type={showPassword ? 'text' : 'password'}
+            autoComplete="new-password"
+            className={`${inputBaseClass} ${inputNormalClass} pl-10 pr-12`}
+            placeholder="Create a password"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            disabled={submitting}
+            required
+          />
+          <button
+            type="button"
+            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60 transition-colors"
+            onClick={() => setShowPassword(!showPassword)}
+          >
+            {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </button>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="confirmPassword" className="text-sm font-medium text-white/80 ml-1">
+          Confirm Password
+        </label>
+        <div className="relative group">
+          <CheckCircle2 className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#ff8a3d] transition-colors" />
+          <input
+            id="confirmPassword"
+            type={showConfirmPassword ? 'text' : 'password'}
+            autoComplete="new-password"
+            className={`${inputBaseClass} ${inputNormalClass} pl-10 pr-12`}
+            placeholder="Confirm your password"
+            value={confirmPassword}
+            onChange={e => setConfirmPassword(e.target.value)}
+            disabled={submitting}
+            required
+          />
+          <button
+            type="button"
+            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60 transition-colors"
+            onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+          >
+            {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+          </button>
+        </div>
+      </div>
+
+      <button
+        type="submit"
+        disabled={submitting}
+        className="w-full rounded-2xl bg-[#ff8a3d] py-3.5 text-sm font-semibold text-white shadow-lg shadow-orange-500/20 transition-all duration-300 hover:bg-[#ff5e4d] hover:shadow-orange-500/30 active:scale-[0.98] disabled:opacity-70 disabled:cursor-not-allowed mt-2"
+      >
+        {submitting ? 'Creating Account...' : 'Create Account'}
+      </button>
+    </form>
+  );
+}
