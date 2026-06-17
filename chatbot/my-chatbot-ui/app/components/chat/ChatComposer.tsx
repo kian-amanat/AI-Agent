@@ -2,14 +2,7 @@
 
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import {
-  Loader2,
-  Mic,
-  Paperclip,
-  Send,
-  StopCircle,
-  X,
-} from "lucide-react";
+import { Loader2, Mic, Paperclip, Send, StopCircle, X } from "lucide-react";
 import { transcribeAudio } from "../../lib/api";
 
 type ChatComposerProps = {
@@ -23,9 +16,26 @@ type ChatComposerProps = {
   setIsRecording: React.Dispatch<React.SetStateAction<boolean>>;
   onSendMessage: () => void;
   onMessageKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
-  selectedFile: File | null;
-  setSelectedFile: React.Dispatch<React.SetStateAction<File | null>>;
+  selectedFiles?: File[];
+  setSelectedFiles: React.Dispatch<React.SetStateAction<File[]>>;
 };
+
+function mergeFiles(existing: File[], incoming: File[]) {
+  const seen = new Set(
+    existing.map((file) => `${file.name}_${file.size}_${file.lastModified}`)
+  );
+
+  const merged = [...existing];
+
+  for (const file of incoming) {
+    const key = `${file.name}_${file.size}_${file.lastModified}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    merged.push(file);
+  }
+
+  return merged;
+}
 
 export default function ChatComposer({
   messageInput,
@@ -38,8 +48,8 @@ export default function ChatComposer({
   setIsRecording,
   onSendMessage,
   onMessageKeyDown,
-  selectedFile,
-  setSelectedFile,
+  selectedFiles = [],
+  setSelectedFiles,
 }: ChatComposerProps) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
@@ -49,7 +59,7 @@ export default function ChatComposer({
 
   const [isTranscribing, setIsTranscribing] = React.useState(false);
 
-  const canSend = Boolean(messageInput.trim() || selectedFile);
+  const canSend = Boolean(messageInput.trim() || selectedFiles.length > 0);
 
   const stopStreamTracks = React.useCallback(() => {
     mediaStreamRef.current?.getTracks().forEach((track) => track.stop());
@@ -91,9 +101,7 @@ export default function ChatComposer({
         chunksRef.current = [];
         stopStreamTracks();
 
-        if (!audioBlob.size) {
-          return;
-        }
+        if (!audioBlob.size) return;
 
         setIsTranscribing(true);
 
@@ -148,6 +156,7 @@ export default function ChatComposer({
 
   React.useEffect(() => {
     mountedRef.current = true;
+
     return () => {
       mountedRef.current = false;
       stopRecording();
@@ -186,10 +195,13 @@ export default function ChatComposer({
               ref={fileInputRef}
               type="file"
               className="hidden"
+              multiple
               accept="image/*,.pdf,.doc,.docx,.txt,.md,.json,.csv"
               onChange={(e) => {
-                const file = e.target.files?.[0] ?? null;
-                setSelectedFile(file);
+                const files = Array.from(e.target.files ?? []);
+                if (files.length > 0) {
+                  setSelectedFiles((prev) => mergeFiles(prev, files));
+                }
                 e.target.value = "";
               }}
             />
@@ -199,8 +211,9 @@ export default function ChatComposer({
               whileHover={{ scale: 1.03 }}
               whileTap={{ scale: 0.96 }}
               onClick={() => fileInputRef.current?.click()}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/[0.03] text-white/62 transition-colors duration-200 hover:border-white/12 hover:bg-white/[0.05] hover:text-white"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/[0.03] text-white/62 transition-colors duration-200 hover:border-white/12 hover:bg-white/[0.05] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
               title="Attach file or image"
+              disabled={isSending || isTranscribing}
             >
               <Paperclip className="h-4 w-4" />
             </motion.button>
@@ -227,25 +240,41 @@ export default function ChatComposer({
               />
 
               <AnimatePresence initial={false}>
-                {selectedFile && (
+                {selectedFiles.length > 0 && (
                   <motion.div
-                    key={selectedFile.name}
                     initial={{ opacity: 0, y: 4 }}
                     animate={{ opacity: 1, y: 0 }}
                     exit={{ opacity: 0, y: 4 }}
-                    className="mt-1 flex items-center gap-2 rounded-xl border border-[#ff8a3d]/18 bg-[#ff8a3d]/8 px-2.5 py-1.5 text-xs text-white/84"
+                    className="mt-2 flex flex-wrap gap-2"
                   >
-                    <span className="min-w-0 truncate">
-                      📎 {selectedFile.name}
-                    </span>
-                    <button
-                      type="button"
-                      onClick={() => setSelectedFile(null)}
-                      className="ml-auto inline-flex h-5 w-5 items-center justify-center rounded-full text-white/60 transition-colors hover:bg-white/10 hover:text-white"
-                      title="Remove attachment"
-                    >
-                      <X className="h-3.5 w-3.5" />
-                    </button>
+                    {selectedFiles.map((file) => (
+                      <div
+                        key={`${file.name}_${file.size}_${file.lastModified}`}
+                        className="flex max-w-full items-center gap-2 rounded-xl border border-[#ff8a3d]/18 bg-[#ff8a3d]/8 px-2.5 py-1.5 text-xs text-white/84"
+                      >
+                        <span className="min-w-0 truncate">📎 {file.name}</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSelectedFiles((prev) =>
+                              prev.filter(
+                                (item) =>
+                                  !(
+                                    item.name === file.name &&
+                                    item.size === file.size &&
+                                    item.lastModified === file.lastModified
+                                  )
+                              )
+                            );
+                          }}
+                          className="ml-auto inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-white/60 transition-colors hover:bg-white/10 hover:text-white"
+                          title="Remove attachment"
+                          disabled={isSending || isTranscribing}
+                        >
+                          <X className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    ))}
                   </motion.div>
                 )}
               </AnimatePresence>
@@ -260,18 +289,18 @@ export default function ChatComposer({
                 isTranscribing
                   ? "border-[#ff8a3d]/20 bg-[#ff8a3d]/10 text-white"
                   : isRecording
-                  ? "border-[#ff5e4d]/30 bg-[#ff5e4d]/12 text-white"
-                  : "border-white/8 bg-white/[0.03] text-white/62 hover:border-white/12 hover:bg-white/[0.05] hover:text-white"
+                    ? "border-[#ff5e4d]/30 bg-[#ff5e4d]/12 text-white"
+                    : "border-white/8 bg-white/[0.03] text-white/62 hover:border-white/12 hover:bg-white/[0.05] hover:text-white"
               }`}
               title={isRecording ? "Stop recording" : "Voice"}
               disabled={isSending || isTranscribing}
             >
               {isTranscribing ? (
-                <Loader2 className="h-4.5 w-4.5 animate-spin" />
+                <Loader2 className="h-4 w-4 animate-spin" />
               ) : isRecording ? (
-                <StopCircle className="h-4.5 w-4.5" />
+                <StopCircle className="h-4 w-4" />
               ) : (
-                <Mic className="h-4.5 w-4.5" />
+                <Mic className="h-4 w-4" />
               )}
             </motion.button>
 
@@ -292,7 +321,7 @@ export default function ChatComposer({
                     animate={{ opacity: 1, scale: 1, rotate: 0 }}
                     exit={{ opacity: 0, scale: 0.9 }}
                   >
-                    <Loader2 className="h-4.5 w-4.5 animate-spin" />
+                    <Loader2 className="h-4 w-4 animate-spin" />
                   </motion.span>
                 ) : (
                   <motion.span
@@ -301,7 +330,7 @@ export default function ChatComposer({
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.9 }}
                   >
-                    <Send className="h-4.5 w-4.5" />
+                    <Send className="h-4 w-4" />
                   </motion.span>
                 )}
               </AnimatePresence>

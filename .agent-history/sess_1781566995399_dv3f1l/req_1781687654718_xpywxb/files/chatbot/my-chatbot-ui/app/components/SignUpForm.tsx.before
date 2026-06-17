@@ -33,8 +33,7 @@ export default function SignUpForm() {
   };
 
   const inputBaseClass = "w-full rounded-2xl border bg-white/[0.03] px-4 py-3.5 text-white/90 placeholder:text-white/30 transition-all duration-300 outline-none focus:bg-white/[0.06]";
-  // Updated focus colors to match LoginForm (Orange theme)
-  const inputNormalClass = "border-white/10 focus:border-[#ff8a3d]/50 focus:ring-2 focus:ring-[#ff8a3d]/20";
+  const inputNormalClass = "border-white/10 focus:border-[#8b5cf6]/50 focus:ring-2 focus:ring-[#8b5cf6]/20";
   const inputErrorClass = "border-red-500/50 focus:border-red-500/50 focus:ring-red-500/20";
 
   return (
@@ -51,7 +50,7 @@ export default function SignUpForm() {
           Full Name
         </label>
         <div className="relative group">
-          <UserPlus className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#ff8a3d] transition-colors" />
+          <UserPlus className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#8b5cf6] transition-colors" />
           <input
             id="name"
             type="text"
@@ -71,7 +70,7 @@ export default function SignUpForm() {
           Email Address
         </label>
         <div className="relative group">
-          <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#ff8a3d] transition-colors" />
+          <Mail className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#8b5cf6] transition-colors" />
           <input
             id="email"
             type="email"
@@ -88,10 +87,10 @@ export default function SignUpForm() {
 
       <div className="flex flex-col gap-2">
         <label htmlFor="phone" className="text-sm font-medium text-white/80 ml-1">
-          Phone Number
+          Phone Number <span className="text-white/40 font-normal">(Optional)</span>
         </label>
         <div className="relative group">
-          <Phone className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#ff8a3d] transition-colors" />
+          <Phone className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#8b5cf6] transition-colors" />
           <input
             id="phone"
             type="tel"
@@ -110,13 +109,13 @@ export default function SignUpForm() {
           Password
         </label>
         <div className="relative group">
-          <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#ff8a3d] transition-colors" />
+          <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#8b5cf6] transition-colors" />
           <input
             id="password"
             type={showPassword ? 'text' : 'password'}
             autoComplete="new-password"
             className={`${inputBaseClass} ${inputNormalClass} pl-10 pr-12`}
-            placeholder="Create a password"
+            placeholder="Create a strong password"
             value={password}
             onChange={e => setPassword(e.target.value)}
             disabled={submitting}
@@ -124,8 +123,10 @@ export default function SignUpForm() {
           />
           <button
             type="button"
-            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60 transition-colors"
-            onClick={() => setShowPassword(!showPassword)}
+            tabIndex={-1}
+            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
+            onClick={() => setShowPassword(v => !v)}
+            aria-label={showPassword ? "Hide password" : "Show password"}
           >
             {showPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
           </button>
@@ -137,13 +138,13 @@ export default function SignUpForm() {
           Confirm Password
         </label>
         <div className="relative group">
-          <CheckCircle2 className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#ff8a3d] transition-colors" />
+          <Lock className="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-white/30 group-focus-within:text-[#8b5cf6] transition-colors" />
           <input
             id="confirmPassword"
             type={showConfirmPassword ? 'text' : 'password'}
             autoComplete="new-password"
             className={`${inputBaseClass} ${inputNormalClass} pl-10 pr-12`}
-            placeholder="Confirm your password"
+            placeholder="Repeat your password"
             value={confirmPassword}
             onChange={e => setConfirmPassword(e.target.value)}
             disabled={submitting}
@@ -151,8 +152,10 @@ export default function SignUpForm() {
           />
           <button
             type="button"
-            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/30 hover:text-white/60 transition-colors"
-            onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+            tabIndex={-1}
+            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
+            onClick={() => setShowConfirmPassword(v => !v)}
+            aria-label={showConfirmPassword ? "Hide password" : "Show password"}
           >
             {showConfirmPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
           </button>
@@ -162,10 +165,24 @@ export default function SignUpForm() {
       <button
         type="submit"
         disabled={submitting}
-        className="w-full rounded-2xl bg-[#ff8a3d] py-3.5 text-sm font-semibold text-white shadow-lg shadow-orange-500/20 transition-all duration-300 hover:bg-[#ff5e4d] hover:shadow-orange-500/30 active:scale-[0.98] disabled:opacity-70 disabled:cursor-not-allowed mt-2"
+        className="mt-2 w-full rounded-2xl bg-gradient-to-r from-[#8b5cf6] to-[#6d28d9] px-4 py-3.5 text-sm font-semibold text-white shadow-lg shadow-purple-500/20 transition-all duration-300 hover:shadow-purple-500/40 hover:scale-[1.02] active:scale-[0.98] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
       >
-        {submitting ? 'Creating Account...' : 'Create Account'}
+        {submitting ? (
+          <>
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+            Creating Account...
+          </>
+        ) : (
+          <>
+            <UserPlus className="h-4 w-4" />
+            Create Account
+          </>
+        )}
       </button>
+
+      <div className="text-center text-xs text-white/40 mt-4">
+        By signing up, you agree to our <a href="#" className="text-white/60 hover:text-[#8b5cf6] transition-colors">Terms</a> and <a href="#" className="text-white/60 hover:text-[#8b5cf6] transition-colors">Privacy Policy</a>
+      </div>
     </form>
   );
 }

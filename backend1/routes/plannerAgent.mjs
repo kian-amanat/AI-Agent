@@ -1,7 +1,8 @@
 import { promises as fs, createReadStream, createWriteStream } from "fs";
 import path from "path";
 import { pipeline } from "stream/promises";
-import FormData from "form-data";
+import { spawn } from "child_process";
+
 import {
   createSession,
   saveMessage,
@@ -28,11 +29,12 @@ import {
   OPENAI_API_KEY,
   OPENAI_BASE_URL,
   WHISPER_MODEL,
-  openai
+  openai,
 } from "../config/openai.mjs";
 import { uniq } from "../utils/text.util.mjs";
-// 🔄 UNDO: سرویس undo
 import { undoRequestChanges } from "../services/undo.service.mjs";
+
+const FILE_AGENT_SCRIPT = path.resolve(process.cwd(), "../file_agent.mjs");
 
 function startSSE(reply) {
   reply.raw.setHeader("Access-Control-Allow-Origin", "*");
@@ -68,7 +70,9 @@ function toStringArray(value) {
       if (Array.isArray(parsed)) {
         return parsed.filter((item) => typeof item === "string" && item.trim());
       }
-    } catch {}
+    } catch {
+      // ignore JSON parsing errors
+    }
 
     return trimmed
       .split(",")
@@ -77,6 +81,118 @@ function toStringArray(value) {
   }
 
   return [];
+}
+
+function parseFileAgentOutput(output) {
+  const marker = "[Structured_File_Analysis_JSON]";
+  const idx = output.lastIndexOf(marker);
+
+  if (idx === -1) {
+    return {
+      rawText: output.trim(),
+      structured: null,
+    };
+  }
+
+  const rawText = output.slice(0, idx).trim();
+  const jsonText = output.slice(idx + marker.length).trim();
+
+  try {
+    return {
+      rawText,
+      structured: JSON.parse(jsonText),
+    };
+  } catch {
+    return {
+      rawText,
+      structured: null,
+    };
+  }
+}
+
+function buildFileAnalysisContext(fileAnalysis) {
+  if (!fileAnalysis?.files || !Array.isArray(fileAnalysis.files)) return "";
+
+  const lines = [];
+
+  for (const file of fileAnalysis.files) {
+    lines.push(`FILE: ${file.file || "unknown"}`);
+    lines.push(`TYPE: ${file.fileType || "unknown"}`);
+
+    if (file.natural_summary) {
+      lines.push(`SUMMARY: ${file.natural_summary}`);
+    }
+
+    const structured = file.structured;
+    if (structured) {
+      if (structured.detected_kind) {
+        lines.push(`KIND: ${structured.detected_kind}`);
+      }
+
+      if (Array.isArray(structured.key_elements) && structured.key_elements.length > 0) {
+        lines.push(`KEY ELEMENTS: ${structured.key_elements.slice(0, 6).join(", ")}`);
+      }
+
+      if (Array.isArray(structured.possible_tasks) && structured.possible_tasks.length > 0) {
+        lines.push(`POSSIBLE TASKS: ${structured.possible_tasks.slice(0, 6).join(", ")}`);
+      }
+
+      if (Array.isArray(structured.domain_entities) && structured.domain_entities.length > 0) {
+        lines.push(`DOMAIN ENTITIES: ${structured.domain_entities.slice(0, 6).join(", ")}`);
+      }
+    }
+
+    lines.push("");
+  }
+
+  return lines.join("\n").trim();
+}
+
+function runFileAgent({ files, userMessage = "" }) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      "node",
+      [FILE_AGENT_SCRIPT, JSON.stringify({ files, userMessage })],
+      {
+        cwd: process.cwd(),
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          FORCE_COLOR: "1",
+        },
+      }
+    );
+
+    let stdout = "";
+    let stderr = "";
+
+    child.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on("data", (data) => {
+      stderr += data.toString();
+      process.stderr.write(data);
+    });
+
+    child.on("close", (code) => {
+      if (code === 0) {
+        resolve(parseFileAgentOutput(stdout));
+      } else {
+        reject(
+          new Error(
+            stderr.trim() ||
+              stdout.trim() ||
+              `file_agent exited with code ${code}`
+          )
+        );
+      }
+    });
+
+    child.on("error", (error) => {
+      reject(error);
+    });
+  });
 }
 
 async function transcribeAudio(audioPath) {
@@ -100,7 +216,6 @@ async function transcribeAudio(audioPath) {
   } catch (err) {
     console.error("❌ Whisper transcription error via SDK:", err);
 
-    // اگر rate limit بود، یک خطا با پیام واضح‌تر برگردانیم
     if (err?.code === "api_limit" || err?.status === 429) {
       throw new Error(
         "Whisper API rate limit reached (429). Please wait or check your GapGPT plan/quota."
@@ -116,8 +231,6 @@ async function transcribeAudio(audioPath) {
   }
 }
 
-
-
 export default async function plannerAgentRoute(fastify) {
   fastify.post("/run", async (request, reply) => {
     setCors(reply);
@@ -128,10 +241,10 @@ export default async function plannerAgentRoute(fastify) {
       typeof body.message === "string"
         ? body.message.trim()
         : typeof body.text === "string"
-        ? body.text.trim()
-        : typeof body.prompt === "string"
-        ? body.prompt.trim()
-        : "";
+          ? body.text.trim()
+          : typeof body.prompt === "string"
+            ? body.prompt.trim()
+            : "";
 
     const session_id =
       typeof body.session_id === "string" && body.session_id.trim()
@@ -152,8 +265,26 @@ export default async function plannerAgentRoute(fastify) {
       ? await loadAttachmentsFromPaths(attachment_paths)
       : [];
 
+    let fileAnalysisContext = "";
+    if (attachment_paths.length > 0) {
+      try {
+        const fileAnalysis = await runFileAgent({
+          files: attachment_paths,
+          userMessage: message,
+        });
+
+        fileAnalysisContext = buildFileAnalysisContext(fileAnalysis);
+      } catch (error) {
+        console.warn("⚠️ File analysis agent failed:", error.message);
+      }
+    }
+
     const effectiveMessage =
       message || (attachments.length ? "Please analyze the uploaded attachment(s)." : "");
+
+    const plannerContextMessage = fileAnalysisContext
+      ? `${effectiveMessage}\n\nUploaded file context:\n${fileAnalysisContext}`
+      : effectiveMessage;
 
     if (!effectiveMessage) {
       return reply.code(400).send({
@@ -174,12 +305,12 @@ export default async function plannerAgentRoute(fastify) {
     touchSession(sessionId);
 
     try {
-      const intent = classifyIntent(effectiveMessage, attachments);
+      const intent = classifyIntent(plannerContextMessage, attachments);
       console.log(`📊 Intent: ${intent.type}`);
 
       const msgId = `msg_${Date.now()}`;
       const timestamp = new Date().toISOString();
-      const lang = detectLanguage(effectiveMessage);
+      const lang = detectLanguage(plannerContextMessage);
 
       if (intent.type === "crisis") {
         startSSE(reply);
@@ -213,7 +344,10 @@ export default async function plannerAgentRoute(fastify) {
 
       if (intent.type === "inspection") {
         startSSE(reply);
-        const content = await generateInspectionResponse(effectiveMessage, attachments);
+        const content = await generateInspectionResponse(
+          plannerContextMessage,
+          attachments
+        );
 
         reply.raw.write(
           `data: ${JSON.stringify({
@@ -240,7 +374,10 @@ export default async function plannerAgentRoute(fastify) {
 
       if (intent.type === "code_request") {
         startSSE(reply);
-        const content = await generateCodeResponse(effectiveMessage, attachments);
+        const content = await generateCodeResponse(
+          plannerContextMessage,
+          attachments
+        );
 
         reply.raw.write(
           `data: ${JSON.stringify({
@@ -322,7 +459,6 @@ export default async function plannerAgentRoute(fastify) {
       if (intent.type === "technical") {
         startSSE(reply);
 
-        // 🔹 ساخت requestId یکتا برای این اجرای pipeline
         const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         console.log("[AGENT /run] pipeline call", { sessionId, requestId });
 
@@ -360,9 +496,8 @@ export default async function plannerAgentRoute(fastify) {
         );
 
         try {
-          // 🔹 پاس دادن sessionId و requestId به pipeline
           await runPipeline({
-            message: effectiveMessage,
+            message: plannerContextMessage,
             sessionId,
             requestId,
           });
@@ -419,7 +554,7 @@ export default async function plannerAgentRoute(fastify) {
           })}\n\n`
         );
 
-        const summary = await streamPlanSummary(plan, effectiveMessage, reply);
+        const summary = await streamPlanSummary(plan, plannerContextMessage, reply);
 
         reply.raw.write(
           `data: ${JSON.stringify({
@@ -451,7 +586,6 @@ export default async function plannerAgentRoute(fastify) {
         return reply;
       }
 
-      // fallback: casual
       startSSE(reply);
       const content = await generateCasualResponse(effectiveMessage);
 
@@ -568,7 +702,7 @@ export default async function plannerAgentRoute(fastify) {
   });
 
   fastify.post("/transcribe", async (request, reply) => {
-     console.log("🎙️ /transcribe hit");
+    console.log("🎙️ /transcribe hit");
     setCors(reply);
 
     try {
@@ -614,26 +748,25 @@ export default async function plannerAgentRoute(fastify) {
         message:
           "Audio transcribed successfully. Use the 'transcribed_text' as the message for /run endpoint.",
       });
-} catch (error) {
-  console.error("❌ Transcription endpoint error:", error);
+    } catch (error) {
+      console.error("❌ Transcription endpoint error:", error);
 
-  const msg = error.message || "";
-  const isRateLimit =
-    msg.includes("rate limit") ||
-    msg.includes("429") ||
-    error.code === "api_limit";
+      const msg = error.message || "";
+      const isRateLimit =
+        msg.includes("rate limit") ||
+        msg.includes("429") ||
+        error.code === "api_limit";
 
-  return reply.code(isRateLimit ? 429 : 500).send({
-    ok: false,
-    error: isRateLimit
-      ? "Whisper API rate limit reached on GapGPT. Please try again later or check your plan/quota."
-      : "Failed to transcribe audio",
-    details: msg,
+      return reply.code(isRateLimit ? 429 : 500).send({
+        ok: false,
+        error: isRateLimit
+          ? "Whisper API rate limit reached on GapGPT. Please try again later or check your plan/quota."
+          : "Failed to transcribe audio",
+        details: msg,
+      });
+    }
   });
-}
-  });
 
-  // 🔄 UNDO: endpoint مخصوص undo per request
   fastify.post("/undo", async (request, reply) => {
     setCors(reply);
 

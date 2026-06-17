@@ -11,7 +11,7 @@ export default function SignUpPage() {
         initial={{ opacity: 0, y: 32 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease: 'easeOut' }}
-        className="w-full max-w-4xl h-[800px] rounded-3xl shadow-2xl border border-white/10 bg-white/[0.03] backdrop-blur-xl flex overflow-hidden relative group"
+        className="w-full max-w-4xl h-[600px] rounded-3xl shadow-2xl border border-white/10 bg-white/[0.03] backdrop-blur-xl flex overflow-hidden relative group"
       >
         {/* Liquid Glass Decorative Side */}
         <div className="hidden md:flex w-2/5 flex-col items-center justify-center p-8 relative overflow-hidden">
