@@ -6,7 +6,7 @@ import OpenAI from "openai";
 import { buildSmartContext } from "./tools/context_engine.js";
 import { listBackendFiles } from "./tools/list_backend_files.js";
 import { readProjectFile } from "./tools/readProjectFile.js";
-import { PLANNING_MODEL } from "../ai-sandbox/backend1/config/openai.mjs";
+import { PLANNING_MODEL } from "./backend1/config/openai.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -19,8 +19,11 @@ const BACKEND_CWD_REL = path.relative(PROJECT_ROOT, BACKEND_ROOT) || "backend";
 const FRONTEND_CWD_REL = path.relative(PROJECT_ROOT, FRONTEND_ROOT) || "frontend";
 
 const OPENAI_MODEL = process.env.OPENAI_MODEL || PLANNING_MODEL;
-const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1";
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "***REMOVED-SECRET***";
+const OPENAI_BASE_URL =
+  process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1";
+const OPENAI_API_KEY =
+  process.env.OPENAI_API_KEY ||
+  "***REMOVED-SECRET***";
 
 if (!OPENAI_API_KEY) {
   throw new Error("Missing OPENAI_API_KEY env var.");
@@ -83,6 +86,28 @@ function inferTaskScopeFromType(taskType) {
   if (taskType.startsWith("backend_")) return "backend";
   if (taskType === "fullstack_feature") return "fullstack";
   return "unknown";
+}
+
+function splitPlannerInput(rawInput) {
+  const raw = String(rawInput || "").trim();
+  const marker = "\n\nUploaded file analysis:\n";
+
+  const idx = raw.indexOf(marker);
+  if (idx === -1) {
+    return {
+      userMessage: raw,
+      fileAnalysisText: String(process.env.USER_FILE_ANALYSIS || "").trim(),
+    };
+  }
+
+  const userMessage = raw.slice(0, idx).trim();
+  const fileAnalysisText = raw.slice(idx + marker.length).trim();
+
+  return {
+    userMessage,
+    fileAnalysisText:
+      fileAnalysisText || String(process.env.USER_FILE_ANALYSIS || "").trim(),
+  };
 }
 
 // --------- Intent / request detection ----------
@@ -217,7 +242,10 @@ function isWorkspaceInspectionRequest(message) {
 
   const folderMention = /\b([a-z0-9_-]+)\s+(folder|directory)\b/i.test(msg);
 
-  return hasWorkspaceReference(message) && (folderMention || accessWords.some((w) => msg.includes(w)));
+  return (
+    hasWorkspaceReference(message) &&
+    (folderMention || accessWords.some((w) => msg.includes(w)))
+  );
 }
 
 function isWorkspaceCodeRequest(message) {
@@ -244,44 +272,60 @@ function isWorkspaceCodeRequest(message) {
 }
 
 function isWorkspaceModificationRequest(message) {
-  const msg = String(message || '').toLowerCase();
+  const msg = String(message || "").toLowerCase();
 
   const modifyWords = [
-    'change', 'update', 'modify', 'edit', 'refactor',
-    'match', 'sync', 'align', 'same style', 'same colors',
-    'same design', 'redesign', 'improve', 'replace',
-    'migrate', 'fix', 'adjust', 'design', 'style',
-    'colors', 'theme', 'add signup', 'add sign up',
-    'sign up option',
-    
-    // ✅ جدید - این‌ها رو اضافه کن
-    'add',           // "add sign up option"
-    'implement',     // "implement sign up form"
-    'create',        // "create sign up"
-    'insert',        // "insert button"
-    'put',           // "put sign up"
-    'append',        // "append option"
-    'include',       // "include sign up"
-    'sign up',       // عبارت کامل
-    'signup',
-    'register',
-    'new route',
-    'another route',
-    'new page',
-    'new form',
-    'under the',     // "under the sign in button"
-    'below the',     // "below the button"
+    "change",
+    "update",
+    "modify",
+    "edit",
+    "refactor",
+    "match",
+    "sync",
+    "align",
+    "same style",
+    "same colors",
+    "same design",
+    "redesign",
+    "improve",
+    "replace",
+    "migrate",
+    "fix",
+    "adjust",
+    "design",
+    "style",
+    "colors",
+    "theme",
+    "add signup",
+    "add sign up",
+    "sign up option",
+    "add",
+    "implement",
+    "create",
+    "insert",
+    "put",
+    "append",
+    "include",
+    "sign up",
+    "signup",
+    "register",
+    "new route",
+    "another route",
+    "new page",
+    "new form",
+    "under the",
+    "below the",
   ];
 
-  // چک کن هم workspace reference داره هم modify word
   const hasModify = modifyWords.some((w) => msg.includes(w));
-  
-  // اگر "add" یا "implement" داره، مستقیم modification هست
-  const hasStrongModify = ['add', 'implement', 'create', 'insert', 'put', 'append']
-    .some(w => msg.includes(w));
+  const hasStrongModify = ["add", "implement", "create", "insert", "put", "append"].some(
+    (w) => msg.includes(w)
+  );
 
-  return (hasWorkspaceReference(message) && hasModify) || 
-         (hasStrongModify && hasWorkspaceReference(message));
+  return (
+    (hasWorkspaceReference(message) && hasModify) ||
+    (hasStrongModify && hasWorkspaceReference(message))
+  );
 }
 
 function isTechnicalRequest(message) {
@@ -602,38 +646,33 @@ async function findFilesByName(filename, { dir = "", limit = 10 } = {}) {
 async function collectInspectionTargets(userMessage) {
   const hints = [];
 
-  // 1) فایل‌های صریح از متن پیام
   const explicitFiles = extractCandidateFilePaths(userMessage);
   hints.push(...explicitFiles);
 
-  // 2) keyword matching موجود
   const msg = String(userMessage || "").toLowerCase();
   const folderMatch = msg.match(/\b([a-z0-9._-]+)\s+(folder|directory)\b/i);
   if (folderMatch?.[1]) hints.push(folderMatch[1]);
 
-  if (msg.includes("page"))      hints.push("page.tsx", "page.jsx");
-  if (msg.includes("layout"))    hints.push("layout.tsx", "layout.jsx");
-  if (msg.includes("globals"))   hints.push("globals.css", "globals.scss");
-  if (msg.includes("login"))     hints.push("login.tsx", "login/page.tsx", "LoginForm.tsx");
-  if (msg.includes("sidebar"))   hints.push("sidebar.tsx", "Sidebar.tsx");
-  if (msg.includes("header"))    hints.push("header.tsx", "Header.tsx");
-  if (msg.includes("chatbot"))   hints.push("chatbot", "my-chatbot-ui", "page.tsx");
+  if (msg.includes("page")) hints.push("page.tsx", "page.jsx");
+  if (msg.includes("layout")) hints.push("layout.tsx", "layout.jsx");
+  if (msg.includes("globals")) hints.push("globals.css", "globals.scss");
+  if (msg.includes("login")) hints.push("login.tsx", "login/page.tsx", "LoginForm.tsx");
+  if (msg.includes("sidebar")) hints.push("sidebar.tsx", "Sidebar.tsx");
+  if (msg.includes("header")) hints.push("header.tsx", "Header.tsx");
+  if (msg.includes("chatbot")) hints.push("chatbot", "my-chatbot-ui", "page.tsx");
   if (msg.includes("loginform")) hints.push("LoginForm.tsx", "LoginForm.jsx");
   if (msg.includes("register") || msg.includes("signup")) {
     hints.push("RegisterForm.tsx", "SignupForm.tsx", "register/page.tsx", "signup/page.tsx");
   }
-  if (msg.includes("form"))      hints.push("Form.tsx", "form.tsx");
-  if (msg.includes("button"))    hints.push("Button.tsx", "button.tsx");
-  if (msg.includes("modal"))     hints.push("Modal.tsx", "modal.tsx");
-  if (msg.includes("navbar"))    hints.push("Navbar.tsx", "NavBar.tsx", "navbar.tsx");
+  if (msg.includes("form")) hints.push("Form.tsx", "form.tsx");
+  if (msg.includes("button")) hints.push("Button.tsx", "button.tsx");
+  if (msg.includes("modal")) hints.push("Modal.tsx", "modal.tsx");
+  if (msg.includes("navbar")) hints.push("Navbar.tsx", "NavBar.tsx", "navbar.tsx");
   if (msg.includes("dashboard")) hints.push("dashboard/page.tsx", "Dashboard.tsx");
-  if (msg.includes("auth"))      hints.push("auth.ts", "auth.tsx", "auth/page.tsx", "[...nextauth]");
+  if (msg.includes("auth")) hints.push("auth.ts", "auth.tsx", "auth/page.tsx", "[...nextauth]");
 
-  // 3) *** بخش جدید: اسکن کامل پروژه برای یافتن فایل‌های مرتبط ***
-  // اگر hints کافی نبود، یک اسکن عمیق‌تر انجام می‌دهیم
   if (hints.length < 3) {
     try {
-      // اسکن frontend برای یافتن همه فایل‌های tsx/jsx/ts/js
       const frontendScan = await listBackendFiles({
         dir: FRONTEND_CWD_REL,
         maxDepth: 8,
@@ -643,7 +682,6 @@ async function collectInspectionTargets(userMessage) {
       });
 
       if (frontendScan?.success && Array.isArray(frontendScan.files)) {
-        // فیلتر فایل‌های مرتبط بر اساس کلمات کلیدی در path
         const keywords = msg
           .split(/\s+/)
           .filter((w) => w.length > 3)
@@ -661,7 +699,6 @@ async function collectInspectionTargets(userMessage) {
     }
   }
 
-  // 4) dedup و جستجو
   const uniqueHints = uniq(hints.map((h) => String(h || "").trim()).filter(Boolean));
   const found = [];
   const seen = new Set();
@@ -678,7 +715,6 @@ async function collectInspectionTargets(userMessage) {
     }
   }
 
-  // 5) *** fallback: اگر هنوز چیزی پیدا نشد، اسکن مستقیم برمی‌گرداند ***
   if (found.length === 0) {
     try {
       const fallbackScan = await listBackendFiles({
@@ -690,9 +726,7 @@ async function collectInspectionTargets(userMessage) {
       });
 
       if (fallbackScan?.success && Array.isArray(fallbackScan.files)) {
-        const keywords = msg
-          .split(/\s+/)
-          .filter((w) => w.length > 3);
+        const keywords = msg.split(/\s+/).filter((w) => w.length > 3);
 
         for (const file of fallbackScan.files) {
           const fileLower = file.path.toLowerCase();
@@ -709,7 +743,6 @@ async function collectInspectionTargets(userMessage) {
 
   return found;
 }
-
 
 async function readFileIfExists(relPath) {
   try {
@@ -736,12 +769,6 @@ function stripToPreview(content, maxChars = 1800) {
   const text = String(content || "").trim();
   if (!text) return "";
   return text.length > maxChars ? `${text.slice(0, maxChars)}\n…` : text;
-}
-
-function formatFileSnippet(filePath, content) {
-  const language = inferLanguageFromPath(filePath);
-  const code = String(content || "").trim();
-  return `FILE: ${filePath}\n${language ? `\`\`\`${language}\n` : "```"}${code}\n\`\`\``;
 }
 
 async function readExactReferencedFiles(userMessage) {
@@ -895,6 +922,7 @@ Rules:
 - If the user references a filename like page.tsx, locate it in the workspace even when the full path is not given.
 - If the request is a code-request or inspection request, set the plan to point at exact files and preserve source fidelity.
 - If the request is a UI matching task, derive style tokens from the reference files and keep the output visually consistent.
+- If uploaded file analysis is provided, use it as part of the task context.
 - Do not claim lack of access if files were found in the workspace context.
 
 Output schema:
@@ -945,10 +973,14 @@ function buildUserPrompt({
   exactFilesText,
   referenceSnippetsText,
   inspectionTargetsText,
+  fileAnalysisText,
 }) {
   return `
 User request:
 ${userMessage}
+
+Uploaded file analysis:
+${fileAnalysisText || "<none>"}
 
 Task classification:
 - task_type: ${taskType}
@@ -984,7 +1016,9 @@ Instructions:
 }
 
 // --------- Core planner ----------
-async function runPlanner(userMessage) {
+async function runPlanner(userMessageInput) {
+  const { userMessage, fileAnalysisText } = splitPlannerInput(userMessageInput);
+
   if (!userMessage || typeof userMessage !== "string" || !userMessage.trim()) {
     throw new Error("userMessage is required");
   }
@@ -992,6 +1026,9 @@ async function runPlanner(userMessage) {
   console.log("🧠 Task planner started...");
   console.log("Project root:", PROJECT_ROOT);
   console.log("Goal:", userMessage);
+  if (fileAnalysisText) {
+    console.log("📎 Uploaded file analysis received.");
+  }
 
   const requestMode = detectRequestMode(userMessage);
   const taskType = detectTaskType(userMessage);
@@ -1015,7 +1052,9 @@ async function runPlanner(userMessage) {
         max_tokens: 10,
       });
 
-      const detectedScope = scopeDetectionResp.choices?.[0]?.message?.content?.trim().toLowerCase();
+      const detectedScope = scopeDetectionResp.choices?.[0]?.message?.content
+        ?.trim()
+        .toLowerCase();
 
       taskScope = ["frontend", "backend", "fullstack"].includes(detectedScope)
         ? detectedScope
@@ -1028,12 +1067,8 @@ async function runPlanner(userMessage) {
   console.log("📦 Detected scope:", taskScope);
 
   const projectStructure = await summarizeProjectStructure(taskScope);
-  const {
-    smartContext,
-    exactFiles,
-    referenceSnippets,
-    inspectionTargets,
-  } = await buildReferenceFileContext(userMessage);
+  const { smartContext, exactFiles, referenceSnippets, inspectionTargets } =
+    await buildReferenceFileContext(userMessage);
 
   const smartContextText = formatSmartContext(smartContext, "workspace");
   const exactFilesText = exactFiles.length
@@ -1063,6 +1098,7 @@ async function runPlanner(userMessage) {
     exactFilesText,
     referenceSnippetsText,
     inspectionTargetsText,
+    fileAnalysisText,
   });
 
   const resp = await openai.chat.completions.create({
@@ -1093,7 +1129,9 @@ async function runPlanner(userMessage) {
   plan.task_type = "task";
   plan.request_mode = plan.request_mode || requestMode;
   plan.task_scope = plan.task_scope || taskScope;
-  plan.target_files = Array.isArray(plan.target_files) ? plan.target_files : inspectionTargets;
+  plan.target_files = Array.isArray(plan.target_files)
+    ? plan.target_files
+    : inspectionTargets;
   plan.reference_files = Array.isArray(plan.reference_files)
     ? plan.reference_files
     : uniq([
@@ -1117,6 +1155,8 @@ async function runPlanner(userMessage) {
           : "plan";
   }
 
+  plan.uploaded_file_context = fileAnalysisText || "";
+
   console.log("\n📋 Generated Task Plan (JSON):\n");
   console.log(JSON.stringify(plan, null, 2));
 
@@ -1128,7 +1168,7 @@ async function runPlanner(userMessage) {
 }
 
 // --------- CLI ----------
-if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const cliGoal = process.argv.slice(2).join(" ");
   if (!cliGoal) {
     console.error("Usage: node planner.js <your request>");

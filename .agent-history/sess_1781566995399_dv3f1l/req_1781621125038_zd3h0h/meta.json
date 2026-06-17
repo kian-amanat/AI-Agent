@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess_1781566995399_dv3f1l",
+  "requestId": "req_1781621125038_zd3h0h",
+  "createdAt": "2026-06-16T14:46:42.287Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/components/SignUpForm.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/components/SignUpForm.tsx",
+      "existedBefore": true,
+      "snapshotPath": ".agent-history/sess_1781566995399_dv3f1l/req_1781621125038_zd3h0h/files/chatbot/my-chatbot-ui/app/components/SignUpForm.tsx.before"
+    }
+  ]
+}

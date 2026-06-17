@@ -36,13 +36,6 @@ type DeleteResponse = {
   error?: string;
 };
 
-type UploadResponse = {
-  ok: boolean;
-  error?: string;
-  path?: string;
-  filename?: string;
-  url?: string;
-};
 
 type TranscribeResponse = {
   ok: boolean;
@@ -99,28 +92,6 @@ async function readJson<T>(res: Response): Promise<T> {
   } catch {
     throw new Error(text || res.statusText || "Invalid server response");
   }
-}
-
-async function uploadAttachment(file: File): Promise<string> {
-  const formData = new FormData();
-  formData.append("file", file);
-
-  const res = await fetch(UPLOAD_URL, {
-    method: "POST",
-    body: formData,
-  });
-
-  const data = await readJson<UploadResponse>(res);
-
-  if (!res.ok || !data.ok) {
-    throw new Error(data.error || `Upload failed with status ${res.status}`);
-  }
-
-  if (!data.path) {
-    throw new Error("Upload succeeded, but no file path was returned.");
-  }
-
-  return data.path;
 }
 
 export async function transcribeAudio(
@@ -344,7 +315,7 @@ export async function callUndo(
 // 🔹 sendMessage: کار با SSEEvent
 export function sendMessage(
   message: string,
-  file: File | null,
+  file: File | File[] | null,
   sessionId: string | null,
   onEvent: (event: SSEEvent) => void,
   onDone: (sessionId: string, requestId?: string | null) => void,
@@ -356,9 +327,21 @@ export function sendMessage(
     try {
       let attachmentPaths: string[] = [];
 
-      if (file) {
-        const uploadedPath = await uploadAttachment(file);
-        attachmentPaths = [uploadedPath];
+      const filesToUpload = Array.isArray(file)
+        ? file.filter(Boolean)
+        : file
+          ? [file]
+          : [];
+
+      if (filesToUpload.length > 0) {
+        attachmentPaths = [];
+
+        for (const currentFile of filesToUpload) {
+          const uploadedPath = await uploadAttachment(currentFile);
+          if (uploadedPath) {
+            attachmentPaths.push(uploadedPath);
+          }
+        }
       }
 
       const payload: RunPayload = {
@@ -391,4 +374,51 @@ export function sendMessage(
   })();
 
   return () => controller.abort();
+}
+
+type UploadResponse = {
+  ok: boolean;
+  error?: string;
+  path?: string;
+  filename?: string;
+  url?: string;
+};
+
+async function uploadAttachment(file: File): Promise<string> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(UPLOAD_URL, {
+    method: "POST",
+    body: formData,
+  });
+
+  const data = await readJson<UploadResponse>(res);
+
+  if (!res.ok || !data.ok) {
+    throw new Error(data.error || `Upload failed with status ${res.status}`);
+  }
+
+  if (!data.path) {
+    throw new Error("Upload succeeded, but no file path was returned.");
+  }
+
+  return data.path;
+}
+
+export async function uploadFiles(files: File[]): Promise<string[]> {
+  if (!Array.isArray(files) || files.length === 0) return [];
+
+  const uploadedPaths: string[] = [];
+
+  for (const file of files) {
+    const path = await uploadAttachment(file);
+    uploadedPaths.push(path);
+  }
+
+  return uploadedPaths;
+}
+
+export async function uploadFile(file: File): Promise<string> {
+  return uploadAttachment(file);
 }

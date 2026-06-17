@@ -1,0 +1,166 @@
+'use client';
+
+import React, { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import { Eye, EyeOff, UserPlus } from 'lucide-react';
+
+export default function SignUpForm() {
+  const [name, setName] = useState('');
+  const [email, setEmail] = useState('');
+  const [phone, setPhone] = useState('');
+  const [password, setPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [showConfirmPassword, setShowConfirmPassword] = useState(false);
+  const router = useRouter();
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError('');
+    setSubmitting(true);
+    try {
+      // TODO: Implement actual signup logic
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      // On success, redirect to login or home
+      router.push('/login');
+    } catch (err) {
+      setError('Failed to sign up. Please try again.');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-5">
+      {error && (
+        <div className="mb-4 p-3 rounded-xl bg-red-500/10 border border-red-500/20 text-red-200 text-sm">
+          {error}
+        </div>
+      )}
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="name" className="text-sm text-white/70 font-medium px-1">
+          Name
+        </label>
+        <input
+          id="name"
+          type="text"
+          autoComplete="name"
+          className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-4 py-3 text-white/90 placeholder:text-white/30 focus:border-[#ff5e4d]/50 focus:outline-none focus:ring-1 focus:ring-[#ff5e4d]/30 transition-all duration-300"
+          placeholder="John Doe"
+          value={name}
+          onChange={e => setName(e.target.value)}
+          disabled={submitting}
+          required
+        />
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="email" className="text-sm text-white/70 font-medium px-1">
+          Email
+        </label>
+        <input
+          id="email"
+          type="email"
+          autoComplete="email"
+          className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-4 py-3 text-white/90 placeholder:text-white/30 focus:border-[#ff5e4d]/50 focus:outline-none focus:ring-1 focus:ring-[#ff5e4d]/30 transition-all duration-300"
+          placeholder="you@email.com"
+          value={email}
+          onChange={e => setEmail(e.target.value)}
+          disabled={submitting}
+          required
+        />
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="phone" className="text-sm text-white/70 font-medium px-1">
+          Phone (optional)
+        </label>
+        <input
+          id="phone"
+          type="tel"
+          autoComplete="tel"
+          className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-4 py-3 text-white/90 placeholder:text-white/30 focus:border-[#ff5e4d]/50 focus:outline-none focus:ring-1 focus:ring-[#ff5e4d]/30 transition-all duration-300"
+          placeholder="+1 (555) 000-0000"
+          value={phone}
+          onChange={e => setPhone(e.target.value)}
+          disabled={submitting}
+        />
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="password" className="text-sm text-white/70 font-medium px-1">
+          Password
+        </label>
+        <div className="relative w-full">
+          <input
+            id="password"
+            type={showPassword ? 'text' : 'password'}
+            autoComplete="new-password"
+            className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-4 py-3 pr-10 text-white/90 placeholder:text-white/30 focus:border-[#ff5e4d]/50 focus:outline-none focus:ring-1 focus:ring-[#ff5e4d]/30 transition-all duration-300"
+            placeholder="••••••••"
+            value={password}
+            onChange={e => setPassword(e.target.value)}
+            disabled={submitting}
+            required
+          />
+          <button
+            type="button"
+            onClick={() => setShowPassword(!showPassword)}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
+          >
+            {showPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+          </button>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-2">
+        <label htmlFor="confirmPassword" className="text-sm text-white/70 font-medium px-1">
+          Confirm Password
+        </label>
+        <div className="relative w-full">
+          <input
+            id="confirmPassword"
+            type={showConfirmPassword ? 'text' : 'password'}
+            autoComplete="new-password"
+            className="w-full rounded-xl border border-white/10 bg-white/[0.05] px-4 py-3 pr-10 text-white/90 placeholder:text-white/30 focus:border-[#ff5e4d]/50 focus:outline-none focus:ring-1 focus:ring-[#ff5e4d]/30 transition-all duration-300"
+            placeholder="••••••••"
+            value={confirmPassword}
+            onChange={e => setConfirmPassword(e.target.value)}
+            disabled={submitting}
+            required
+          />
+          <button
+            type="button"
+            onClick={() => setShowConfirmPassword(!showConfirmPassword)}
+            className="absolute right-3 top-1/2 -translate-y-1/2 text-white/40 hover:text-white/70 transition-colors"
+          >
+            {showConfirmPassword ? <EyeOff className="h-5 w-5" /> : <Eye className="h-5 w-5" />}
+          </button>
+        </div>
+      </div>
+
+      <button
+        type="submit"
+        disabled={submitting}
+        className="mt-2 w-full rounded-xl bg-gradient-to-r from-[#ff5e4d] to-[#ff2d2d] p-3.5 text-sm font-semibold text-white shadow-lg shadow-red-500/20 transition-all duration-300 hover:from-[#ff6e5d] hover:to-[#ff3d3d] disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
+        onClick={handleSubmit}
+      >
+        {submitting ? (
+          <UserPlus className="h-5 w-5 animate-spin" />
+        ) : (
+          <UserPlus className="h-5 w-5" />
+        )}
+        {submitting ? 'Creating Account...' : 'Sign Up'}
+      </button>
+
+      <div className="mt-4 text-center">
+        <a href="/login" className="text-sm text-white/50 hover:text-white transition-colors">
+          Already have an account? Sign In
+        </a>
+      </div>
+    </div>
+  );
+}

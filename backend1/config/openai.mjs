@@ -34,6 +34,9 @@ export const SUMMARY_MODEL =
 export const WHISPER_MODEL =
   process.env.WHISPER_MODEL || "gapgpt/whisper-1";
 
+export const VISION_MODEL =
+  process.env.VISION_MODEL || "gpt-4o-mini";
+
 // =========================
 // GapGPT
 // =========================
