@@ -1,13 +1,11 @@
 import {
   openai,
   CHAT_MODEL,
-  CODEGEN_MODEL,
-  PLANNING_MODEL,
   SUMMARY_MODEL,
-  PLANS_DIR,
 } from "../config/openai.mjs";
 import { detectLanguage } from "./intent.service.mjs";
 import { getSessionMessages } from "./session.service.mjs";
+import { getMemory, getMemoryContext } from "./memory.service.mjs";
 import { buildAttachmentContext } from "./attachments.service.mjs";
 import {
   collectInspectionTargets,
@@ -17,6 +15,21 @@ import {
 
 function writeSSE(reply, payload) {
   reply.raw.write(`data: ${JSON.stringify(payload)}\n\n`);
+}
+
+function uniq(values = []) {
+  return [...new Set((values || []).filter(Boolean))];
+}
+
+function getRememberedTarget(sessionId) {
+  if (!sessionId) return "";
+  const memory = getMemory(sessionId);
+  return String(memory?.last_target_file || "").trim();
+}
+
+function buildMemoryBlock(sessionId) {
+  if (!sessionId) return "";
+  return getMemoryContext(sessionId);
 }
 
 export async function generateGreetingResponse(message, sessionId) {
@@ -33,22 +46,30 @@ export async function generateGreetingResponse(message, sessionId) {
           .join("\n")
       : null;
 
+  const memoryText = buildMemoryBlock(sessionId);
+
   const systemPrompt =
     lang === "en"
       ? `You are a concise AI assistant that plans and builds full-stack software projects end-to-end (planning → scaffolding → codegen → testing → fixing).
 
 The user just greeted you. Reply naturally and briefly — do NOT list your capabilities as bullet points.
 ${historyText ? "There is prior conversation context — acknowledge it and suggest a next step." : "No prior context — ask one open question about what they want to build."}
+${memoryText ? "You also have saved memory from previous turns; use it if relevant." : ""}
 Keep it under 3 sentences. End with a question.`
       : `تو یه دستیار هوشمند هستی که پروژه‌های نرم‌افزاری فول‌استک رو از صفر تا آخر می‌سازی (برنامه‌ریزی → scaffold → تولید کد → تست → رفع باگ).
 
 کاربر بهت سلام کرده. طبیعی و کوتاه جواب بده — قابلیت‌هات رو به صورت لیست bullet ننویس.
 ${historyText ? "مکالمه قبلی وجود داره — بهش اشاره کن و یه قدم بعدی پیشنهاد بده." : "مکالمه قبلی نیست — یه سوال باز بپرس که می‌خوان چی بسازن."}
+${memoryText ? "همچنین حافظه‌ی ذخیره‌شده از پیام‌های قبلی را در صورت مرتبط بودن در نظر بگیر." : ""}
 حداکثر ۳ جمله. با یه سوال تموم کن.`;
 
-  const userContent = historyText
-    ? `User said: "${message}"\n\nPrevious conversation:\n${historyText}`
-    : `User said: "${message}"`;
+  const userContent = [
+    `User said: "${message}"`,
+    historyText ? `Previous conversation:\n${historyText}` : "",
+    memoryText ? `Saved memory:\n${memoryText}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
   const fallbacks = {
     en: "Hey! I build full-stack projects end-to-end — from planning to working code. What are you looking to build?",
@@ -69,21 +90,28 @@ ${historyText ? "مکالمه قبلی وجود داره — بهش اشاره �
       max_tokens: 120,
       signal: controller.signal,
     });
-console.log(JSON.stringify(response, null, 2));
+
     clearTimeout(timeoutId);
+
     return (
-  response?.choices?.[0]?.message?.content?.trim()
-  || "No response"
-);
+      response?.choices?.[0]?.message?.content?.trim() ||
+      fallbacks[lang]
+    );
   } catch (err) {
     console.log("⚠️  Greeting AI failed, using fallback:", err.message);
     return fallbacks[lang];
   }
 }
 
-export async function generateInspectionResponse(message, attachments = []) {
+export async function generateInspectionResponse(message, attachments = [], sessionId = "") {
   const lang = detectLanguage(message);
-  const matchedTargets = await collectInspectionTargets(message, attachments);
+
+  const rememberedTarget = getRememberedTarget(sessionId);
+  const matchedTargets = uniq([
+    ...(await collectInspectionTargets(message, attachments)),
+    rememberedTarget,
+  ]);
+
   const attachmentContext = buildAttachmentContext(attachments);
 
   const attachmentSnippets = [];
@@ -149,9 +177,15 @@ export async function generateInspectionResponse(message, attachments = []) {
   return lines.join("\n");
 }
 
-export async function generateCodeResponse(message, attachments = []) {
+export async function generateCodeResponse(message, attachments = [], sessionId = "") {
   const lang = detectLanguage(message);
-  const matchedTargets = await collectInspectionTargets(message, attachments);
+
+  const rememberedTarget = getRememberedTarget(sessionId);
+  const matchedTargets = uniq([
+    ...(await collectInspectionTargets(message, attachments)),
+    rememberedTarget,
+  ]);
+
   const attachmentContext = buildAttachmentContext(attachments);
 
   if (!matchedTargets.length && !attachmentContext) {

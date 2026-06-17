@@ -12,6 +12,14 @@ import {
   touchSession,
   normalizeSessionLabel,
 } from "../services/session.service.mjs";
+import {
+  getMemory,
+  rememberTask,
+  rememberFiles,
+  rememberUserMessage,
+  rememberAssistantMessage,
+  rememberTargetFile,
+} from "../services/memory.service.mjs";
 import { parseIncomingPayload } from "../utils/request.util.mjs";
 import { loadAttachmentsFromPaths } from "../services/attachments.service.mjs";
 import { classifyIntent, detectLanguage } from "../services/intent.service.mjs";
@@ -81,6 +89,117 @@ function toStringArray(value) {
   }
 
   return [];
+}
+
+function extractCandidateFilePaths(message) {
+  const msg = String(message || "");
+
+  const pathRegex =
+    /(?:\/?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js))/g;
+
+  const filenameRegex =
+    /\b[A-Za-z0-9._-]+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js)\b/g;
+
+  const matches = uniq([
+    ...(msg.match(pathRegex) || []),
+    ...(msg.match(filenameRegex) || []),
+  ]);
+
+  return matches.map((item) => String(item || "").trim()).filter(Boolean);
+}
+
+function previewText(value, maxChars = 140) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+}
+
+function buildMemoryContext(memory) {
+  if (!memory) return "";
+
+  const lines = [];
+
+  if (memory.last_task) lines.push(`LAST TASK: ${memory.last_task}`);
+  if (memory.last_task_type) lines.push(`LAST TASK TYPE: ${memory.last_task_type}`);
+  if (memory.last_project_scope) {
+    lines.push(`LAST PROJECT SCOPE: ${memory.last_project_scope}`);
+  }
+
+  if (memory.last_target_file) {
+    lines.push(`LAST TARGET FILE: ${memory.last_target_file}`);
+  }
+
+  if (memory.last_target_component) {
+    lines.push(`LAST TARGET COMPONENT: ${memory.last_target_component}`);
+  }
+
+  if (Array.isArray(memory.last_attachment_paths) && memory.last_attachment_paths.length) {
+    lines.push(`LAST ATTACHMENTS: ${memory.last_attachment_paths.join(", ")}`);
+  }
+
+  if (memory.last_user_message) {
+    lines.push(`LAST USER MESSAGE: ${previewText(memory.last_user_message)}`);
+  }
+
+  if (memory.last_assistant_message) {
+    lines.push(`LAST ASSISTANT MESSAGE: ${previewText(memory.last_assistant_message)}`);
+  }
+
+  return lines.join("\n").trim();
+}
+
+function syncSessionMemory(sessionId, {
+  userMessage = "",
+  assistantMessage = "",
+  attachmentPaths = [],
+  task = "",
+  taskType = "",
+  projectScope = "",
+  targetFile = "",
+} = {}) {
+  if (!sessionId) return;
+
+  if (typeof userMessage === "string" && userMessage.trim()) {
+    rememberUserMessage(sessionId, userMessage.trim());
+  }
+
+  if (Array.isArray(attachmentPaths) && attachmentPaths.length > 0) {
+    rememberFiles(sessionId, attachmentPaths);
+  }
+
+  if (typeof assistantMessage === "string" && assistantMessage.trim()) {
+    rememberAssistantMessage(sessionId, assistantMessage.trim());
+  }
+
+  if (task || taskType || projectScope) {
+    rememberTask(sessionId, {
+      task: task || null,
+      taskType: taskType || null,
+      projectScope: projectScope || null,
+    });
+  }
+
+  if (typeof targetFile === "string" && targetFile.trim()) {
+    rememberTargetFile(sessionId, targetFile.trim());
+  }
+}
+
+function extractPrimaryTargetFile(plan) {
+  if (Array.isArray(plan?.target_files) && plan.target_files.length > 0) {
+    return String(plan.target_files[0] || "").trim();
+  }
+
+  if (Array.isArray(plan?.files_to_modify)) {
+    const firstModify = plan.files_to_modify.find((item) => item?.path);
+    if (firstModify?.path) return String(firstModify.path).trim();
+  }
+
+  if (Array.isArray(plan?.files_to_create)) {
+    const firstCreate = plan.files_to_create.find((item) => item?.path);
+    if (firstCreate?.path) return String(firstCreate.path).trim();
+  }
+
+  return "";
 }
 
 function parseFileAgentOutput(output) {
@@ -265,6 +384,14 @@ export default async function plannerAgentRoute(fastify) {
       ? await loadAttachmentsFromPaths(attachment_paths)
       : [];
 
+    const sessionId =
+      typeof session_id === "string" && session_id.trim()
+        ? session_id.trim()
+        : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    const memory = getMemory(sessionId);
+    const memoryContext = buildMemoryContext(memory);
+
     let fileAnalysisContext = "";
     if (attachment_paths.length > 0) {
       try {
@@ -282,10 +409,6 @@ export default async function plannerAgentRoute(fastify) {
     const effectiveMessage =
       message || (attachments.length ? "Please analyze the uploaded attachment(s)." : "");
 
-    const plannerContextMessage = fileAnalysisContext
-      ? `${effectiveMessage}\n\nUploaded file context:\n${fileAnalysisContext}`
-      : effectiveMessage;
-
     if (!effectiveMessage) {
       return reply.code(400).send({
         ok: false,
@@ -293,16 +416,31 @@ export default async function plannerAgentRoute(fastify) {
       });
     }
 
-    const sessionId =
-      typeof session_id === "string" && session_id.trim()
-        ? session_id.trim()
-        : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    const explicitFileRefs = extractCandidateFilePaths(message);
+    const rememberedTargetFile =
+      !explicitFileRefs.length && memory?.last_target_file
+        ? String(memory.last_target_file).trim()
+        : "";
+
+    const plannerContextMessage = [
+      effectiveMessage,
+      memoryContext ? `Conversation memory:\n${memoryContext}` : "",
+      rememberedTargetFile ? `Remembered target file:\n${rememberedTargetFile}` : "",
+      fileAnalysisContext ? `Uploaded file context:\n${fileAnalysisContext}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
 
     const sessionLabel = normalizeSessionLabel(message, attachments);
 
     createSession(sessionId, sessionLabel);
     saveMessage(sessionId, "user", effectiveMessage);
     touchSession(sessionId);
+
+    syncSessionMemory(sessionId, {
+      userMessage: effectiveMessage,
+      attachmentPaths: attachment_paths,
+    });
 
     try {
       const intent = classifyIntent(plannerContextMessage, attachments);
@@ -339,6 +477,9 @@ export default async function plannerAgentRoute(fastify) {
 
         saveMessage(sessionId, "assistant", content, "crisis");
         touchSession(sessionId);
+        syncSessionMemory(sessionId, {
+          assistantMessage: content,
+        });
         return reply;
       }
 
@@ -369,6 +510,9 @@ export default async function plannerAgentRoute(fastify) {
 
         saveMessage(sessionId, "assistant", content, "inspection");
         touchSession(sessionId);
+        syncSessionMemory(sessionId, {
+          assistantMessage: content,
+        });
         return reply;
       }
 
@@ -399,6 +543,10 @@ export default async function plannerAgentRoute(fastify) {
 
         saveMessage(sessionId, "assistant", content, "code_request");
         touchSession(sessionId);
+        syncSessionMemory(sessionId, {
+          assistantMessage: content,
+          targetFile: rememberedTargetFile,
+        });
         return reply;
       }
 
@@ -426,6 +574,9 @@ export default async function plannerAgentRoute(fastify) {
 
         saveMessage(sessionId, "assistant", content, "greeting");
         touchSession(sessionId);
+        syncSessionMemory(sessionId, {
+          assistantMessage: content,
+        });
         return reply;
       }
 
@@ -453,6 +604,9 @@ export default async function plannerAgentRoute(fastify) {
 
         saveMessage(sessionId, "assistant", content, "clarification");
         touchSession(sessionId);
+        syncSessionMemory(sessionId, {
+          assistantMessage: content,
+        });
         return reply;
       }
 
@@ -500,6 +654,8 @@ export default async function plannerAgentRoute(fastify) {
             message: plannerContextMessage,
             sessionId,
             requestId,
+            attachmentPaths: attachment_paths,
+            audioPath: "",
           });
         } catch (pipelineError) {
           reply.raw.write(
@@ -519,6 +675,13 @@ export default async function plannerAgentRoute(fastify) {
             "technical"
           );
           touchSession(sessionId);
+          syncSessionMemory(sessionId, {
+            assistantMessage: `Pipeline failed: ${pipelineError.message}`,
+            task: effectiveMessage,
+            taskType: intent.type,
+            projectScope: "technical",
+            targetFile: rememberedTargetFile,
+          });
           return reply;
         }
 
@@ -583,6 +746,19 @@ export default async function plannerAgentRoute(fastify) {
         reply.raw.end();
         saveMessage(sessionId, "assistant", summary, "technical");
         touchSession(sessionId);
+
+        const primaryTargetFile =
+          extractPrimaryTargetFile(plan) || rememberedTargetFile || "";
+
+        syncSessionMemory(sessionId, {
+          assistantMessage: summary,
+          task: effectiveMessage,
+          taskType: intent.type,
+          projectScope: plan.project_type || plan.task_scope || "technical",
+          targetFile: primaryTargetFile,
+          attachmentPaths: attachment_paths,
+        });
+
         return reply;
       }
 
@@ -609,6 +785,9 @@ export default async function plannerAgentRoute(fastify) {
 
       saveMessage(sessionId, "assistant", content, "casual");
       touchSession(sessionId);
+      syncSessionMemory(sessionId, {
+        assistantMessage: content,
+      });
       return reply;
     } catch (error) {
       console.error("❌ Error in agent route:", error);
