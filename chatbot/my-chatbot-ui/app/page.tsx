@@ -43,13 +43,9 @@ function toUiMessage(message: ApiMessage): Message {
     createdAt: message.created_at,
     metadata: {
       intent: message.intent ?? undefined,
-      // این دو فیلد به‌صورت رسمی در ApiMessage نیستند،
-      // ولی اگر بک‌اند اضافه‌شان کند، اینجا می‌گیریم:
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
       requestId: (message as any).requestId ?? undefined,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      undoResult: ((message as any).undoResult as MessageUndoResult | undefined) ?? undefined,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      undoResult:
+        ((message as any).undoResult as MessageUndoResult | undefined) ?? undefined,
       planMetadata: (message as any).planMetadata ?? undefined,
     },
   };
@@ -101,7 +97,7 @@ export default function MinimalChatComponent() {
     Record<string, Message[]>
   >({});
   const [isInputFocused, setIsInputFocused] = useState(false);
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [activeTask, setActiveTask] = useState("");
@@ -109,14 +105,13 @@ export default function MinimalChatComponent() {
   const [pipelineProgress, setPipelineProgress] = useState(0);
 
   const [loadingSessions, setLoadingSessions] = useState(false);
+  const [undoingMessageId, setUndoingMessageId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const abortRequestRef = useRef<null | (() => void)>(null);
   const messagesRef = useRef<Message[]>([]);
   const selectedSessionIdRef = useRef<string | null>(null);
-
-  const [undoingMessageId, setUndoingMessageId] = useState<string | null>(null);
 
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -157,6 +152,48 @@ export default function MinimalChatComponent() {
     return () => window.clearInterval(timer);
   }, [isProcessing]);
 
+  async function refreshSessions(preferredSessionId?: string | null) {
+    try {
+      const data = await fetchSessions();
+      setSessions(data);
+
+      if (preferredSessionId && data.some((session) => session.id === preferredSessionId)) {
+        setSelectedSessionId(preferredSessionId);
+      }
+
+      return data;
+    } catch (error) {
+      console.error("Failed to refresh sessions:", error);
+      return [];
+    }
+  }
+
+  async function openSession(sessionId: string) {
+    setSelectedSessionId(sessionId);
+    setSelectedFiles([]);
+    setMessageInput("");
+    setIsRecording(false);
+
+    router.replace(`/?session=${encodeURIComponent(sessionId)}`, { scroll: false });
+
+    const cached = sessionMessagesCache[sessionId];
+    if (cached?.length) {
+      setMessages(cached);
+    } else {
+      setMessages([]);
+    }
+
+    try {
+      const apiMessages = await fetchSessionMessages(sessionId);
+      const uiMessages = apiMessages.map(toUiMessage);
+      setSessionMessagesCache((prev) => ({ ...prev, [sessionId]: uiMessages }));
+      setMessages(uiMessages);
+    } catch (error) {
+      console.error("Failed to load session messages:", error);
+      if (!cached?.length) setMessages([]);
+    }
+  }
+
   useEffect(() => {
     let isMounted = true;
 
@@ -191,49 +228,6 @@ export default function MinimalChatComponent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  async function refreshSessions(preferredSessionId?: string | null) {
-    try {
-      const data = await fetchSessions();
-      setSessions(data);
-
-      if (
-        preferredSessionId &&
-        data.some((session) => session.id === preferredSessionId)
-      ) {
-        setSelectedSessionId(preferredSessionId);
-      }
-
-      return data;
-    } catch (error) {
-      console.error("Failed to refresh sessions:", error);
-      return [];
-    }
-  }
-
-  async function openSession(sessionId: string) {
-    setSelectedSessionId(sessionId);
-    setSelectedFile(null);
-
-    router.push(`/?session=${sessionId}`, { scroll: false });
-
-    const cached = sessionMessagesCache[sessionId];
-    if (cached?.length) {
-      setMessages(cached);
-    } else {
-      setMessages([]);
-    }
-
-    try {
-      const apiMessages = await fetchSessionMessages(sessionId);
-      const uiMessages = apiMessages.map(toUiMessage);
-      setSessionMessagesCache((prev) => ({ ...prev, [sessionId]: uiMessages }));
-      setMessages(uiMessages);
-    } catch (error) {
-      console.error("Failed to load session messages:", error);
-      if (!cached?.length) setMessages([]);
-    }
-  }
-
   async function handleDeleteSession(sessionId: string) {
     const ok = window.confirm("Delete this conversation?");
     if (!ok) return;
@@ -252,14 +246,14 @@ export default function MinimalChatComponent() {
 
       if (selectedSessionId === sessionId) {
         setSelectedSessionId(null);
-        setSelectedFile(null);
+        setSelectedFiles([]);
         setMessages([]);
         setMessageInput("");
 
         if (nextSessions.length > 0) {
-          void openSession(nextSessions[0].id);
+          await openSession(nextSessions[0].id);
         } else {
-          router.push("/", { scroll: false });
+          router.replace("/", { scroll: false });
         }
       }
     } catch (error) {
@@ -281,10 +275,11 @@ export default function MinimalChatComponent() {
     abortRequestRef.current?.();
     abortRequestRef.current = null;
     setSelectedSessionId(null);
-    setSelectedFile(null);
+    setSelectedFiles([]);
     setMessages([]);
     setMessageInput("");
-    router.push("/", { scroll: false });
+    setIsRecording(false);
+    router.replace("/", { scroll: false });
     setTimeout(() => textareaRef.current?.focus(), 50);
   }
 
@@ -324,7 +319,11 @@ export default function MinimalChatComponent() {
       setMessages((prev) => applyUndoResultToMessage(prev, messageId, result));
       setSessionMessagesCache((prevCache) => ({
         ...prevCache,
-        [sessionId]: applyUndoResultToMessage(prevCache[sessionId] ?? [], messageId, result),
+        [sessionId]: applyUndoResultToMessage(
+          prevCache[sessionId] ?? [],
+          messageId,
+          result
+        ),
       }));
     } catch (error) {
       console.error("Undo failed", error);
@@ -349,18 +348,28 @@ export default function MinimalChatComponent() {
 
   async function handleSendMessage() {
     const text = messageInput.trim();
-    if ((!text && !selectedFile) || isSending) return;
+    if ((!text && selectedFiles.length === 0) || isSending) return;
 
     setIsSending(true);
     setIsProcessing(true);
-    setActiveTask(selectedFile ? `Analyzing ${selectedFile.name}` : text);
+    setActiveTask(
+      selectedFiles.length > 0
+        ? `Analyzing ${selectedFiles.length} file${selectedFiles.length > 1 ? "s" : ""}`
+        : text
+    );
     setPipelineStage(0);
     setPipelineProgress(10);
+
+    const fileNames = selectedFiles.map((file) => file.name).join(", ");
 
     const userMessage: Message = {
       id: uuidv4(),
       role: "user",
-      content: text || `Uploaded file: ${selectedFile?.name ?? "attachment"}`,
+      content:
+        text ||
+        (selectedFiles.length > 0
+          ? `Uploaded file${selectedFiles.length > 1 ? "s" : ""}: ${fileNames}`
+          : "attachment"),
       createdAt: nowIso(),
     };
 
@@ -394,11 +403,12 @@ export default function MinimalChatComponent() {
     }
 
     setMessageInput("");
+    setSelectedFiles([]);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
     const cleanup = sendMessage(
       text,
-      selectedFile,
+      selectedFiles.length > 0 ? selectedFiles : null,
       selectedSessionIdRef.current,
       (event: SSEEvent) => {
         if (event.type === "content") {
@@ -473,10 +483,6 @@ export default function MinimalChatComponent() {
           );
           return;
         }
-
-        if (event.type === "progress") {
-          return;
-        }
       },
       (returnedSessionId, requestId) => {
         const finalSessionId = returnedSessionId || selectedSessionIdRef.current;
@@ -488,6 +494,9 @@ export default function MinimalChatComponent() {
             [finalSessionId]: messagesRef.current,
           }));
           void refreshSessions(finalSessionId);
+          router.replace(`/?session=${encodeURIComponent(finalSessionId)}`, {
+            scroll: false,
+          });
         }
 
         if (requestId) {
@@ -506,7 +515,6 @@ export default function MinimalChatComponent() {
           );
         }
 
-        setSelectedFile(null);
         setPipelineStage(AGENT_STAGES.length - 1);
         setPipelineProgress(100);
 
@@ -604,7 +612,7 @@ export default function MinimalChatComponent() {
         loadingSessions={loadingSessions}
       />
 
-      <section className="flex min-w-0 flex-1 flex-col ">
+      <section className="flex min-w-0 flex-1 flex-col">
         <ChatHeader onToggleSidebar={() => setIsSidebarCollapsed((p) => !p)} />
 
         <div className="flex min-h-0 flex-1 flex-col">
@@ -775,8 +783,8 @@ export default function MinimalChatComponent() {
             setIsRecording={setIsRecording}
             onSendMessage={handleSendMessage}
             onMessageKeyDown={handleMessageKeyDown}
-            selectedFile={selectedFile}
-            setSelectedFile={setSelectedFile}
+            selectedFiles={selectedFiles}
+            setSelectedFiles={setSelectedFiles}
           />
         </div>
       </section>

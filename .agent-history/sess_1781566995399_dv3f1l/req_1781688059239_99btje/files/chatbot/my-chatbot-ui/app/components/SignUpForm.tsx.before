@@ -39,6 +39,12 @@ export default function SignUpForm() {
 
   return (
     <form onSubmit={handleSubmit} className="flex flex-col gap-6">
+      {/* Updated Header to match LoginForm style */}
+      <div className="mb-2">
+        <h1 className="text-3xl font-semibold text-white tracking-tight">Create Account</h1>
+        <p className="text-sm text-white/50 mt-2">Get started with your free account today</p>
+      </div>
+
       {error && (
         <div className="flex items-center gap-2 rounded-xl bg-red-500/10 border border-red-500/20 p-4 text-red-200 text-sm animate-in fade-in slide-in-from-top-2">
           <AlertCircle className="h-4 w-4 shrink-0" />

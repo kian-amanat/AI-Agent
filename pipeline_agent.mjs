@@ -5,23 +5,112 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const userMessage = process.env.USER_MESSAGE || process.argv.slice(2).join(" ");
-const userAudioPath = process.env.USER_AUDIO_PATH || ""; // if voice exists
+function parsePathList(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return [];
+
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed
+        .map((item) => String(item || "").trim())
+        .filter(Boolean);
+    }
+  } catch {
+    // ignore JSON parse errors
+  }
+
+  return raw
+    .split(/[,\n;]/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function extractSingleTextOutput(output) {
+  const text = String(output || "").trim();
+  if (!text) return "";
+
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === "object") {
+      if (typeof parsed.transcribed_text === "string") {
+        return parsed.transcribed_text.trim();
+      }
+
+      if (typeof parsed.text === "string") {
+        return parsed.text.trim();
+      }
+
+      if (typeof parsed.content === "string") {
+        return parsed.content.trim();
+      }
+    }
+  } catch {
+    // not JSON
+  }
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return lines[lines.length - 1] || text;
+}
+
+function extractFileAnalysisOutput(output) {
+  const text = String(output || "").trim();
+  if (!text) return "";
+
+  const marker = "[Structured_File_Analysis_JSON]";
+  const markerIndex = text.indexOf(marker);
+
+  // Prefer the human-readable section produced by file_agent.mjs
+  if (markerIndex !== -1) {
+    const beforeMarker = text.slice(0, markerIndex).trim();
+    const firstFileIndex = beforeMarker.indexOf("File:");
+    if (firstFileIndex !== -1) {
+      return beforeMarker.slice(firstFileIndex).trim();
+    }
+
+    return beforeMarker || text.slice(markerIndex + marker.length).trim();
+  }
+
+  const firstFileIndex = text.indexOf("File:");
+  if (firstFileIndex !== -1) {
+    return text.slice(firstFileIndex).trim();
+  }
+
+  return text;
+}
+
+const userMessage = String(
+  process.env.USER_MESSAGE || process.argv.slice(2).join(" ")
+).trim();
+const userAudioPath = String(process.env.USER_AUDIO_PATH || "").trim();
+const userAttachmentPaths = parsePathList(
+  process.env.USER_ATTACHMENT_PATHS || process.env.USER_FILES || ""
+);
 const userSessionId = process.env.USER_SESSION_ID || "";
 const userRequestId =
   process.env.USER_REQUEST_ID ||
   `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-if (!userMessage && !userAudioPath) {
+if (!userMessage && !userAudioPath && userAttachmentPaths.length === 0) {
   console.error("Usage: node pipeline_agent.mjs <your request>");
   console.error('   or: USER_MESSAGE="your request" node pipeline_agent.mjs');
   console.error('   or: USER_AUDIO_PATH="/path/to/audio.mp3" node pipeline_agent.mjs');
+  console.error(
+    '   or: USER_ATTACHMENT_PATHS=\'["/path/a.png","/path/b.pdf"]\' node pipeline_agent.mjs'
+  );
   process.exit(1);
 }
 
 console.log("🚀 Starting Pipeline...\n");
 if (userAudioPath) {
   console.log(`🎙️  Audio: "${userAudioPath}"`);
+}
+if (userAttachmentPaths.length) {
+  console.log(`📎 Attachments: ${userAttachmentPaths.length} file(s)`);
 }
 if (userMessage) {
   console.log(`📝 Request: "${userMessage}"`);
@@ -30,16 +119,21 @@ if (userSessionId) console.log(`🧾 Session ID: ${userSessionId}`);
 if (userRequestId) console.log(`🔁 Request ID: ${userRequestId}`);
 console.log("=".repeat(60) + "\n");
 
-async function runAgent(agentName, scriptPath, input) {
+async function runAgent(agentName, scriptPath, input, options = {}) {
+  const { captureOutput = false, extraEnv = {} } = options;
+
   return new Promise((resolve, reject) => {
     console.log(`\n${"▶".repeat(3)} Running ${agentName}...`);
     console.log(`   Script: ${path.basename(scriptPath)}`);
     console.log(
-      `   Input: "${String(input).substring(0, 50)}${String(input).length > 50 ? "..." : ""}"`
+      `   Input: "${String(input).substring(0, 50)}${
+        String(input).length > 50 ? "..." : ""
+      }"`
     );
     console.log("-".repeat(60));
 
     const startTime = Date.now();
+    let collectedOutput = "";
 
     const child = spawn("node", [scriptPath, input], {
       cwd: __dirname,
@@ -51,11 +145,15 @@ async function runAgent(agentName, scriptPath, input) {
         USER_REQUEST_ID: userRequestId,
         USER_MESSAGE: userMessage,
         USER_AUDIO_PATH: userAudioPath,
+        USER_ATTACHMENT_PATHS: JSON.stringify(userAttachmentPaths),
+        ...extraEnv,
       },
     });
 
     child.stdout.on("data", (data) => {
-      process.stdout.write(data);
+      const text = data.toString();
+      process.stdout.write(text);
+      if (captureOutput) collectedOutput += text;
     });
 
     child.stderr.on("data", (data) => {
@@ -69,7 +167,7 @@ async function runAgent(agentName, scriptPath, input) {
 
       if (code === 0) {
         console.log(`✅ ${agentName} completed successfully (${elapsed}s)\n`);
-        resolve();
+        resolve(captureOutput ? collectedOutput.trim() : "");
       } else {
         console.error(
           `❌ ${agentName} failed with exit code ${code} (${elapsed}s)\n`
@@ -108,19 +206,61 @@ async function main() {
 
     if (userAudioPath) {
       const whisperScript = path.resolve(__dirname, "whisper_agent.mjs");
-      const result = await runAgent("Whisper Agent", whisperScript, userAudioPath);
+      const whisperOutput = await runAgent(
+        "Whisper Agent",
+        whisperScript,
+        userAudioPath,
+        {
+          captureOutput: true,
+        }
+      );
 
-      // Whisper agent should print the transcript to stdout or write a file.
-      // Best is to return it via stdout in a single line JSON or plain text.
-      finalMessage = result || userMessage;
+      const transcript = extractSingleTextOutput(whisperOutput);
+      if (transcript) {
+        finalMessage = transcript;
+        console.log(`🗣️ Whisper transcript: "${finalMessage}"\n`);
+      }
     }
 
-    if (!finalMessage) {
-      throw new Error("No text message available after whisper transcription.");
+    let fileAnalysisText = "";
+
+    if (userAttachmentPaths.length > 0) {
+      const fileAgentScript = path.resolve(__dirname, "file_agent.mjs");
+      const fileAgentInput = JSON.stringify({
+        files: userAttachmentPaths,
+        userMessage: finalMessage,
+      });
+
+      const fileAgentOutput = await runAgent(
+        "File Agent",
+        fileAgentScript,
+        fileAgentInput,
+        {
+          captureOutput: true,
+        }
+      );
+
+      fileAnalysisText = extractFileAnalysisOutput(fileAgentOutput);
+
+      if (fileAnalysisText) {
+        console.log("\n🧩 Uploaded file analysis is ready.\n");
+      }
     }
 
     const plannerScript = path.resolve(__dirname, "planner_agent.mjs");
-    await runAgent("Planner Agent", plannerScript, finalMessage);
+
+    const plannerInput = [
+      finalMessage || "Please analyze the uploaded files.",
+      fileAnalysisText ? `Uploaded file analysis:\n${fileAnalysisText}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
+    await runAgent("Planner Agent", plannerScript, plannerInput, {
+      extraEnv: {
+        USER_FILE_ANALYSIS: fileAnalysisText,
+      },
+    });
 
     const codegenScript = path.resolve(__dirname, "codegen_agent.mjs");
     await runAgent("Codegen Agent", codegenScript, finalMessage);
