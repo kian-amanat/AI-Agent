@@ -23,9 +23,29 @@ export function classifyIntent(message, attachments = []) {
   if (isCrisis(message)) return { type: "crisis", confidence: 1 };
   if (isGreeting(message)) return { type: "greeting", confidence: 1 };
 
+  const memoryLikePhrases = [
+    "same file",
+    "that file",
+    "this file",
+    "previous file",
+    "last file",
+    "as before",
+    "before",
+    "again",
+    "continue",
+    "resume",
+    "remember",
+    "from before",
+    "prior context",
+    "previous one",
+  ];
+
+  const hasMemoryLikeReference = memoryLikePhrases.some((phrase) => msg.includes(phrase));
+
   if (
     wantsBuildFromAttachment(message, attachments) ||
-    isWorkspaceModificationRequest(message)
+    isWorkspaceModificationRequest(message) ||
+    hasMemoryLikeReference
   ) {
     return { type: "technical", confidence: 0.98 };
   }
@@ -90,6 +110,13 @@ export function classifyIntent(message, attachments = []) {
     "screenshot",
     "file input",
     "attachment",
+    "remember",
+    "again",
+    "previous file",
+    "last file",
+    "same file",
+    "continue",
+    "resume",
   ];
 
   const hasTechnicalKeyword = technicalKeywords.some((kw) => msg.includes(kw));

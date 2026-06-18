@@ -11,7 +11,7 @@ export default function SignUpPage() {
         initial={{ opacity: 0, y: 32 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.5, ease: 'easeOut' }}
-        className="w-full max-w-4xl rounded-3xl shadow-2xl border border-white/10 bg-white/[0.03] backdrop-blur-xl flex overflow-hidden relative group"
+        className="w-full max-w-4xl h-[600px] rounded-3xl shadow-2xl border border-white/10 bg-white/[0.03] backdrop-blur-xl flex overflow-hidden relative group"
       >
         {/* Liquid Glass Decorative Side */}
         <div className="hidden md:flex w-2/5 flex-col items-center justify-center p-8 relative overflow-hidden">
@@ -29,7 +29,7 @@ export default function SignUpPage() {
         </div>
 
         {/* Form Side */}
-        <div className="w-full md:w-3/5 p-8 md:p-12 flex flex-col justify-center relative z-10">
+        <div className="w-full md:w-3/5 p-8 md:p-12 flex flex-col justify-center overflow-y-auto custom-scrollbar relative z-10">
           <div className="mb-8">
             <h1 className="text-3xl font-semibold text-white tracking-tight">Create Account</h1>
             <p className="text-sm text-white/50 mt-2">Get started with your free account today</p>
