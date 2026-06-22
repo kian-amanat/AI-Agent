@@ -3,7 +3,7 @@ import path from "path";
 import fs from "fs/promises";
 import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
-
+import settingsRoute from "./routes/settings.mjs";
 import plannerAgentRoute from "./routes/plannerAgent.mjs";
 
 const fastify = Fastify({
@@ -128,6 +128,11 @@ fastify.get("/uploads/:filename", async (request, reply) => {
 await fastify.register(plannerAgentRoute, {
   prefix: "/api/agent",
 });
+
+await fastify.register(settingsRoute, {
+  prefix: "/api/settings",
+});
+
 
 fastify.get("/health", async () => {
   return {
