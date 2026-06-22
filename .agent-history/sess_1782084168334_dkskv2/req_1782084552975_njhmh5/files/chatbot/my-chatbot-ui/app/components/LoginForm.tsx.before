@@ -94,17 +94,6 @@ export default function LoginForm() {
       >
         {submitting ? 'Signing In...' : 'Sign In'}
       </button>
-
-      <div className="text-center text-sm text-white/50">
-        Don't have an account?{' '}
-        <button
-          type="button"
-          onClick={() => router.push('/signup')}
-          className="text-[#ff8a3d] hover:text-[#ff5e4d] font-medium transition-colors"
-        >
-          Sign Up
-        </button>
-      </div>
     </form>
   );
 }

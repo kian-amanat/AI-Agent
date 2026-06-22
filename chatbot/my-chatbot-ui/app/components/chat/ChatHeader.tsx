@@ -1,54 +1,19 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { AnimatePresence, motion } from "framer-motion";
-import { Gauge, PanelLeftClose, Plus, Sparkles, Zap } from "lucide-react";
-
-type ModelOption = "pro" | "normal" | "fast";
+import { useRouter } from "next/navigation";
+import { motion } from "framer-motion";
+import { PanelLeftClose, Settings } from "lucide-react";
 
 export default function ChatHeader({
   onToggleSidebar,
 }: {
   onToggleSidebar: () => void;
 }) {
-  const [model, setModel] = useState<ModelOption>("pro");
-  const [open, setOpen] = useState(false);
-  const menuRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    function onPointerDown(e: MouseEvent) {
-      if (!menuRef.current) return;
-      if (!menuRef.current.contains(e.target as Node)) {
-        setOpen(false);
-      }
-    }
-
-    function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") setOpen(false);
-    }
-
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, []);
-
-  const handleSelectModel = (value: ModelOption) => {
-    setModel(value);
-    setOpen(false);
-  };
+  const router = useRouter();
 
   return (
-    <header className="
-      fixed
-      top-0
-      right-0
-      left-[sidebarWidth]
-      z-20
-    ">
+    <header className="fixed top-0 right-0 left-[sidebarWidth] z-20">
       <div className="flex min-w-0 items-center gap-2.5">
         <button
           onClick={onToggleSidebar}
@@ -59,53 +24,17 @@ export default function ChatHeader({
           <PanelLeftClose className="h-4 w-4" />
         </button>
 
-        <div ref={menuRef} className="relative flex items-center justify-end ml-auto mr-4">
+        <div className="flex items-center justify-end ml-auto mr-4">
           <motion.button
-            whileHover={{ scale: 1.02, y: -0.5 }}
-            whileTap={{ scale: 0.96 }}
-            onClick={() => setOpen((prev) => !prev)}
-            className="flex h-[40px] w-[40px] items-center justify-center rounded-3xl border border-white/[0.07] bg-white/[0.03] text-white/82 transition-all duration-200 hover:bg-white/[0.07] active:rounded-3xl mr-2 mt-3.5"
-            aria-label="Choose model"
-            title="Choose model"
+            whileHover={{ scale: 1.05, rotate: 45 }}
+            whileTap={{ scale: 0.92 }}
+            onClick={() => router.push("/settings")}
+            className="flex h-[38px] w-[38px] items-center justify-center rounded-2xl border border-white/[0.07] bg-white/[0.03] text-white/50 transition-all duration-200 hover:bg-white/[0.07] hover:text-[#ffb26a] hover:border-[#ff8a3d]/30 hover:shadow-[0_0_16px_rgba(255,138,61,0.2)] mr-2 mt-3.5"
+            aria-label="Settings"
+            title="Settings"
           >
-            <Plus className="h-4.5 w-4.5" strokeWidth={2.4} />
+            <Settings className="h-4 w-4" />
           </motion.button>
-
-          <AnimatePresence>
-            {open && (
-              <motion.div
-                initial={{ opacity: 0, x: 20, scale: 0.95 }}
-                animate={{ opacity: 1, x: 0, scale: 1 }}
-                exit={{ opacity: 0, x: 20, scale: 0.95 }}
-                transition={{ duration: 0.2, ease: "easeOut" }}
-                className="absolute right-full top-0 mr-3 mt-2 flex gap-2 rounded-4xl border border-white/[0.15] bg-white/[0.05] p-2 shadow-[0_8px_32px_rgba(0,0,0,0.4),0_0_20px_rgba(255,138,61,0.15)] backdrop-blur-xl overflow-hidden"
-              >
-                {/* Liquid Glass Background Effect */}
-                <div className="absolute inset-0 bg-gradient-to-br from-[#ff8a3d]/10 via-[#ff5e4d]/5 to-transparent pointer-events-none" />
-                <div className="absolute -top-10 -right-10 w-24 h-24 bg-[#ff5e4d]/20 rounded-full blur-2xl pointer-events-none" />
-                <div className="absolute -bottom-10 -left-10 w-24 h-24 bg-[#ff8a3d]/20 rounded-full blur-2xl pointer-events-none" />
-
-                <div className="relative z-10 flex items-center gap-2">
-                  {(["pro", "normal", "fast"] as ModelOption[]).map((m) => (
-                    <button
-                      key={m}
-                      onClick={() => handleSelectModel(m)}
-                      className={`relative flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition-all duration-200 ${
-                        model === m
-                          ? "bg-white/[0.12] text-white shadow-[0_0_15px_rgba(255,138,61,0.2)] border border-white/[0.1]"
-                          : "text-white/60 hover:bg-white/[0.06] hover:text-white/90 border border-transparent"
-                      }`}
-                    >
-                      {m === "pro" && <Sparkles className="h-3.5 w-3.5 text-[#ffb26a]" />}
-                      {m === "normal" && <Zap className="h-3.5 w-3.5 text-[#ff9a6b]" />}
-                      {m === "fast" && <Gauge className="h-3.5 w-3.5 text-[#91ea92]" />}
-                      <span className="capitalize">{m}</span>
-                    </button>
-                  ))}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
         </div>
       </div>
     </header>
