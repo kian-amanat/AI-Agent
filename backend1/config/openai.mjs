@@ -16,7 +16,7 @@ export const PIPELINE_SCRIPT = path.resolve(
 );
 
 // =========================
-// Models
+// Default models (GapGPT fallback)
 // =========================
 
 export const CHAT_MODEL =
@@ -38,7 +38,7 @@ export const VISION_MODEL =
   process.env.VISION_MODEL || "gpt-4o-mini";
 
 // =========================
-// GapGPT
+// GapGPT default client
 // =========================
 
 export const OPENAI_BASE_URL =
@@ -48,9 +48,56 @@ export const OPENAI_API_KEY =
   process.env.OPENAI_API_KEY ||
   "***REMOVED-SECRET***";
 
+// Default client — GapGPT (used when no user settings configured)
 export const openai = new OpenAI({
   apiKey: OPENAI_API_KEY,
   baseURL: OPENAI_BASE_URL,
   timeout: 30000,
   maxRetries: 2,
 });
+
+// =========================
+// Provider base URLs
+// =========================
+
+const PROVIDER_BASE_URLS = {
+  openai: "https://api.openai.com/v1",
+  qwen: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+  deepseek: "https://api.deepseek.com/v1",
+  local: "http://localhost:11434/v1",
+  anthropic: "https://api.anthropic.com/v1",
+  gapgpt: "https://api.gapgpt.app/v1",
+};
+
+export function createClient(route) {
+  if (!route || !route.apiKey || !route.provider) {
+    return { client: openai, model: CHAT_MODEL };
+  }
+
+  const baseURL =
+    route.baseUrl ||
+    PROVIDER_BASE_URLS[route.provider] ||
+    OPENAI_BASE_URL;
+
+  const client = new OpenAI({
+    apiKey: route.apiKey,
+    baseURL,
+    timeout: 30000,
+    maxRetries: 2,
+  });
+
+  return { client, model: route.model };
+}
+
+export function resolveClient(modelRoute, fallbackModel = CHAT_MODEL) {
+  if (modelRoute?.ok && modelRoute?.apiKey) {
+    const client = new OpenAI({
+      apiKey: modelRoute.apiKey,
+      baseURL: modelRoute.baseUrl || OPENAI_BASE_URL,
+      timeout: 30000,
+      maxRetries: 2,
+    });
+    return { client, model: modelRoute.model };
+  }
+  return { client: openai, model: fallbackModel };
+}

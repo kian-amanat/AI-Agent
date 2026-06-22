@@ -2,6 +2,7 @@ import {
   openai,
   CHAT_MODEL,
   SUMMARY_MODEL,
+  resolveClient,
 } from "../config/openai.mjs";
 import { detectLanguage } from "./intent.service.mjs";
 import { getSessionMessages } from "./session.service.mjs";
@@ -32,8 +33,14 @@ function buildMemoryBlock(sessionId) {
   return getMemoryContext(sessionId);
 }
 
-export async function generateGreetingResponse(message, sessionId) {
+// =========================
+// Greeting
+// =========================
+
+export async function generateGreetingResponse(message, sessionId, modelRoute = null) {
   const lang = detectLanguage(message);
+  // [KODO] Resolve client: use user's model if configured, else GapGPT fallback
+  const { client, model } = resolveClient(modelRoute, CHAT_MODEL);
 
   const history = getSessionMessages(sessionId) || [];
   const recentHistory = history.slice(-8);
@@ -80,8 +87,8 @@ ${memoryText ? "همچنین حافظه‌ی ذخیره‌شده از پیام�
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-    const response = await openai.chat.completions.create({
-      model: CHAT_MODEL,
+    const response = await client.chat.completions.create({
+      model,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userContent },
@@ -103,8 +110,14 @@ ${memoryText ? "همچنین حافظه‌ی ذخیره‌شده از پیام�
   }
 }
 
-export async function generateInspectionResponse(message, attachments = [], sessionId = "") {
+// =========================
+// Inspection
+// =========================
+
+export async function generateInspectionResponse(message, attachments = [], sessionId = "", modelRoute = null) {
   const lang = detectLanguage(message);
+  // [KODO] Vision-capable route for inspection with attachments
+  const { client, model } = resolveClient(modelRoute, CHAT_MODEL);
 
   const rememberedTarget = getRememberedTarget(sessionId);
   const matchedTargets = uniq([
@@ -177,8 +190,13 @@ export async function generateInspectionResponse(message, attachments = [], sess
   return lines.join("\n");
 }
 
-export async function generateCodeResponse(message, attachments = [], sessionId = "") {
+// =========================
+// Code response
+// =========================
+
+export async function generateCodeResponse(message, attachments = [], sessionId = "", modelRoute = null) {
   const lang = detectLanguage(message);
+  const { client, model } = resolveClient(modelRoute, CHAT_MODEL);
 
   const rememberedTarget = getRememberedTarget(sessionId);
   const matchedTargets = uniq([
@@ -190,7 +208,7 @@ export async function generateCodeResponse(message, attachments = [], sessionId 
 
   if (!matchedTargets.length && !attachmentContext) {
     return lang === "en"
-      ? "I couldn't find the exact file for that code request. Send the exact file path or filename and I’ll pull the code."
+      ? "I couldn't find the exact file for that code request. Send the exact file path or filename and I'll pull the code."
       : "فایل دقیق برای این درخواست کد پیدا نشد. مسیر یا نام دقیق فایل را بفرست تا کدش را برات بیارم.";
   }
 
@@ -224,8 +242,14 @@ export async function generateCodeResponse(message, attachments = [], sessionId 
   return snippets.join("\n\n");
 }
 
-export async function generateClarificationResponse(message) {
+// =========================
+// Clarification
+// =========================
+
+export async function generateClarificationResponse(message, modelRoute = null) {
   const lang = detectLanguage(message);
+  const { client, model } = resolveClient(modelRoute, CHAT_MODEL);
+
   const fallbacks = {
     en: "I'd love to help you build that! To create a better plan, could you provide more details:\n\n• Is this frontend, backend, or full-stack?\n• What are the main features?\n• Any tech preferences (React, Vue, Node.js, etc.)?\n• Expected scale (users, data volume)?\n\nThe more details, the better plan I can create! 🚀",
     fa: "خوشحال می‌شم کمکت کنم این رو بسازی! برای ساخت plan بهتر، می‌تونی جزئیات بیشتری بدی:\n\n• فرانت‌اند، بک‌اند یا فول‌استک؟\n• ویژگی‌های اصلی چیا هستن؟\n• تکنولوژی خاصی رو ترجیح می‌دی (React، Vue، Node.js و...)؟\n• مقیاس مورد انتظار چقدره (تعداد کاربر، حجم داده)؟\n\nهرچی بیشتر توضیح بدی، plan بهتری می‌سازم! 🚀",
@@ -235,8 +259,8 @@ export async function generateClarificationResponse(message) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-    const response = await openai.chat.completions.create({
-      model: CHAT_MODEL,
+    const response = await client.chat.completions.create({
+      model,
       messages: [
         {
           role: "system",
@@ -262,8 +286,14 @@ Respond in ${lang === "en" ? "English" : "Farsi"}. Be friendly, concise (3-4 sen
   }
 }
 
-export async function generateCasualResponse(message) {
+// =========================
+// Casual
+// =========================
+
+export async function generateCasualResponse(message, modelRoute = null) {
   const lang = detectLanguage(message);
+  const { client, model } = resolveClient(modelRoute, CHAT_MODEL);
+
   const fallbacks = {
     en: "I'm here to help you plan and build software projects! Could you tell me more about what you'd like to create? For example:\n• A web application\n• A mobile backend\n• An API service\n• Something else?",
     fa: "من اینجام تا کمکت کنم پروژه‌های نرم‌افزاری بسازی! می‌تونی بیشتر بگی می‌خوای چی بسازی؟ مثلاً:\n• یک اپلیکیشن وب\n• بک‌اند موبایل\n• یک سرویس API\n• چیز دیگه‌ای؟",
@@ -273,8 +303,8 @@ export async function generateCasualResponse(message) {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 8000);
 
-    const response = await openai.chat.completions.create({
-      model: CHAT_MODEL,
+    const response = await client.chat.completions.create({
+      model,
       messages: [
         {
           role: "system",
@@ -295,6 +325,10 @@ export async function generateCasualResponse(message) {
   }
 }
 
+// =========================
+// Stream plan summary
+// =========================
+
 function createFallbackSummary(plan, lang = "en") {
   return lang === "en"
     ? `✅ **Pipeline Completed Successfully!**\n\n**🎯 Goal:** ${
@@ -305,15 +339,16 @@ function createFallbackSummary(plan, lang = "en") {
       }\n\n**📦 نتایج Pipeline:**\n• ✅ برنامه‌ریزی کامل (${plan.phases?.length || 0} فاز)\n• ✅ ساختار ساخته شد (${plan.files?.length || 0} فایل)\n• ✅ کد تولید شد\n• ✅ تست‌ها ساخته شدند\n• ✅ اصلاحات اعمال شد\n\nپروژه‌ت آماده است! 🚀`;
 }
 
-export async function streamPlanSummary(plan, userMessage, reply) {
+export async function streamPlanSummary(plan, userMessage, reply, modelRoute = null) {
   const lang = detectLanguage(userMessage);
+  const { client, model } = resolveClient(modelRoute, SUMMARY_MODEL);
 
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 25000);
 
-    const stream = await openai.chat.completions.create({
-      model: SUMMARY_MODEL,
+    const stream = await client.chat.completions.create({
+      model,
       messages: [
         {
           role: "system",

@@ -1,6 +1,8 @@
 const BASE_URL = "http://localhost:9000/api/agent";
 const UPLOAD_URL = `${BASE_URL}/upload`;
 const TRANSCRIBE_URL = `${BASE_URL}/transcribe`;
+const SETTINGS_URL = "http://localhost:9000/api/settings";
+
 
 export interface Session {
   id: string;
@@ -421,4 +423,89 @@ export async function uploadFiles(files: File[]): Promise<string[]> {
 
 export async function uploadFile(file: File): Promise<string> {
   return uploadAttachment(file);
+}
+
+// ============================================================
+// Settings API
+// ============================================================
+
+
+export interface Provider {
+  id: string;
+  name: string;
+  models: { id: string; name: string; vision: boolean }[];
+}
+
+export interface Capabilities {
+  chatEnabled: boolean;
+  uploadEnabled: boolean;
+  textModel: { provider: string; model: string } | null;
+  visionModel: { provider: string; model: string } | null;
+}
+
+export interface SettingsPayload {
+  textProvider: string;
+  textModel: string;
+  textApiKey: string;
+  visionProvider?: string | null;
+  visionModel?: string | null;
+  visionApiKey?: string | null;
+  useVisionSameKey?: boolean;
+}
+
+// در app/lib/api.ts اضافه کن
+
+export interface GapGPTModel {
+  id: string;
+  name: string;
+  vision: boolean;
+  thinking: boolean;
+}
+
+export async function fetchGapGPTModels(): Promise<GapGPTModel[]> {
+  const res = await fetch(`${SETTINGS_URL}/gapgpt-models`, {
+    cache: "no-store",
+  });
+  const data = await readJson<{ ok: boolean; models: GapGPTModel[] }>(res);
+  if (!res.ok || !data.ok) throw new Error("Failed to fetch GapGPT models");
+  return data.models;
+}
+
+
+export interface SettingsPayload {
+  textModel: string;
+  textApiKey: string;
+  textBaseUrl?: string;
+  visionModel?: string | null;
+  visionApiKey?: string | null;
+  visionBaseUrl?: string | null;
+  useVisionSameKey?: boolean;
+}
+
+export async function fetchCapabilities(): Promise<Capabilities> {
+  const res = await fetch(`${SETTINGS_URL}/capabilities`, { cache: "no-store" });
+  const data = await readJson<{ ok: boolean } & Capabilities>(res);
+  if (!res.ok || !data.ok) throw new Error("Failed to fetch capabilities");
+  return { chatEnabled: data.chatEnabled, uploadEnabled: data.uploadEnabled, textModel: data.textModel, visionModel: data.visionModel };
+}
+
+export async function fetchCurrentSettings(): Promise<{ configured: boolean; settings: any; capabilities: Capabilities }> {
+  const res = await fetch(`${SETTINGS_URL}`, { cache: "no-store" });
+  const data = await readJson<any>(res);
+  if (!res.ok || !data.ok) throw new Error("Failed to fetch settings");
+  return { configured: data.configured, settings: data.settings, capabilities: data.capabilities };
+}
+
+export async function saveSettings(payload: SettingsPayload): Promise<Capabilities> {
+  const res = await fetch(`${SETTINGS_URL}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const data = await readJson<{ ok: boolean; capabilities: Capabilities; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Failed to save");
+  return data.capabilities;
+}
+
+export async function testConnection(model: string, apiKey: string, baseUrl?: string): Promise<string> {
+  const res = await fetch(`${SETTINGS_URL}/test`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ model, apiKey, baseUrl }) });
+  const data = await readJson<{ ok: boolean; message?: string; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Test failed");
+  return data.message || "Connected";
 }
