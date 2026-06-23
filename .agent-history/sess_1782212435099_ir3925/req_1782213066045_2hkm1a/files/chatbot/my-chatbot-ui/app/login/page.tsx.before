@@ -1,7 +1,7 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import Image from 'next/image';
+import { Sparkles } from 'lucide-react';
 import LoginForm from '../components/LoginForm';
 
 export default function LoginPage() {
@@ -21,13 +21,7 @@ export default function LoginPage() {
           
           <div className="relative z-10 flex flex-col items-center text-center">
             <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-white/20 bg-white/10 mb-4 shadow-[0_8px_32px_rgba(255,45,45,0.2)] backdrop-blur-md">
-              <Image
-                src="/icon.png"
-                alt="Logo"
-                width={32}
-                height={32}
-                className="object-contain"
-              />
+              <Sparkles className="h-8 w-8 text-[#ff5e4d]" />
             </div>
             <h2 className="text-2xl font-bold text-white mb-2">Welcome Back</h2>
             <p className="text-sm text-white/60">Sign in to access your account and continue your journey.</p>
