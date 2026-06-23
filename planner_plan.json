@@ -1,28 +1,56 @@
 {
   "task_type": "task",
-  "request_mode": "greeting",
-  "name": "Greeting Response",
+  "request_mode": "modification",
+  "name": "Replace Sparkles icons with icon.png",
   "task_scope": "frontend",
-  "goal": "Acknowledge the user's greeting and offer assistance based on the existing project context.",
-  "summary": "The user sent a simple greeting. The plan is to respond politely and invite the user to specify a task, leveraging the knowledge that this is a Next.js chatbot application.",
-  "target_files": [],
-  "reference_files": [],
-  "context_assumptions": [
-    "The user is a developer or stakeholder interested in the 'my-chatbot-ui' project.",
-    "No specific code changes are requested at this moment."
+  "goal": "Replace all instances of the 'Sparkles' icon from lucide-react with the local image '/icon.png' across the my-chatbot-ui frontend components.",
+  "summary": "The user wants to replace the 'Sparkles' icon (imported from lucide-react) with a custom logo image located at 'public/icon.png'. This needs to be done in all files where 'Sparkles' is used as an icon component. Based on the workspace context, the primary files are chat-types.ts, ChatSidebar.tsx, and EmptyStateCard.tsx.",
+  "target_files": [
+    "chatbot/my-chatbot-ui/app/components/chat/chat-types.ts",
+    "chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx",
+    "chatbot/my-chatbot-ui/app/components/chat/EmptyStateCard.tsx"
   ],
-  "files_to_create": [],
-  "files_to_modify": [],
-  "dependencies": [],
+  "reference_files": [
+    "chatbot/my-chatbot-ui/app/components/chat/chat-types.ts",
+    "chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx",
+    "chatbot/my-chatbot-ui/app/components/chat/EmptyStateCard.tsx"
+  ],
+  "context_assumptions": [
+    "The file 'public/icon.png' exists and contains the logo without a background.",
+    "The project uses Next.js, so the Image component from 'next/image' should be used for optimal loading.",
+    "The 'Sparkles' icon is currently used in the 'AGENT_STAGES' array in chat-types.ts and in the UI of ChatSidebar and EmptyStateCard."
+  ],
+  "files_to_modify": [
+    {
+      "path": "chatbot/my-chatbot-ui/app/components/chat/chat-types.ts",
+      "purpose": "Remove Sparkles import and replace its usage in AGENT_STAGES with a custom component or Image tag.",
+      "content": "// ... existing imports ...\nimport { Bot, CheckCircle, Layers, Search } from \"lucide-react\";\nimport Image from \"next/image\";\nimport React from \"react\";\n\n// ... existing types ...\n\nexport const AGENT_STAGES: PipelineStage[] = [\n  {\n    key: \"intake\",\n    label: \"Intake\",\n    description: \"Reading the request\",\n    icon: Search,\n  },\n  {\n    key: \"context\",\n    label: \"Context\",\n    description: \"Scanning files and structure\",\n    icon: Layers,\n  },\n  {\n    key: \"plan\",\n    label: \"Plan\",\n    description: \"Designing the task flow\",\n    // Replace Sparkles with Image component\n    icon: () => (\n      <div className=\"flex h-5 w-5 items-center justify-center\">\n        <Image src=\"/icon.png\" alt=\"Plan\" width={20} height={20} className=\"object-contain\" />\n      </div>\n    ),\n  },\n  {\n    key: \"validate\",\n    label: \"Validate\",\n    description: \"Checking quality and constraints\",\n    icon: CheckCircle,\n  },\n  {\n    key: \"complete\",\n    label: \"Complete\",\n    description: \"Ready for review\",\n    icon: Bot,\n  },\n];\n"
+    },
+    {
+      "path": "chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx",
+      "purpose": "Remove Sparkles import and replace its usage in the 'New Chat' button or any other UI element.",
+      "content": "// ... existing imports ...\nimport {\n  Clock,\n  Loader2,\n  MoreVertical,\n  PanelLeftClose,\n  PanelLeftOpen,\n  Plus,\n  Search,\n  Trash2,\n  User,\n} from \"lucide-react\";\nimport Image from \"next/image\";\nimport type { Conversation } from \"./chat-types\";\n\n// ... existing components ...\n\n// Find where Sparkles is used in the JSX (likely in the 'New Chat' button or header)\n// Replace <Sparkles className=\"...\" /> with:\n// <Image src=\"/icon.png\" alt=\"Logo\" width={20} height={20} className=\"object-contain\" />\n"
+    },
+    {
+      "path": "chatbot/my-chatbot-ui/app/components/chat/EmptyStateCard.tsx",
+      "purpose": "Replace Sparkles icon with icon.png.",
+      "content": "\"use client\";\n\nimport { motion } from \"framer-motion\";\nimport Image from \"next/image\";\n\nexport default function EmptyStateCard({\n  title,\n  desc,\n  onClick,\n}: {\n  title: string;\n  desc: string;\n  onClick: () => void;\n}) {\n  return (\n    <motion.button\n      whileHover={{ y: -2, scale: 1.01 }}\n      whileTap={{ scale: 0.99 }}\n      onClick={onClick}\n      className=\"group rounded-3xl border border-white/8 bg-white/[0.03] p-4 text-left transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-white/[0.045]\"\n    >\n      <div className=\"flex items-start gap-3\">\n        <div className=\"mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl border border-white/8 bg-gradient-to-br from-[#ff8a3d]/18 to-[#ff5e4d]/12 text-white/88\">\n          {/* Replace Sparkles with Image */}\n          <Image src=\"/icon.png\" alt=\"Logo\" width={20} height={20} className=\"object-contain\" />\n        </div>\n        <div className=\"min-w-0\">\n          <p className=\"text-sm font-medium text-white\">{title}</p>\n          <p className=\"mt-1 text-xs leading-5 text-white/40\">{desc}</p>\n        </div>\n      </div>\n    </motion.button>\n  );\n}\n"
+    }
+  ],
+  "dependencies": [
+    "next/image"
+  ],
   "constraints": [
-    "Keep the response friendly and concise.",
-    "Mention the project context (Next.js chatbot) to show awareness."
+    "Ensure the image is sized appropriately (e.g., 20x20 or 24x24) to match the previous icon size.",
+    "Maintain the existing styling classes around the icon container."
   ],
   "acceptance_criteria": [
-    "Response is a valid JSON object.",
-    "Response acknowledges the greeting."
+    "No 'Sparkles' icon from lucide-react is used in the specified files.",
+    "The '/icon.png' image is displayed in place of the Sparkles icon.",
+    "The layout remains consistent with the previous design."
   ],
-  "notes": "Since this is a greeting, no code generation or file modification is required. The plan reflects a conversational turn.",
+  "notes": "The ChatSidebar.tsx file might use Sparkles in the 'New Chat' button or a header. Please inspect the JSX in that file to find the exact location. If it's not there, check if it's used in a sub-component.",
   "response_style": "plan",
+  "files_to_create": [],
   "uploaded_file_context": ""
 }

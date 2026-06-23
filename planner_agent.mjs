@@ -18,12 +18,16 @@ const FRONTEND_ROOT = path.join(PROJECT_ROOT, "frontend");
 const BACKEND_CWD_REL = path.relative(PROJECT_ROOT, BACKEND_ROOT) || "backend";
 const FRONTEND_CWD_REL = path.relative(PROJECT_ROOT, FRONTEND_ROOT) || "frontend";
 
-const OPENAI_MODEL = process.env.OPENAI_MODEL || PLANNING_MODEL;
-const OPENAI_BASE_URL =
-  process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1";
-const OPENAI_API_KEY =
-  process.env.OPENAI_API_KEY ||
-  "***REMOVED-SECRET***";
+// [KODO] Read user settings first, fallback to env/hardcoded
+const SETTINGS_PATH = path.join(PROJECT_ROOT, "backend1", "data", "settings.json");
+let userSettings = null;
+try {
+  userSettings = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf-8"));
+} catch { /* no settings file yet — use defaults */ }
+
+const OPENAI_MODEL = userSettings?.textModel || process.env.OPENAI_MODEL || PLANNING_MODEL;
+const OPENAI_BASE_URL = userSettings?.textBaseUrl || process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1";
+const OPENAI_API_KEY = userSettings?.textApiKey || process.env.OPENAI_API_KEY || "***REMOVED-SECRET***";
 
 if (!OPENAI_API_KEY) {
   throw new Error("Missing OPENAI_API_KEY env var.");
@@ -32,6 +36,7 @@ if (!OPENAI_API_KEY) {
 const openai = new OpenAI({
   apiKey: OPENAI_API_KEY,
   baseURL: OPENAI_BASE_URL,
+  timeout: 120000,  // 2 minutes (قبلاً default 30s بود)
 });
 
 const DESIGN_REFERENCE_FILENAMES = [
