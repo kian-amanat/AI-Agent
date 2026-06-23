@@ -8,8 +8,8 @@
   "textApiKey": "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
   "textBaseUrl": "https://api.gapgpt.app/v1",
   "visionProvider": null,
-  "visionModel": "claude-sonnet-4-6",
-  "visionApiKey": "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
-  "visionBaseUrl": "https://api.gapgpt.app/v1",
+  "visionModel": null,
+  "visionApiKey": null,
+  "visionBaseUrl": null,
   "useVisionSameKey": true
 }

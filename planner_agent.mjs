@@ -7,6 +7,7 @@ import { buildSmartContext } from "./tools/context_engine.js";
 import { listBackendFiles } from "./tools/list_backend_files.js";
 import { readProjectFile } from "./tools/readProjectFile.js";
 import { PLANNING_MODEL } from "./backend1/config/openai.mjs";
+import { smartSearch, grepSearch, findFiles } from "./tools/search_project.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -898,11 +899,21 @@ async function buildReferenceFileContext(userMessage) {
   const referenceSnippets = await collectReferenceSnippets(userMessage);
   const inspectionTargets = await collectInspectionTargets(userMessage);
 
+  // [KODO] Smart search — finds files, definitions, and usages across project
+  const searchResults = smartSearch(userMessage);
+
+  // [KODO] Also add search-discovered files to inspection targets
+  const searchFiles = searchResults?.files || [];
+  const enrichedInspectionTargets = [
+    ...new Set([...inspectionTargets, ...searchFiles]),
+  ].slice(0, 20);
+
   return {
     smartContext,
     exactFiles,
     referenceSnippets,
-    inspectionTargets,
+    inspectionTargets: enrichedInspectionTargets,
+    searchResults,
   };
 }
 
@@ -979,10 +990,13 @@ function buildUserPrompt({
   referenceSnippetsText,
   inspectionTargetsText,
   fileAnalysisText,
+  searchResultsText,
 }) {
   return `
 User request:
 ${userMessage}
+
+${searchResultsText ? `Project search results:\n${searchResultsText}\n` : ""}
 
 Uploaded file analysis:
 ${fileAnalysisText || "<none>"}
@@ -1072,8 +1086,15 @@ async function runPlanner(userMessageInput) {
   console.log("📦 Detected scope:", taskScope);
 
   const projectStructure = await summarizeProjectStructure(taskScope);
-  const { smartContext, exactFiles, referenceSnippets, inspectionTargets } =
-    await buildReferenceFileContext(userMessage);
+ const {
+  smartContext,
+  exactFiles,
+  referenceSnippets,
+  inspectionTargets,
+  searchResults,
+} = await buildReferenceFileContext(userMessage);
+
+const searchResultsText = searchResults?.text || "";
 
   const smartContextText = formatSmartContext(smartContext, "workspace");
   const exactFilesText = exactFiles.length

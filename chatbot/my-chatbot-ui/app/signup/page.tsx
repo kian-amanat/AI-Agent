@@ -1,7 +1,7 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { Sparkles } from 'lucide-react';
+import Image from 'next/image';
 import SignUpForm from '../components/SignUpForm';
 
 export default function SignUpPage() {
@@ -20,9 +20,13 @@ export default function SignUpPage() {
           <div className="absolute -bottom-10 -left-10 w-40 h-40 bg-[#ff8a3d]/30 rounded-full blur-3xl animate-pulse delay-700" />
           
           <div className="relative z-10 flex flex-col items-center text-center">
-            <div className="flex h-16 w-16 items-center justify-center rounded-2xl border border-white/20 bg-white/10 mb-4 shadow-[0_8px_32px_rgba(255,45,45,0.2)] backdrop-blur-md">
-              <Sparkles className="h-8 w-8 text-[#ff5e4d]" />
-            </div>
+            <Image
+              src="/icon.png"
+              alt="Logo"
+              width={64}
+              height={64}
+              className="object-contain mb-4"
+            />
             <h2 className="text-2xl font-bold text-white mb-2">Join Us</h2>
             <p className="text-sm text-white/60">Create your account to unlock all features and start building amazing things.</p>
           </div>
