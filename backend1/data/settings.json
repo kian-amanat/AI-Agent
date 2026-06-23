@@ -1,15 +1,15 @@
 {
   "provider": "gapgpt",
-  "model": "claude-sonnet-4-6",
+  "model": "gapgpt-qwen-3.6",
   "apiKey": "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
   "baseUrl": "https://api.gapgpt.app/v1",
   "textProvider": "gapgpt",
-  "textModel": "claude-sonnet-4-6",
+  "textModel": "gapgpt-qwen-3.6",
   "textApiKey": "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
   "textBaseUrl": "https://api.gapgpt.app/v1",
   "visionProvider": null,
-  "visionModel": "claude-sonnet-4-6",
-  "visionApiKey": "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
-  "visionBaseUrl": "https://api.gapgpt.app/v1",
+  "visionModel": null,
+  "visionApiKey": null,
+  "visionBaseUrl": null,
   "useVisionSameKey": true
 }
