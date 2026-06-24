@@ -26,13 +26,38 @@ export function normalizeSessionLabel(message, attachments = []) {
   return "New session";
 }
 
-export const createSession = dbCreateSession;
-export const saveMessage = dbSaveMessage;
-export const getSessionMessages = dbGetSessionMessages;
-export const listSessions = dbListSessions;
-export const deleteSession = dbDeleteSession;
-export const touchSession = dbTouchSession;
+export function createSession(id, userId, title = null) {
+  return dbCreateSession(id, userId, title);
+}
 
-export const getSessionMemory = dbGetSessionMemory;
-export const updateSessionMemory = dbUpdateSessionMemory;
-export const clearSessionMemory = dbClearSessionMemory;
+export function saveMessage(sessionId, userId, role, content, intent = null) {
+  return dbSaveMessage(sessionId, userId, role, content, intent);
+}
+
+export function getSessionMessages(sessionId, userId, limit = 20) {
+  return dbGetSessionMessages(sessionId, userId, limit);
+}
+
+export function listSessions(userId, limit = 50) {
+  return dbListSessions(userId, limit);
+}
+
+export function deleteSession(sessionId, userId) {
+  return dbDeleteSession(sessionId, userId);
+}
+
+export function touchSession(sessionId, userId) {
+  return dbTouchSession(sessionId, userId);
+}
+
+export function getSessionMemory(sessionId, userId) {
+  return dbGetSessionMemory(sessionId, userId);
+}
+
+export function updateSessionMemory(sessionId, userId, patch = {}) {
+  return dbUpdateSessionMemory(sessionId, userId, patch);
+}
+
+export function clearSessionMemory(sessionId, userId) {
+  return dbClearSessionMemory(sessionId, userId);
+}
