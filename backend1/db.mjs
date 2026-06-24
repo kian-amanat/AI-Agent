@@ -7,40 +7,7 @@ const DB_PATH = path.resolve(__dirname, "memory.db");
 
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS sessions (
-    id TEXT PRIMARY KEY,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    title TEXT
-  );
-
-  CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    role TEXT NOT NULL,
-    content TEXT NOT NULL,
-    intent TEXT,
-    created_at TEXT NOT NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-  );
-
-  CREATE TABLE IF NOT EXISTS session_memory (
-    session_id TEXT PRIMARY KEY,
-    last_role TEXT,
-    last_message TEXT,
-    last_intent TEXT,
-    last_target_file TEXT,
-    last_target_files TEXT,
-    last_task TEXT,
-    last_attachment_paths TEXT,
-    last_file_analysis TEXT,
-    last_context_json TEXT,
-    updated_at TEXT NOT NULL,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-  );
-`);
+db.pragma("foreign_keys = ON");
 
 function nowIso() {
   return new Date().toISOString();
@@ -58,7 +25,6 @@ function toJsonText(value) {
 
 function parseJsonText(value, fallback = null) {
   if (value === null || value === undefined || value === "") return fallback;
-
   if (typeof value !== "string") return value;
 
   try {
@@ -68,13 +34,93 @@ function parseJsonText(value, fallback = null) {
   }
 }
 
-function normalizeMemoryRow(row) {
-  if (!row) {
-    return null;
+function columnExists(tableName, columnName) {
+  const columns = db.prepare(`PRAGMA table_info(${tableName})`).all();
+  return columns.some((col) => col.name === columnName);
+}
+
+function ensureColumn(tableName, columnName, ddlType) {
+  if (!columnExists(tableName, columnName)) {
+    db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${ddlType}`);
   }
+}
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    email      TEXT    UNIQUE NOT NULL,
+    password   TEXT    NOT NULL,
+    name       TEXT    NOT NULL,
+    plan       TEXT    NOT NULL DEFAULT 'free',
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS auth_sessions (
+    id             TEXT    PRIMARY KEY,
+    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token          TEXT    NOT NULL,
+    workspace_path TEXT,
+    workspace_name TEXT,
+    created_at     TEXT    NOT NULL,
+    last_active    TEXT    NOT NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS sessions (
+    id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    title TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    user_id INTEGER,
+    role TEXT NOT NULL,
+    content TEXT NOT NULL,
+    intent TEXT,
+    created_at TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS session_memory (
+    session_id TEXT PRIMARY KEY,
+    user_id INTEGER,
+    last_role TEXT,
+    last_message TEXT,
+    last_intent TEXT,
+    last_target_file TEXT,
+    last_target_files TEXT,
+    last_task TEXT,
+    last_attachment_paths TEXT,
+    last_file_analysis TEXT,
+    last_context_json TEXT,
+    updated_at TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+  );
+`);
+
+ensureColumn("sessions", "user_id", "INTEGER");
+ensureColumn("messages", "user_id", "INTEGER");
+ensureColumn("session_memory", "user_id", "INTEGER");
+
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id);
+  CREATE INDEX IF NOT EXISTS idx_messages_session_user ON messages(session_id, user_id);
+  CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
+  CREATE INDEX IF NOT EXISTS idx_memory_session_user ON session_memory(session_id, user_id);
+`);
+
+function normalizeMemoryRow(row) {
+  if (!row) return null;
 
   return {
     session_id: row.session_id,
+    user_id: row.user_id ?? null,
     last_role: row.last_role || null,
     last_message: row.last_message || null,
     last_intent: row.last_intent || null,
@@ -88,13 +134,46 @@ function normalizeMemoryRow(row) {
   };
 }
 
-function ensureMemoryRow(sessionId) {
+function ensureMemoryRow(sessionId, userId) {
   const now = nowIso();
 
   db.prepare(`
-    INSERT OR IGNORE INTO session_memory (session_id, updated_at)
-    VALUES (?, ?)
-  `).run(sessionId, now);
+    INSERT OR IGNORE INTO session_memory (session_id, user_id, updated_at)
+    VALUES (?, ?, ?)
+  `).run(sessionId, userId, now);
+
+  const row = db.prepare(`
+    SELECT user_id FROM session_memory WHERE session_id = ?
+  `).get(sessionId);
+
+  if (row && row.user_id == null) {
+    db.prepare(`
+      UPDATE session_memory
+      SET user_id = ?
+      WHERE session_id = ?
+    `).run(userId, sessionId);
+  }
+}
+
+function ensureSessionOwnership(sessionId, userId) {
+  const row = db.prepare(`
+    SELECT id, user_id FROM sessions WHERE id = ?
+  `).get(sessionId);
+
+  if (!row) return;
+
+  if (row.user_id == null) {
+    db.prepare(`
+      UPDATE sessions
+      SET user_id = ?
+      WHERE id = ?
+    `).run(userId, sessionId);
+    return;
+  }
+
+  if (Number(row.user_id) !== Number(userId)) {
+    throw new Error("Session does not belong to this user");
+  }
 }
 
 function buildMemoryUpdate(existing, patch = {}) {
@@ -135,31 +214,62 @@ function serializeMemoryValue(key, value) {
   return String(value);
 }
 
-export function createSession(id, title = null) {
+export function createSession(id, userId, title = null) {
   const now = nowIso();
 
-  db.prepare(`
-    INSERT OR IGNORE INTO sessions (id, created_at, updated_at, title)
-    VALUES (?, ?, ?, ?)
-  `).run(id, now, now, title);
+  const existing = db.prepare(`
+    SELECT id, user_id FROM sessions WHERE id = ?
+  `).get(id);
 
-  ensureMemoryRow(id);
+  if (!existing) {
+    db.prepare(`
+      INSERT INTO sessions (id, user_id, created_at, updated_at, title)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(id, userId, now, now, title);
+  } else {
+    if (existing.user_id == null) {
+      db.prepare(`
+        UPDATE sessions
+        SET user_id = ?, updated_at = ?, title = COALESCE(?, title)
+        WHERE id = ?
+      `).run(userId, now, title, id);
+    } else if (Number(existing.user_id) !== Number(userId)) {
+      throw new Error("Session does not belong to this user");
+    } else if (title !== null) {
+      db.prepare(`
+        UPDATE sessions
+        SET updated_at = ?, title = COALESCE(?, title)
+        WHERE id = ? AND user_id = ?
+      `).run(now, title, id, userId);
+    } else {
+      db.prepare(`
+        UPDATE sessions
+        SET updated_at = ?
+        WHERE id = ? AND user_id = ?
+      `).run(now, id, userId);
+    }
+  }
+
+  ensureMemoryRow(id, userId);
 }
 
-export function saveMessage(sessionId, role, content, intent = null) {
+export function saveMessage(sessionId, userId, role, content, intent = null) {
   const now = nowIso();
 
-  db.prepare(`UPDATE sessions SET updated_at = ? WHERE id = ?`).run(
-    now,
-    sessionId
-  );
+  ensureSessionOwnership(sessionId, userId);
 
   db.prepare(`
-    INSERT INTO messages (session_id, role, content, intent, created_at)
-    VALUES (?, ?, ?, ?, ?)
-  `).run(sessionId, role, content, intent, now);
+    UPDATE sessions
+    SET updated_at = ?
+    WHERE id = ? AND user_id = ?
+  `).run(now, sessionId, userId);
 
-  ensureMemoryRow(sessionId);
+  db.prepare(`
+    INSERT INTO messages (session_id, user_id, role, content, intent, created_at)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).run(sessionId, userId, role, content, intent, now);
+
+  ensureMemoryRow(sessionId, userId);
 
   db.prepare(`
     UPDATE session_memory
@@ -168,70 +278,88 @@ export function saveMessage(sessionId, role, content, intent = null) {
       last_message = ?,
       last_intent = ?,
       updated_at = ?
-    WHERE session_id = ?
-  `).run(role, content, intent, now, sessionId);
+    WHERE session_id = ? AND user_id = ?
+  `).run(role, content, intent, now, sessionId, userId);
 }
 
-export function getSessionMessages(sessionId, limit = 20) {
+export function getSessionMessages(sessionId, userId, limit = 20) {
   return db
     .prepare(`
       SELECT role, content, intent, created_at
       FROM messages
-      WHERE session_id = ?
+      WHERE session_id = ? AND user_id = ?
       ORDER BY id DESC
       LIMIT ?
     `)
-    .all(sessionId, limit)
+    .all(sessionId, userId, limit)
     .reverse();
 }
 
-export function listSessions(limit = 50) {
+export function listSessions(userId, limit = 50) {
   return db.prepare(`
     SELECT s.id, s.title, s.created_at, s.updated_at,
            COUNT(m.id) as message_count
     FROM sessions s
-    LEFT JOIN messages m ON m.session_id = s.id
+    LEFT JOIN messages m
+      ON m.session_id = s.id AND m.user_id = s.user_id
+    WHERE s.user_id = ?
     GROUP BY s.id
     ORDER BY s.updated_at DESC
     LIMIT ?
-  `).all(limit);
+  `).all(userId, limit);
 }
 
-export function deleteSession(sessionId) {
-  db.prepare(`DELETE FROM messages WHERE session_id = ?`).run(sessionId);
-  db.prepare(`DELETE FROM session_memory WHERE session_id = ?`).run(sessionId);
-  db.prepare(`DELETE FROM sessions WHERE id = ?`).run(sessionId);
+export function deleteSession(sessionId, userId) {
+  db.prepare(`
+    DELETE FROM messages
+    WHERE session_id = ? AND user_id = ?
+  `).run(sessionId, userId);
+
+  db.prepare(`
+    DELETE FROM session_memory
+    WHERE session_id = ? AND user_id = ?
+  `).run(sessionId, userId);
+
+  db.prepare(`
+    DELETE FROM sessions
+    WHERE id = ? AND user_id = ?
+  `).run(sessionId, userId);
 }
 
-export function touchSession(sessionId) {
+export function touchSession(sessionId, userId) {
   const now = nowIso();
 
-  db.prepare(`UPDATE sessions SET updated_at = ? WHERE id = ?`).run(
-    now,
-    sessionId
-  );
+  ensureSessionOwnership(sessionId, userId);
 
-  ensureMemoryRow(sessionId);
+  db.prepare(`
+    UPDATE sessions
+    SET updated_at = ?
+    WHERE id = ? AND user_id = ?
+  `).run(now, sessionId, userId);
 
-  db.prepare(`UPDATE session_memory SET updated_at = ? WHERE session_id = ?`).run(
-    now,
-    sessionId
-  );
+  ensureMemoryRow(sessionId, userId);
+
+  db.prepare(`
+    UPDATE session_memory
+    SET updated_at = ?
+    WHERE session_id = ? AND user_id = ?
+  `).run(now, sessionId, userId);
 }
 
-export function getSessionMemory(sessionId) {
+export function getSessionMemory(sessionId, userId) {
   const row = db
-    .prepare(`SELECT * FROM session_memory WHERE session_id = ?`)
-    .get(sessionId);
+    .prepare(`SELECT * FROM session_memory WHERE session_id = ? AND user_id = ?`)
+    .get(sessionId, userId);
 
   return normalizeMemoryRow(row);
 }
 
-export function updateSessionMemory(sessionId, patch = {}) {
-  ensureMemoryRow(sessionId);
+export function updateSessionMemory(sessionId, userId, patch = {}) {
+  ensureMemoryRow(sessionId, userId);
 
-  const current = getSessionMemory(sessionId) || {
+  const current = getSessionMemory(sessionId, userId) || {
     session_id: sessionId,
+    user_id: userId,
     last_role: null,
     last_message: null,
     last_intent: null,
@@ -260,7 +388,7 @@ export function updateSessionMemory(sessionId, patch = {}) {
       last_file_analysis = ?,
       last_context_json = ?,
       updated_at = ?
-    WHERE session_id = ?
+    WHERE session_id = ? AND user_id = ?
   `).run(
     serializeMemoryValue("last_role", next.last_role),
     serializeMemoryValue("last_message", next.last_message),
@@ -272,38 +400,18 @@ export function updateSessionMemory(sessionId, patch = {}) {
     serializeMemoryValue("last_file_analysis", next.last_file_analysis),
     serializeMemoryValue("last_context_json", next.last_context_json),
     now,
-    sessionId
+    sessionId,
+    userId
   );
 
-  return getSessionMemory(sessionId);
+  return getSessionMemory(sessionId, userId);
 }
 
-export function clearSessionMemory(sessionId) {
-  db.prepare(`DELETE FROM session_memory WHERE session_id = ?`).run(sessionId);
+export function clearSessionMemory(sessionId, userId) {
+  db.prepare(`
+    DELETE FROM session_memory
+    WHERE session_id = ? AND user_id = ?
+  `).run(sessionId, userId);
 }
-
-
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    email      TEXT    UNIQUE NOT NULL,
-    password   TEXT    NOT NULL,
-    name       TEXT    NOT NULL,
-    plan       TEXT    NOT NULL DEFAULT 'free',
-    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
-  );
-
-  CREATE TABLE IF NOT EXISTS auth_sessions (
-    id             TEXT    PRIMARY KEY,
-    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    token          TEXT    NOT NULL,
-    workspace_path TEXT,
-    workspace_name TEXT,
-    created_at     TEXT    NOT NULL,
-    last_active    TEXT    NOT NULL
-  );
-`);
-
-
 
 export default db;

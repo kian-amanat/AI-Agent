@@ -16,6 +16,7 @@ import {
   type SSEEvent,
   type UndoResult,
 } from "./lib/api";
+import AuthGuard from "./components/AuthGuard";
 
 import type { Conversation, Message } from "./components/chat/chat-types";
 import { AGENT_STAGES } from "./components/chat/chat-types";
@@ -598,6 +599,7 @@ export default function MinimalChatComponent() {
   ];
 
   return (
+    <AuthGuard>
     <div className="flex h-screen w-full overflow-hidden bg-[#161616] text-white">
       <ChatSidebar
         isSidebarCollapsed={isSidebarCollapsed}
@@ -789,5 +791,6 @@ export default function MinimalChatComponent() {
         </div>
       </section>
     </div>
+    </AuthGuard>
   );
 }
