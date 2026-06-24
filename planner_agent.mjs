@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 // --------- Config ----------
-const PROJECT_ROOT = process.cwd();
+const PROJECT_ROOT = process.env.WORKSPACE_PATH || process.cwd();
 const BACKEND_ROOT = path.join(PROJECT_ROOT, "backend");
 const FRONTEND_ROOT = path.join(PROJECT_ROOT, "frontend");
 const BACKEND_CWD_REL = path.relative(PROJECT_ROOT, BACKEND_ROOT) || "backend";

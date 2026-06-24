@@ -5,7 +5,7 @@ import { promises as fs } from "fs";
 import { listBackendFiles } from "./list_backend_files.js";
 import { readProjectFile } from "./readProjectFile.js";
 
-const PROJECT_ROOT = process.cwd();
+const PROJECT_ROOT = process.env.WORKSPACE_PATH || process.cwd();
 
 const IMPORT_REGEX = /import\s+(?:.+?\s+from\s+)?["'](.+?)["']/g;
 const REQUIRE_REGEX = /require\(["'](.+?)["']\)/g;

@@ -8,7 +8,7 @@ import { openai, VISION_MODEL } from "./backend1/config/openai.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = process.cwd();
+const PROJECT_ROOT = process.env.WORKSPACE_PATH || process.cwd();
 
 /**
  * helper: تشخیص ساده نوع فایل بر اساس پسوند

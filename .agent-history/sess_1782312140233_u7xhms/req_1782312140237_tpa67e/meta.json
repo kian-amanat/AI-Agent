@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess_1782312140233_u7xhms",
+  "requestId": "req_1782312140237_tpa67e",
+  "createdAt": "2026-06-24T14:42:44.043Z",
+  "files": [
+    {
+      "relativePath": "home.test.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/home.test.tsx",
+      "existedBefore": false,
+      "snapshotPath": null
+    }
+  ]
+}

@@ -5,7 +5,7 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export const PROJECT_ROOT = process.cwd();
+export const PROJECT_ROOT = process.env.WORKSPACE_PATH || process.cwd();
 export const BACKEND_ROOT = path.join(PROJECT_ROOT, "backend");
 export const FRONTEND_ROOT = path.join(PROJECT_ROOT, "frontend");
 export const PLANS_DIR = PROJECT_ROOT;
