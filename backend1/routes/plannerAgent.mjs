@@ -62,24 +62,47 @@ async function loadSettings() {
   }
 }
 
+function getAuthSessionFromRequest(request) {
+  try {
+    const auth = request.headers["authorization"];
+    if (!auth?.startsWith("Bearer ")) return null;
+
+    const token = auth.slice(7).trim();
+    const session = db
+      .prepare("SELECT user_id, workspace_path FROM auth_sessions WHERE token = ?")
+      .get(token);
+
+    return session || null;
+  } catch {
+    return null;
+  }
+}
+
 // [KODO] Read the workspace path bound by the VS Code extension from the auth session.
 // Returns empty string if the request has no valid token or no workspace is bound.
 function getWorkspaceFromRequest(request) {
   try {
-    const auth = request.headers["authorization"];
-    if (!auth?.startsWith("Bearer ")) return "";
-
-    const token = auth.slice(7);
-    const session = db
-      .prepare("SELECT workspace_path FROM auth_sessions WHERE token = ?")
-      .get(token);
-
+    const session = getAuthSessionFromRequest(request);
     const wp = session?.workspace_path || "";
     if (wp) console.log(`[Kodo] 📁 Workspace from auth session: ${wp}`);
     return wp;
   } catch {
     return "";
   }
+}
+
+function requireUserSession(request, reply) {
+  const authSession = getAuthSessionFromRequest(request);
+
+  if (!authSession?.user_id) {
+    reply.code(401).send({
+      ok: false,
+      error: "Unauthorized",
+    });
+    return null;
+  }
+
+  return authSession;
 }
 
 function startSSE(reply) {
@@ -186,31 +209,35 @@ function buildMemoryContext(memory) {
   return lines.join("\n").trim();
 }
 
-function syncSessionMemory(sessionId, {
-  userMessage = "",
-  assistantMessage = "",
-  attachmentPaths = [],
-  task = "",
-  taskType = "",
-  projectScope = "",
-  targetFile = "",
-} = {}) {
-  if (!sessionId) return;
+function syncSessionMemory(
+  sessionId,
+  userId,
+  {
+    userMessage = "",
+    assistantMessage = "",
+    attachmentPaths = [],
+    task = "",
+    taskType = "",
+    projectScope = "",
+    targetFile = "",
+  } = {}
+) {
+  if (!sessionId || !userId) return;
 
   if (typeof userMessage === "string" && userMessage.trim()) {
-    rememberUserMessage(sessionId, userMessage.trim());
+    rememberUserMessage(sessionId, userId, userMessage.trim());
   }
 
   if (Array.isArray(attachmentPaths) && attachmentPaths.length > 0) {
-    rememberFiles(sessionId, attachmentPaths);
+    rememberFiles(sessionId, userId, attachmentPaths);
   }
 
   if (typeof assistantMessage === "string" && assistantMessage.trim()) {
-    rememberAssistantMessage(sessionId, assistantMessage.trim());
+    rememberAssistantMessage(sessionId, userId, assistantMessage.trim());
   }
 
   if (task || taskType || projectScope) {
-    rememberTask(sessionId, {
+    rememberTask(sessionId, userId, {
       task: task || null,
       taskType: taskType || null,
       projectScope: projectScope || null,
@@ -218,7 +245,7 @@ function syncSessionMemory(sessionId, {
   }
 
   if (typeof targetFile === "string" && targetFile.trim()) {
-    rememberTargetFile(sessionId, targetFile.trim());
+    rememberTargetFile(sessionId, userId, targetFile.trim());
   }
 }
 
@@ -308,7 +335,9 @@ function runFileAgent({ files, userMessage = "" }) {
     let stdout = "";
     let stderr = "";
 
-    child.stdout.on("data", (data) => { stdout += data.toString(); });
+    child.stdout.on("data", (data) => {
+      stdout += data.toString();
+    });
     child.stderr.on("data", (data) => {
       stderr += data.toString();
       process.stderr.write(data);
@@ -318,11 +347,17 @@ function runFileAgent({ files, userMessage = "" }) {
       if (code === 0) {
         resolve(parseFileAgentOutput(stdout));
       } else {
-        reject(new Error(stderr.trim() || stdout.trim() || `file_agent exited with code ${code}`));
+        reject(
+          new Error(
+            stderr.trim() || stdout.trim() || `file_agent exited with code ${code}`
+          )
+        );
       }
     });
 
-    child.on("error", (error) => { reject(error); });
+    child.on("error", (error) => {
+      reject(error);
+    });
   });
 }
 
@@ -346,16 +381,19 @@ async function transcribeAudio(audioPath) {
     console.error("❌ Whisper transcription error via SDK:", err);
 
     if (err?.code === "api_limit" || err?.status === 429) {
-      throw new Error("Whisper API rate limit reached (429). Please wait or check your GapGPT plan/quota.");
+      throw new Error(
+        "Whisper API rate limit reached (429). Please wait or check your GapGPT plan/quota."
+      );
     }
 
     const apiError = err?.error || err?.response || err;
-    throw new Error(`Whisper transcription failed via SDK: ${apiError?.message || String(apiError)}`);
+    throw new Error(
+      `Whisper transcription failed via SDK: ${apiError?.message || String(apiError)}`
+    );
   }
 }
 
 export default async function plannerAgentRoute(fastify) {
-
   // [KODO] Capabilities endpoint — frontend checks this on load
   fastify.get("/capabilities", async (request, reply) => {
     setCors(reply);
@@ -365,6 +403,11 @@ export default async function plannerAgentRoute(fastify) {
 
   fastify.post("/run", async (request, reply) => {
     setCors(reply);
+
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+
+    const userId = authSession.user_id;
 
     const body = await parseIncomingPayload(request);
 
@@ -387,12 +430,15 @@ export default async function plannerAgentRoute(fastify) {
 
     // [KODO] Get the workspace path bound by the VS Code extension.
     // Falls back to empty string if no auth token or no workspace bound.
-    const workspacePath = getWorkspaceFromRequest(request);
+    const workspacePath = authSession.workspace_path || "";
 
     console.log("BODY RECEIVED =>", body);
     console.log("MESSAGE =>", message);
     console.log("ATTACHMENT PATHS =>", attachment_paths);
-    console.log("WORKSPACE PATH =>", workspacePath || "(not set — will use pipeline default)");
+    console.log(
+      "WORKSPACE PATH =>",
+      workspacePath || "(not set — will use pipeline default)"
+    );
 
     // [KODO] Smart model routing
     const settings = await loadSettings();
@@ -427,7 +473,9 @@ export default async function plannerAgentRoute(fastify) {
     }
 
     if (modelRoute.switchedModel) {
-      console.log(`[Kodo] 🔄 Auto-switched: ${modelRoute.switchedFrom} → ${modelRoute.switchedTo}`);
+      console.log(
+        `[Kodo] 🔄 Auto-switched: ${modelRoute.switchedFrom} → ${modelRoute.switchedTo}`
+      );
     } else {
       console.log(`[Kodo] 🤖 Using model: ${modelRoute.provider}/${modelRoute.model}`);
     }
@@ -441,13 +489,16 @@ export default async function plannerAgentRoute(fastify) {
         ? session_id.trim()
         : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
-    const memory = getMemory(sessionId);
+    const memory = getMemory(sessionId, userId);
     const memoryContext = buildMemoryContext(memory);
 
     let fileAnalysisContext = "";
     if (attachment_paths.length > 0) {
       try {
-        const fileAnalysis = await runFileAgent({ files: attachment_paths, userMessage: message });
+        const fileAnalysis = await runFileAgent({
+          files: attachment_paths,
+          userMessage: message,
+        });
         fileAnalysisContext = buildFileAnalysisContext(fileAnalysis);
       } catch (error) {
         console.warn("⚠️ File analysis agent failed:", error.message);
@@ -458,7 +509,9 @@ export default async function plannerAgentRoute(fastify) {
       message || (attachments.length ? "Please analyze the uploaded attachment(s)." : "");
 
     if (!effectiveMessage) {
-      return reply.code(400).send({ ok: false, error: "Message is required and must be a string" });
+      return reply
+        .code(400)
+        .send({ ok: false, error: "Message is required and must be a string" });
     }
 
     const explicitFileRefs = extractCandidateFilePaths(message);
@@ -478,11 +531,11 @@ export default async function plannerAgentRoute(fastify) {
 
     const sessionLabel = normalizeSessionLabel(message, attachments);
 
-    createSession(sessionId, sessionLabel);
-    saveMessage(sessionId, "user", effectiveMessage);
-    touchSession(sessionId);
+    createSession(sessionId, userId, sessionLabel);
+    saveMessage(sessionId, userId, "user", effectiveMessage);
+    touchSession(sessionId, userId);
 
-    syncSessionMemory(sessionId, {
+    syncSessionMemory(sessionId, userId, {
       userMessage: effectiveMessage,
       attachmentPaths: attachment_paths,
     });
@@ -511,14 +564,24 @@ export default async function plannerAgentRoute(fastify) {
             ? "💙 I hear you, and I'm really glad you reached out. Please talk to someone who can help right now:\n\n• **Iran Crisis Line:** ☎️ 1480\n• **International:** https://findahelpline.com\n\nYou don't have to go through this alone. 💙"
             : "💙 می‌فهمم که الان خیلی سخته. لطفاً همین الان با یه متخصص صحبت کن:\n\n• **اورژانس اجتماعی ایران:** ☎️ ۱۲۳\n• **خط بحران:** ☎️ ۱۴۸۰\n\nتنها نیستی. 💙";
 
-        reply.raw.write(`data: ${JSON.stringify({ type: "start", id: msgId, session_id: sessionId, createdAt: timestamp, metadata: { intent: "crisis", ...modelMeta } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "start",
+            id: msgId,
+            session_id: sessionId,
+            createdAt: timestamp,
+            metadata: { intent: "crisis", ...modelMeta },
+          })}\n\n`
+        );
         reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "crisis" } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({ type: "done", metadata: { type: "crisis" } })}\n\n`
+        );
         reply.raw.end();
 
-        saveMessage(sessionId, "assistant", content, "crisis");
-        touchSession(sessionId);
-        syncSessionMemory(sessionId, { assistantMessage: content });
+        saveMessage(sessionId, userId, "assistant", content, "crisis");
+        touchSession(sessionId, userId);
+        syncSessionMemory(sessionId, userId, { assistantMessage: content });
         return reply;
       }
 
@@ -531,14 +594,27 @@ export default async function plannerAgentRoute(fastify) {
           modelRoute
         );
 
-        reply.raw.write(`data: ${JSON.stringify({ type: "start", id: msgId, session_id: sessionId, createdAt: timestamp, metadata: { intent: "inspection", ...modelMeta } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "start",
+            id: msgId,
+            session_id: sessionId,
+            createdAt: timestamp,
+            metadata: { intent: "inspection", ...modelMeta },
+          })}\n\n`
+        );
         reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "inspection" } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "done",
+            metadata: { type: "inspection" },
+          })}\n\n`
+        );
         reply.raw.end();
 
-        saveMessage(sessionId, "assistant", content, "inspection");
-        touchSession(sessionId);
-        syncSessionMemory(sessionId, { assistantMessage: content });
+        saveMessage(sessionId, userId, "assistant", content, "inspection");
+        touchSession(sessionId, userId);
+        syncSessionMemory(sessionId, userId, { assistantMessage: content });
         return reply;
       }
 
@@ -551,14 +627,30 @@ export default async function plannerAgentRoute(fastify) {
           modelRoute
         );
 
-        reply.raw.write(`data: ${JSON.stringify({ type: "start", id: msgId, session_id: sessionId, createdAt: timestamp, metadata: { intent: "code_request", ...modelMeta } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "start",
+            id: msgId,
+            session_id: sessionId,
+            createdAt: timestamp,
+            metadata: { intent: "code_request", ...modelMeta },
+          })}\n\n`
+        );
         reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "code_request" } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "done",
+            metadata: { type: "code_request" },
+          })}\n\n`
+        );
         reply.raw.end();
 
-        saveMessage(sessionId, "assistant", content, "code_request");
-        touchSession(sessionId);
-        syncSessionMemory(sessionId, { assistantMessage: content, targetFile: rememberedTargetFile });
+        saveMessage(sessionId, userId, "assistant", content, "code_request");
+        touchSession(sessionId, userId);
+        syncSessionMemory(sessionId, userId, {
+          assistantMessage: content,
+          targetFile: rememberedTargetFile,
+        });
         return reply;
       }
 
@@ -570,32 +662,55 @@ export default async function plannerAgentRoute(fastify) {
           modelRoute
         );
 
-        reply.raw.write(`data: ${JSON.stringify({ type: "start", id: msgId, session_id: sessionId, createdAt: timestamp, metadata: { intent: "greeting", ...modelMeta } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "start",
+            id: msgId,
+            session_id: sessionId,
+            createdAt: timestamp,
+            metadata: { intent: "greeting", ...modelMeta },
+          })}\n\n`
+        );
         reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "greeting" } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "done",
+            metadata: { type: "greeting" },
+          })}\n\n`
+        );
         reply.raw.end();
 
-        saveMessage(sessionId, "assistant", content, "greeting");
-        touchSession(sessionId);
-        syncSessionMemory(sessionId, { assistantMessage: content });
+        saveMessage(sessionId, userId, "assistant", content, "greeting");
+        touchSession(sessionId, userId);
+        syncSessionMemory(sessionId, userId, { assistantMessage: content });
         return reply;
       }
 
       if (intent.type === "clarification") {
         startSSE(reply);
-        const content = await generateClarificationResponse(
-          effectiveMessage,
-          modelRoute
-        );
+        const content = await generateClarificationResponse(effectiveMessage, modelRoute);
 
-        reply.raw.write(`data: ${JSON.stringify({ type: "start", id: msgId, session_id: sessionId, createdAt: timestamp, metadata: { intent: "clarification", ...modelMeta } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "start",
+            id: msgId,
+            session_id: sessionId,
+            createdAt: timestamp,
+            metadata: { intent: "clarification", ...modelMeta },
+          })}\n\n`
+        );
         reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "clarification" } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "done",
+            metadata: { type: "clarification" },
+          })}\n\n`
+        );
         reply.raw.end();
 
-        saveMessage(sessionId, "assistant", content, "clarification");
-        touchSession(sessionId);
-        syncSessionMemory(sessionId, { assistantMessage: content });
+        saveMessage(sessionId, userId, "assistant", content, "clarification");
+        touchSession(sessionId, userId);
+        syncSessionMemory(sessionId, userId, { assistantMessage: content });
         return reply;
       }
 
@@ -605,14 +720,47 @@ export default async function plannerAgentRoute(fastify) {
         const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
         console.log("[AGENT /run] pipeline call", { sessionId, requestId, workspacePath });
 
-        reply.raw.write(`data: ${JSON.stringify({ type: "start", id: msgId, session_id: sessionId, request_id: requestId, createdAt: timestamp, metadata: { intent: intent.type, ...modelMeta } })}\n\n`);
-        reply.raw.write(`data: ${JSON.stringify({ type: "progress", stage: "pipeline_start", message: lang === "en" ? "🚀 Starting full development pipeline..." : "🚀 شروع پایپلاین کامل توسعه..." })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "start",
+            id: msgId,
+            session_id: sessionId,
+            request_id: requestId,
+            createdAt: timestamp,
+            metadata: { intent: intent.type, ...modelMeta },
+          })}\n\n`
+        );
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "progress",
+            stage: "pipeline_start",
+            message:
+              lang === "en"
+                ? "🚀 Starting full development pipeline..."
+                : "🚀 شروع پایپلاین کامل توسعه...",
+          })}\n\n`
+        );
 
         if (modelRoute.switchedModel) {
-          reply.raw.write(`data: ${JSON.stringify({ type: "progress", stage: "model_switch", message: `🔄 Switched to ${modelRoute.switchedTo} for file analysis` })}\n\n`);
+          reply.raw.write(
+            `data: ${JSON.stringify({
+              type: "progress",
+              stage: "model_switch",
+              message: `🔄 Switched to ${modelRoute.switchedTo} for file analysis`,
+            })}\n\n`
+          );
         }
 
-        reply.raw.write(`data: ${JSON.stringify({ type: "progress", stage: "planning", message: lang === "en" ? "📋 Phase 1/5: Planning architecture..." : "📋 فاز 1/5: طراحی معماری..." })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "progress",
+            stage: "planning",
+            message:
+              lang === "en"
+                ? "📋 Phase 1/5: Planning architecture..."
+                : "📋 فاز 1/5: طراحی معماری...",
+          })}\n\n`
+        );
 
         try {
           // [KODO] Pass workspacePath so pipeline writes to the correct project
@@ -625,12 +773,25 @@ export default async function plannerAgentRoute(fastify) {
             workspacePath,
           });
         } catch (pipelineError) {
-          reply.raw.write(`data: ${JSON.stringify({ type: "error", error: "Pipeline execution failed", details: pipelineError.message, request_id: requestId })}\n\n`);
+          reply.raw.write(
+            `data: ${JSON.stringify({
+              type: "error",
+              error: "Pipeline execution failed",
+              details: pipelineError.message,
+              request_id: requestId,
+            })}\n\n`
+          );
           reply.raw.end();
 
-          saveMessage(sessionId, "assistant", `Pipeline failed: ${pipelineError.message}`, "technical");
-          touchSession(sessionId);
-          syncSessionMemory(sessionId, {
+          saveMessage(
+            sessionId,
+            userId,
+            "assistant",
+            `Pipeline failed: ${pipelineError.message}`,
+            "technical"
+          );
+          touchSession(sessionId, userId);
+          syncSessionMemory(sessionId, userId, {
             assistantMessage: `Pipeline failed: ${pipelineError.message}`,
             task: effectiveMessage,
             taskType: intent.type,
@@ -640,7 +801,16 @@ export default async function plannerAgentRoute(fastify) {
           return reply;
         }
 
-        reply.raw.write(`data: ${JSON.stringify({ type: "progress", stage: "completed", message: lang === "en" ? "✅ All phases completed! Preparing summary..." : "✅ همه فازها تکمیل شد! آماده‌سازی خلاصه..." })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "progress",
+            stage: "completed",
+            message:
+              lang === "en"
+                ? "✅ All phases completed! Preparing summary..."
+                : "✅ همه فازها تکمیل شد! آماده‌سازی خلاصه...",
+          })}\n\n`
+        );
 
         const plannerPlanPath = path.resolve(PLANS_DIR, "planner_plan.json");
         let plan = {};
@@ -652,19 +822,51 @@ export default async function plannerAgentRoute(fastify) {
           console.warn("⚠️  Could not read planner_plan.json:", err.message);
         }
 
-        reply.raw.write(`data: ${JSON.stringify({ type: "plan_metadata", plan_file: latestPlan, plan_path: plannerPlanPath, phases_count: plan.phases?.length || 0, files_count: plan.files?.length || 0, tech_stack: plan.tech_stack || {} })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "plan_metadata",
+            plan_file: latestPlan,
+            plan_path: plannerPlanPath,
+            phases_count: plan.phases?.length || 0,
+            files_count: plan.files?.length || 0,
+            tech_stack: plan.tech_stack || {},
+          })}\n\n`
+        );
 
         const summary = await streamPlanSummary(plan, plannerContextMessage, reply, modelRoute);
 
-        reply.raw.write(`data: ${JSON.stringify({ type: "done", summary, metadata: { type: "pipeline", intent: intent.type, plan_file: latestPlan, plan_path: plannerPlanPath, plan_summary: { name: plan.name, project_type: plan.project_type, goal: plan.goal, tech_stack: plan.tech_stack, phases_count: plan.phases?.length || 0, files_count: plan.files?.length || 0 }, plan, full_plan_url: `/api/agent/plan/${latestPlan}`, request_id: requestId, ...modelMeta } })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "done",
+            summary,
+            metadata: {
+              type: "pipeline",
+              intent: intent.type,
+              plan_file: latestPlan,
+              plan_path: plannerPlanPath,
+              plan_summary: {
+                name: plan.name,
+                project_type: plan.project_type,
+                goal: plan.goal,
+                tech_stack: plan.tech_stack,
+                phases_count: plan.phases?.length || 0,
+                files_count: plan.files?.length || 0,
+              },
+              plan,
+              full_plan_url: `/api/agent/plan/${latestPlan}`,
+              request_id: requestId,
+              ...modelMeta,
+            },
+          })}\n\n`
+        );
         reply.raw.end();
 
-        saveMessage(sessionId, "assistant", summary, "technical");
-        touchSession(sessionId);
+        saveMessage(sessionId, userId, "assistant", summary, "technical");
+        touchSession(sessionId, userId);
 
         const primaryTargetFile = extractPrimaryTargetFile(plan) || rememberedTargetFile || "";
 
-        syncSessionMemory(sessionId, {
+        syncSessionMemory(sessionId, userId, {
           assistantMessage: summary,
           task: effectiveMessage,
           taskType: intent.type,
@@ -679,23 +881,45 @@ export default async function plannerAgentRoute(fastify) {
       startSSE(reply);
       const content = await generateCasualResponse(effectiveMessage, modelRoute);
 
-      reply.raw.write(`data: ${JSON.stringify({ type: "start", id: msgId, session_id: sessionId, createdAt: timestamp, metadata: { intent: "casual", ...modelMeta } })}\n\n`);
+      reply.raw.write(
+        `data: ${JSON.stringify({
+          type: "start",
+          id: msgId,
+          session_id: sessionId,
+          createdAt: timestamp,
+          metadata: { intent: "casual", ...modelMeta },
+        })}\n\n`
+      );
       reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-      reply.raw.write(`data: ${JSON.stringify({ type: "done", metadata: { type: "casual" } })}\n\n`);
+      reply.raw.write(
+        `data: ${JSON.stringify({
+          type: "done",
+          metadata: { type: "casual" },
+        })}\n\n`
+      );
       reply.raw.end();
 
-      saveMessage(sessionId, "assistant", content, "casual");
-      touchSession(sessionId);
-      syncSessionMemory(sessionId, { assistantMessage: content });
+      saveMessage(sessionId, userId, "assistant", content, "casual");
+      touchSession(sessionId, userId);
+      syncSessionMemory(sessionId, userId, { assistantMessage: content });
       return reply;
-
     } catch (error) {
       console.error("❌ Error in agent route:", error);
       if (reply.raw.headersSent) {
-        reply.raw.write(`data: ${JSON.stringify({ type: "error", error: "Internal server error", details: error.message })}\n\n`);
+        reply.raw.write(
+          `data: ${JSON.stringify({
+            type: "error",
+            error: "Internal server error",
+            details: error.message,
+          })}\n\n`
+        );
         reply.raw.end();
       } else {
-        return reply.code(500).send({ ok: false, error: "Internal server error", details: error.message });
+        return reply.code(500).send({
+          ok: false,
+          error: "Internal server error",
+          details: error.message,
+        });
       }
     }
   });
@@ -716,37 +940,69 @@ export default async function plannerAgentRoute(fastify) {
       if (error.code === "ENOENT") {
         return reply.code(404).send({ ok: false, error: "Plan not found" });
       }
-      return reply.code(500).send({ ok: false, error: "Failed to read plan", details: error.message });
+      return reply.code(500).send({
+        ok: false,
+        error: "Failed to read plan",
+        details: error.message,
+      });
     }
   });
 
   fastify.get("/sessions", async (request, reply) => {
     setCors(reply);
+
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+
     try {
-      const sessions = listSessions();
+      const sessions = listSessions(authSession.user_id);
       return reply.send({ ok: true, sessions });
     } catch (error) {
-      return reply.code(500).send({ ok: false, error: "Failed to list sessions", details: error.message });
+      return reply.code(500).send({
+        ok: false,
+        error: "Failed to list sessions",
+        details: error.message,
+      });
     }
   });
 
   fastify.get("/sessions/:sessionId", async (request, reply) => {
     setCors(reply);
+
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+
     try {
-      const messages = getSessionMessages(request.params.sessionId);
-      return reply.send({ ok: true, session_id: request.params.sessionId, messages });
+      const messages = getSessionMessages(request.params.sessionId, authSession.user_id);
+      return reply.send({
+        ok: true,
+        session_id: request.params.sessionId,
+        messages,
+      });
     } catch (error) {
-      return reply.code(500).send({ ok: false, error: "Failed to get session", details: error.message });
+      return reply.code(500).send({
+        ok: false,
+        error: "Failed to get session",
+        details: error.message,
+      });
     }
   });
 
   fastify.delete("/sessions/:sessionId", async (request, reply) => {
     setCors(reply);
+
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+
     try {
-      deleteSession(request.params.sessionId);
+      deleteSession(request.params.sessionId, authSession.user_id);
       return reply.send({ ok: true, deleted: request.params.sessionId });
     } catch (error) {
-      return reply.code(500).send({ ok: false, error: "Failed to delete session", details: error.message });
+      return reply.code(500).send({
+        ok: false,
+        error: "Failed to delete session",
+        details: error.message,
+      });
     }
   });
 
@@ -756,12 +1012,19 @@ export default async function plannerAgentRoute(fastify) {
 
     try {
       if (typeof request.file !== "function") {
-        return reply.code(400).send({ ok: false, error: "Multipart upload is not enabled. Install and register @fastify/multipart." });
+        return reply.code(400).send({
+          ok: false,
+          error:
+            "Multipart upload is not enabled. Install and register @fastify/multipart.",
+        });
       }
 
       const data = await request.file();
       if (!data) {
-        return reply.code(400).send({ ok: false, error: "No audio file provided. Upload audio file in 'audio' field." });
+        return reply.code(400).send({
+          ok: false,
+          error: "No audio file provided. Upload audio file in 'audio' field.",
+        });
       }
 
       const tempDir = path.join(process.cwd(), "temp_audio");
@@ -785,13 +1048,15 @@ export default async function plannerAgentRoute(fastify) {
         transcribed_text: transcript,
         session_id: session_id || undefined,
         attachment_paths: attachment_paths.length > 0 ? attachment_paths : undefined,
-        message: "Audio transcribed successfully. Use the 'transcribed_text' as the message for /run endpoint.",
+        message:
+          "Audio transcribed successfully. Use the 'transcribed_text' as the message for /run endpoint.",
       });
     } catch (error) {
       console.error("❌ Transcription endpoint error:", error);
 
       const msg = error.message || "";
-      const isRateLimit = msg.includes("rate limit") || msg.includes("429") || error.code === "api_limit";
+      const isRateLimit =
+        msg.includes("rate limit") || msg.includes("429") || error.code === "api_limit";
 
       return reply.code(isRateLimit ? 429 : 500).send({
         ok: false,
@@ -805,6 +1070,9 @@ export default async function plannerAgentRoute(fastify) {
 
   fastify.post("/undo", async (request, reply) => {
     setCors(reply);
+
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
 
     try {
       const body = await parseIncomingPayload(request);
@@ -820,17 +1088,33 @@ export default async function plannerAgentRoute(fastify) {
           : null;
 
       if (!sessionId || !requestId) {
-        return reply.code(400).send({ ok: false, error: "session_id and request_id are required" });
+        return reply.code(400).send({
+          ok: false,
+          error: "session_id and request_id are required",
+        });
       }
 
       console.log(`🕙 Undo requested for session=${sessionId}, request=${requestId}`);
 
-      const result = undoRequestChanges({ sessionId, requestId });
+      const result = undoRequestChanges({
+        sessionId,
+        requestId,
+        userId: authSession.user_id,
+      });
 
-      return reply.send({ ok: true, session_id: sessionId, request_id: requestId, result });
+      return reply.send({
+        ok: true,
+        session_id: sessionId,
+        request_id: requestId,
+        result,
+      });
     } catch (err) {
       console.error("❌ Error in /undo route:", err);
-      return reply.code(500).send({ ok: false, error: "Failed to undo changes", details: err.message });
+      return reply.code(500).send({
+        ok: false,
+        error: "Failed to undo changes",
+        details: err.message,
+      });
     }
   });
 }

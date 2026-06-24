@@ -236,10 +236,18 @@ async function parseSSE(
 }
 
 export async function fetchSessions(): Promise<Session[]> {
+  const token = getToken();
+  if (!token) return [];
+
   const res = await fetch(`${BASE_URL}/sessions`, {
     method: "GET",
     cache: "no-store",
+    headers: authHeaders(),
   });
+
+  if (res.status === 401) {
+    return [];
+  }
 
   const data = await readJson<SessionsResponse>(res);
 
@@ -250,11 +258,17 @@ export async function fetchSessions(): Promise<Session[]> {
   return Array.isArray(data.sessions) ? data.sessions : [];
 }
 
-export async function fetchSessionMessages(sessionId: string): Promise<Message[]> {
-  const res = await fetch(`${BASE_URL}/sessions/${encodeURIComponent(sessionId)}`, {
-    method: "GET",
-    cache: "no-store",
-  });
+export async function fetchSessionMessages(
+  sessionId: string
+): Promise<Message[]> {
+  const res = await fetch(
+    `${BASE_URL}/sessions/${encodeURIComponent(sessionId)}`,
+    {
+      method: "GET",
+      cache: "no-store",
+      headers: authHeaders(),
+    }
+  );
 
   const data = await readJson<MessagesResponse>(res);
 
