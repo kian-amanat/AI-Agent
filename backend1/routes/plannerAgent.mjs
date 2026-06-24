@@ -45,6 +45,9 @@ import { undoRequestChanges } from "../services/undo.service.mjs";
 // [KODO] Smart model routing
 import { routeModel, getCapabilities } from "../services/modelRouter.mjs";
 
+// [KODO] Auth db — to read workspace_path from the authenticated session
+import db from "../db.mjs";
+
 const FILE_AGENT_SCRIPT = path.resolve(process.cwd(), "../file_agent.mjs");
 
 // [KODO] Settings loader
@@ -56,6 +59,26 @@ async function loadSettings() {
     return JSON.parse(raw);
   } catch {
     return null;
+  }
+}
+
+// [KODO] Read the workspace path bound by the VS Code extension from the auth session.
+// Returns empty string if the request has no valid token or no workspace is bound.
+function getWorkspaceFromRequest(request) {
+  try {
+    const auth = request.headers["authorization"];
+    if (!auth?.startsWith("Bearer ")) return "";
+
+    const token = auth.slice(7);
+    const session = db
+      .prepare("SELECT workspace_path FROM auth_sessions WHERE token = ?")
+      .get(token);
+
+    const wp = session?.workspace_path || "";
+    if (wp) console.log(`[Kodo] 📁 Workspace from auth session: ${wp}`);
+    return wp;
+  } catch {
+    return "";
   }
 }
 
@@ -362,9 +385,14 @@ export default async function plannerAgentRoute(fastify) {
       ...toStringArray(body.files),
     ]);
 
+    // [KODO] Get the workspace path bound by the VS Code extension.
+    // Falls back to empty string if no auth token or no workspace bound.
+    const workspacePath = getWorkspaceFromRequest(request);
+
     console.log("BODY RECEIVED =>", body);
     console.log("MESSAGE =>", message);
     console.log("ATTACHMENT PATHS =>", attachment_paths);
+    console.log("WORKSPACE PATH =>", workspacePath || "(not set — will use pipeline default)");
 
     // [KODO] Smart model routing
     const settings = await loadSettings();
@@ -496,7 +524,6 @@ export default async function plannerAgentRoute(fastify) {
 
       if (intent.type === "inspection") {
         startSSE(reply);
-        // [KODO] ✅ modelRoute passed
         const content = await generateInspectionResponse(
           plannerContextMessage,
           attachments,
@@ -517,7 +544,6 @@ export default async function plannerAgentRoute(fastify) {
 
       if (intent.type === "code_request") {
         startSSE(reply);
-        // [KODO] ✅ modelRoute passed
         const content = await generateCodeResponse(
           plannerContextMessage,
           attachments,
@@ -538,7 +564,6 @@ export default async function plannerAgentRoute(fastify) {
 
       if (intent.type === "greeting") {
         startSSE(reply);
-        // [KODO] ✅ modelRoute passed
         const content = await generateGreetingResponse(
           effectiveMessage,
           sessionId,
@@ -558,7 +583,6 @@ export default async function plannerAgentRoute(fastify) {
 
       if (intent.type === "clarification") {
         startSSE(reply);
-        // [KODO] ✅ modelRoute passed
         const content = await generateClarificationResponse(
           effectiveMessage,
           modelRoute
@@ -579,12 +603,11 @@ export default async function plannerAgentRoute(fastify) {
         startSSE(reply);
 
         const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        console.log("[AGENT /run] pipeline call", { sessionId, requestId });
+        console.log("[AGENT /run] pipeline call", { sessionId, requestId, workspacePath });
 
         reply.raw.write(`data: ${JSON.stringify({ type: "start", id: msgId, session_id: sessionId, request_id: requestId, createdAt: timestamp, metadata: { intent: intent.type, ...modelMeta } })}\n\n`);
         reply.raw.write(`data: ${JSON.stringify({ type: "progress", stage: "pipeline_start", message: lang === "en" ? "🚀 Starting full development pipeline..." : "🚀 شروع پایپلاین کامل توسعه..." })}\n\n`);
 
-        // [KODO] Show model switch if happened
         if (modelRoute.switchedModel) {
           reply.raw.write(`data: ${JSON.stringify({ type: "progress", stage: "model_switch", message: `🔄 Switched to ${modelRoute.switchedTo} for file analysis` })}\n\n`);
         }
@@ -592,12 +615,14 @@ export default async function plannerAgentRoute(fastify) {
         reply.raw.write(`data: ${JSON.stringify({ type: "progress", stage: "planning", message: lang === "en" ? "📋 Phase 1/5: Planning architecture..." : "📋 فاز 1/5: طراحی معماری..." })}\n\n`);
 
         try {
+          // [KODO] Pass workspacePath so pipeline writes to the correct project
           await runPipeline({
             message: plannerContextMessage,
             sessionId,
             requestId,
             attachmentPaths: attachment_paths,
             audioPath: "",
+            workspacePath,
           });
         } catch (pipelineError) {
           reply.raw.write(`data: ${JSON.stringify({ type: "error", error: "Pipeline execution failed", details: pipelineError.message, request_id: requestId })}\n\n`);
@@ -629,7 +654,6 @@ export default async function plannerAgentRoute(fastify) {
 
         reply.raw.write(`data: ${JSON.stringify({ type: "plan_metadata", plan_file: latestPlan, plan_path: plannerPlanPath, phases_count: plan.phases?.length || 0, files_count: plan.files?.length || 0, tech_stack: plan.tech_stack || {} })}\n\n`);
 
-        // [KODO] ✅ modelRoute passed to streamPlanSummary
         const summary = await streamPlanSummary(plan, plannerContextMessage, reply, modelRoute);
 
         reply.raw.write(`data: ${JSON.stringify({ type: "done", summary, metadata: { type: "pipeline", intent: intent.type, plan_file: latestPlan, plan_path: plannerPlanPath, plan_summary: { name: plan.name, project_type: plan.project_type, goal: plan.goal, tech_stack: plan.tech_stack, phases_count: plan.phases?.length || 0, files_count: plan.files?.length || 0 }, plan, full_plan_url: `/api/agent/plan/${latestPlan}`, request_id: requestId, ...modelMeta } })}\n\n`);
@@ -653,7 +677,6 @@ export default async function plannerAgentRoute(fastify) {
       }
 
       startSSE(reply);
-      // [KODO] ✅ modelRoute passed
       const content = await generateCasualResponse(effectiveMessage, modelRoute);
 
       reply.raw.write(`data: ${JSON.stringify({ type: "start", id: msgId, session_id: sessionId, createdAt: timestamp, metadata: { intent: "casual", ...modelMeta } })}\n\n`);

@@ -282,4 +282,28 @@ export function clearSessionMemory(sessionId) {
   db.prepare(`DELETE FROM session_memory WHERE session_id = ?`).run(sessionId);
 }
 
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS users (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    email      TEXT    UNIQUE NOT NULL,
+    password   TEXT    NOT NULL,
+    name       TEXT    NOT NULL,
+    plan       TEXT    NOT NULL DEFAULT 'free',
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+  );
+
+  CREATE TABLE IF NOT EXISTS auth_sessions (
+    id             TEXT    PRIMARY KEY,
+    user_id        INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token          TEXT    NOT NULL,
+    workspace_path TEXT,
+    workspace_name TEXT,
+    created_at     TEXT    NOT NULL,
+    last_active    TEXT    NOT NULL
+  );
+`);
+
+
+
 export default db;

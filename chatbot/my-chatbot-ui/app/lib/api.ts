@@ -2,7 +2,7 @@ const BASE_URL = "http://localhost:9000/api/agent";
 const UPLOAD_URL = `${BASE_URL}/upload`;
 const TRANSCRIBE_URL = `${BASE_URL}/transcribe`;
 const SETTINGS_URL = "http://localhost:9000/api/settings";
-
+const AUTH_URL = "http://localhost:9000/api/auth";
 
 export interface Session {
   id: string;
@@ -315,6 +315,8 @@ export async function callUndo(
 }
 
 // 🔹 sendMessage: کار با SSEEvent
+// Replace the entire sendMessage function in app/lib/api.ts
+
 export function sendMessage(
   message: string,
   file: File | File[] | null,
@@ -352,10 +354,16 @@ export function sendMessage(
         ...(attachmentPaths.length ? { attachment_paths: attachmentPaths } : {}),
       };
 
+      // [KODO] Include auth token so the backend can look up the workspace path
+      // bound by the VS Code extension for this user's session.
+      const token =
+        typeof window !== "undefined" ? localStorage.getItem("kodo_token") : null;
+
       const res = await fetch(`${BASE_URL}/run`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify(payload),
         signal: controller.signal,
@@ -508,4 +516,140 @@ export async function testConnection(model: string, apiKey: string, baseUrl?: st
   const data = await readJson<{ ok: boolean; message?: string; error?: string }>(res);
   if (!res.ok || !data.ok) throw new Error(data.error || "Test failed");
   return data.message || "Connected";
+}
+
+// ============================================================
+// Auth API
+// ============================================================
+// Paste this block at the bottom of app/lib/api.ts
+
+
+export interface User {
+  id: number;
+  email: string;
+  name: string;
+  plan: string;
+  created_at: string;
+}
+
+type AuthResponse = {
+  ok: boolean;
+  error?: string;
+  token?: string;
+  sessionId?: string;
+  user?: User;
+};
+
+type MeResponse = {
+  ok: boolean;
+  error?: string;
+  user?: User;
+  session?: {
+    id: string;
+    workspace_path: string | null;
+    workspace_name: string | null;
+  };
+};
+
+function getToken(): string | null {
+  if (typeof window === "undefined") return null;
+  return localStorage.getItem("kodo_token");
+}
+
+function authHeaders(): Record<string, string> {
+  const token = getToken();
+  return {
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+}
+
+// Notifies the VS Code extension that login succeeded
+// by writing the token to ~/.kodo/token.json via the handshake endpoint
+async function notifyExtension(token: string, sessionId: string): Promise<void> {
+  try {
+    await fetch(`${AUTH_URL}/handshake`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, sessionId }),
+    });
+  } catch {
+    // Non-critical — extension stays in "waiting" state if this fails
+  }
+}
+
+export async function apiSignup(
+  email: string,
+  password: string,
+  name: string
+): Promise<AuthResponse> {
+  const res = await fetch(`${AUTH_URL}/signup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, name }),
+  });
+
+  const data = await readJson<AuthResponse>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Signup failed");
+
+  localStorage.setItem("kodo_token", data.token!);
+  localStorage.setItem("kodo_session_id", data.sessionId!);
+
+  await notifyExtension(data.token!, data.sessionId!);
+
+  return data;
+}
+
+export async function apiLogin(
+  email: string,
+  password: string
+): Promise<AuthResponse> {
+  const res = await fetch(`${AUTH_URL}/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password }),
+  });
+
+  const data = await readJson<AuthResponse>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Login failed");
+
+  localStorage.setItem("kodo_token", data.token!);
+  localStorage.setItem("kodo_session_id", data.sessionId!);
+
+  await notifyExtension(data.token!, data.sessionId!);
+
+  return data;
+}
+
+export async function apiLogout(): Promise<void> {
+  try {
+    await fetch(`${AUTH_URL}/logout`, {
+      method: "POST",
+      headers: authHeaders(),
+    });
+    // Clear the handshake file so the extension detects logout
+    await fetch(`${AUTH_URL}/handshake`, { method: "DELETE" });
+  } catch {
+    // Best-effort — always clear local state
+  }
+
+  localStorage.removeItem("kodo_token");
+  localStorage.removeItem("kodo_session_id");
+}
+
+export async function apiMe(): Promise<User | null> {
+  const token = getToken();
+  if (!token) return null;
+
+  const res = await fetch(`${AUTH_URL}/me`, {
+    headers: authHeaders(),
+    cache: "no-store",
+  });
+
+  const data = await readJson<MeResponse>(res);
+  return data.ok && data.user ? data.user : null;
+}
+
+export function isLoggedIn(): boolean {
+  return !!getToken();
 }

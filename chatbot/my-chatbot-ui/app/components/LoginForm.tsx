@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import { motion } from 'framer-motion';
 import { Eye, EyeOff, LogIn, Mail, Lock } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { apiLogin } from '@/app/lib/api';
 
 export default function LoginForm() {
   const [email, setEmail] = useState('');
@@ -18,12 +19,10 @@ export default function LoginForm() {
     setError('');
     setSubmitting(true);
     try {
-      // TODO: Implement actual login logic
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      // On success, redirect to home
+      await apiLogin(email, password);
       router.push('/');
     } catch (err) {
-      setError('Invalid credentials.');
+      setError(err instanceof Error ? err.message : 'Invalid credentials.');
     } finally {
       setSubmitting(false);
     }

@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess_1782313590043_h0omr9",
+  "requestId": "req_1782317221446_0lfu71",
+  "createdAt": "2026-06-24T16:07:43.481Z",
+  "files": [
+    {
+      "relativePath": "app/signup/page.tsx",
+      "fullPath": "/Users/kkanamanat/Downloads/ci-cd-practice1/app/signup/page.tsx",
+      "existedBefore": false,
+      "snapshotPath": null
+    }
+  ]
+}

@@ -6,12 +6,15 @@ import { buildSmartContext } from "./tools/context_engine.js";
 import { listBackendFiles } from "./tools/list_backend_files.js";
 import { readProjectFile } from "./tools/readProjectFile.js";
 import { CODEGEN_MODEL } from "./backend1/config/openai.mjs";
-
+import { fileURLToPath } from "url";
 /* -------------------------------------------------- */
 /* ---------------- CONFIGURATION ------------------- */
 /* -------------------------------------------------- */
 
-const PROJECT_ROOT = process.cwd();
+// [KODO] Use workspace path from VS Code extension if provided
+const PROJECT_ROOT = process.env.WORKSPACE_PATH
+  ? path.resolve(process.env.WORKSPACE_PATH)
+  : process.cwd();
 
 const USER_SESSION_ID =
   typeof process.env.USER_SESSION_ID === "string" &&
@@ -25,12 +28,14 @@ const USER_REQUEST_ID =
     ? process.env.USER_REQUEST_ID.trim()
     : null;
 
-const HISTORY_ROOT = path.resolve(PROJECT_ROOT, ".agent-history");
+const AGENT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)));
+const HISTORY_ROOT = path.resolve(AGENT_ROOT, ".agent-history");
 
+// [KODO] Default config now uses PROJECT_ROOT dynamically
 const DEFAULT_CONFIG = {
-  planPath: "./planner_plan.json",
-  workspace: "./",
-  taskWorkspace: "./",
+  planPath: path.join(PROJECT_ROOT, "planner_plan.json"),
+  workspace: PROJECT_ROOT,
+  taskWorkspace: PROJECT_ROOT,
   model: CODEGEN_MODEL,
   temperature: 0.1,
   apiKey:
@@ -212,15 +217,20 @@ function normalizeRelativePath(p) {
   return norm.replace(/\\/g, "/");
 }
 
-function normalizeWorkspaceRoot(workspace) {
-  const rel = normalizeRelativePath(workspace);
-  if (!rel || rel === ".") return "";
-  return rel;
-}
-
+// [KODO] Fixed: handles both absolute paths and relative paths correctly
 function resolveFilePath(workspaceRoot, relativePath) {
-  const workspace = normalizeWorkspaceRoot(workspaceRoot);
   const rel = normalizeRelativePath(relativePath);
+
+  // If workspaceRoot is an absolute path, use it directly
+  if (workspaceRoot && path.isAbsolute(workspaceRoot)) {
+    if (!rel) return workspaceRoot;
+    return path.resolve(workspaceRoot, rel);
+  }
+
+  // Legacy relative path handling
+  const workspace = workspaceRoot
+    ? normalizeRelativePath(workspaceRoot)
+    : "";
 
   if (!rel) return path.resolve(PROJECT_ROOT, workspace);
 
@@ -229,6 +239,15 @@ function resolveFilePath(workspaceRoot, relativePath) {
   }
 
   return path.resolve(PROJECT_ROOT, workspace, rel);
+}
+
+// [KODO] Fixed: returns absolute path as-is, normalizes relative paths
+function normalizeWorkspaceRoot(workspace) {
+  if (!workspace) return "";
+  if (path.isAbsolute(workspace)) return workspace; // ← key fix
+  const rel = normalizeRelativePath(workspace);
+  if (!rel || rel === ".") return "";
+  return rel;
 }
 
 function fileNeedsGeneration(filePath) {
@@ -314,7 +333,9 @@ async function findFilesByName(filename, { dir = "", limit = 10 } = {}) {
   if (!target) return [];
 
   const baseName = path.basename(target).toLowerCase();
-  const searchDir = normalizeWorkspaceRoot(dir);
+
+  // [KODO] Use absolute dir directly if provided, else normalize
+  const searchDir = path.isAbsolute(dir) ? dir : normalizeWorkspaceRoot(dir);
 
   const res = await listBackendFiles({
     dir: searchDir,
@@ -368,6 +389,10 @@ async function resolveExistingPathByName(workspaceRoot, relativePath) {
   });
 
   if (matches.length > 0) {
+    // [KODO] If workspaceRoot is absolute, resolve relative to it
+    if (path.isAbsolute(workspaceRoot)) {
+      return path.resolve(workspaceRoot, matches[0]);
+    }
     return path.resolve(PROJECT_ROOT, matches[0]);
   }
 
@@ -393,7 +418,9 @@ async function readExistingFileContent(workspaceRoot, relativeFile) {
   if (!fullPath) return "";
 
   try {
-    const rel = path.relative(PROJECT_ROOT, fullPath).replace(/\\/g, "/");
+    // [KODO] If workspaceRoot is absolute, compute relative to it
+    const base = path.isAbsolute(workspaceRoot) ? workspaceRoot : PROJECT_ROOT;
+    const rel = path.relative(base, fullPath).replace(/\\/g, "/");
     const content = await readFileAsContext(rel, 200000);
     return content || "";
   } catch {
@@ -433,7 +460,6 @@ async function collectReferenceSnippets(workspaceRoot, planText = "") {
 }
 
 async function readWorkspaceContext(workspaceRoot, planText = "") {
-  const rootRel = normalizeWorkspaceRoot(workspaceRoot);
   let context = "";
 
   const configs = [
@@ -448,15 +474,16 @@ async function readWorkspaceContext(workspaceRoot, planText = "") {
   ];
 
   for (const cfg of configs) {
-    const cfgPath = resolveFilePath(rootRel, cfg);
+    const cfgPath = resolveFilePath(workspaceRoot, cfg);
     if (fs.existsSync(cfgPath)) {
       context += `\n--- ${cfg} ---\n`;
       context += fs.readFileSync(cfgPath, "utf8");
     }
   }
 
+  // [KODO] Pass absolute path directly to listBackendFiles
   const treeRes = await listBackendFiles({
-    dir: rootRel,
+    dir: workspaceRoot,
     maxDepth: 5,
     includeFiles: true,
     includeDirs: true,
@@ -477,7 +504,7 @@ async function readWorkspaceContext(workspaceRoot, planText = "") {
     context += "<tree unavailable>\n";
   }
 
-  const referenceSnippets = await collectReferenceSnippets(rootRel, planText);
+  const referenceSnippets = await collectReferenceSnippets(workspaceRoot, planText);
   if (referenceSnippets.length > 0) {
     context += "\n--- Reference Files ---\n";
     for (const ref of referenceSnippets) {
@@ -809,11 +836,12 @@ export async function runCodegen(options = {}) {
 
   console.log(`📊 Plan mode: ${isTaskMode ? "task-level" : "project-level"}`);
 
+  // [KODO] normalizeWorkspaceRoot now handles absolute paths correctly
   const workspaceRoot = isTaskMode
-    ? normalizeWorkspaceRoot(config.taskWorkspace || "./")
-    : normalizeWorkspaceRoot(config.workspace);
+    ? normalizeWorkspaceRoot(config.taskWorkspace || PROJECT_ROOT)
+    : normalizeWorkspaceRoot(config.workspace || PROJECT_ROOT);
 
-  console.log(`📁 Effective workspace: ${workspaceRoot || "."}\n`);
+  console.log(`📁 Effective workspace: ${workspaceRoot || PROJECT_ROOT}\n`);
 
   const planText = [
     plan.name,
@@ -829,7 +857,9 @@ export async function runCodegen(options = {}) {
     .filter(Boolean)
     .join(" ");
 
-  const workspaceContext = await readWorkspaceContext(workspaceRoot, planText);
+  const effectiveWorkspace = workspaceRoot || PROJECT_ROOT;
+
+  const workspaceContext = await readWorkspaceContext(effectiveWorkspace, planText);
 
   const globalSmartContext = await buildSmartContext({
     userMessage: planText,
@@ -864,10 +894,10 @@ export async function runCodegen(options = {}) {
     results.stats.totalFiles++;
 
     const relativeFile = normalizeRelativePath(entry.path);
-    const fullPath = findBestOutputPath(workspaceRoot, relativeFile);
+    const fullPath = findBestOutputPath(effectiveWorkspace, relativeFile);
     const progress = `[${i + 1}/${fileEntries.length}]`;
 
-    const currentContent = await readExistingFileContent(workspaceRoot, relativeFile);
+    const currentContent = await readExistingFileContent(effectiveWorkspace, relativeFile);
 
     const isModifyAction = entry.action === "modify";
     const shouldSkip = config.skipExisting && !isModifyAction && !fileNeedsGeneration(fullPath);
@@ -898,7 +928,7 @@ export async function runCodegen(options = {}) {
         config,
         entry,
         plan,
-        workspaceRoot,
+        effectiveWorkspace,
         workspaceContext,
         globalSmartContext,
         projectType,
@@ -960,11 +990,16 @@ export async function runCodegen(options = {}) {
 /* -------------------------------------------------- */
 
 if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+  const planPath = path.join(PROJECT_ROOT, "planner_plan.json");
+
+  console.log(`[Codegen] PROJECT_ROOT = ${PROJECT_ROOT}`);
+  console.log(`[Codegen] planPath     = ${planPath}`);
+
   runCodegen({
-    planPath: "./planner_plan.json",
-    workspace: "./backend",
-    taskWorkspace: "./",
-    projectType: "backend",
+    planPath,
+    workspace: PROJECT_ROOT,
+    taskWorkspace: PROJECT_ROOT,
+    projectType: "fullstack",
     skipExisting: true,
     sessionId: USER_SESSION_ID,
     requestId: USER_REQUEST_ID,
