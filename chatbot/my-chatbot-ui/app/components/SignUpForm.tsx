@@ -3,6 +3,7 @@
 import React, { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { Eye, EyeOff, UserPlus, Mail, Phone, Lock, CheckCircle2, AlertCircle } from 'lucide-react';
+import { apiSignup } from '@/app/lib/api';
 
 export default function SignUpForm() {
   const [name, setName] = useState('');
@@ -19,21 +20,24 @@ export default function SignUpForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    if (password !== confirmPassword) {
+      setError('Passwords do not match.');
+      return;
+    }
+
     setSubmitting(true);
     try {
-      // TODO: Implement actual signup logic
-      await new Promise((resolve) => setTimeout(resolve, 800));
-      // On success, redirect to login or home
-      router.push('/login');
+      await apiSignup(email, password, name);
+      router.push('/');
     } catch (err) {
-      setError('Failed to sign up. Please try again.');
+      setError(err instanceof Error ? err.message : 'Failed to sign up. Please try again.');
     } finally {
       setSubmitting(false);
     }
   };
 
   const inputBaseClass = "w-full rounded-2xl border bg-white/[0.03] px-4 py-3.5 text-white/90 placeholder:text-white/30 transition-all duration-300 outline-none focus:bg-white/[0.06]";
-  // Updated focus colors to match LoginForm (Orange theme)
   const inputNormalClass = "border-white/10 focus:border-[#ff8a3d]/50 focus:ring-2 focus:ring-[#ff8a3d]/20";
   const inputErrorClass = "border-red-500/50 focus:border-red-500/50 focus:ring-red-500/20";
 

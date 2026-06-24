@@ -1,7 +1,7 @@
 import fs from "fs/promises";
 import path from "path";
 
-const PROJECT_ROOT = process.cwd();
+const PROJECT_ROOT = process.env.WORKSPACE_PATH || process.cwd();
 
 const DEFAULT_IGNORES = new Set([
   "node_modules",

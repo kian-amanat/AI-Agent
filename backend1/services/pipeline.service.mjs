@@ -14,6 +14,7 @@ export async function runPipeline({
   requestId,
   attachmentPaths = [],
   audioPath = "",
+  workspacePath = "",   // ← NEW: passed from plannerAgent
 }) {
   console.log("🚀 Starting full pipeline...");
   console.log("[PIPELINE] starting (raw args)", {
@@ -21,6 +22,7 @@ export async function runPipeline({
     requestId,
     attachmentPaths,
     audioPath,
+    workspacePath,
   });
 
   const userMessage =
@@ -45,17 +47,21 @@ export async function runPipeline({
   const userAudioPath =
     typeof audioPath === "string" ? audioPath.trim() : "";
 
+  // Resolve workspace: use provided path, else fall back to PROJECT_ROOT
+  const resolvedWorkspace =
+    typeof workspacePath === "string" && workspacePath.trim()
+      ? workspacePath.trim()
+      : PROJECT_ROOT;
+
   if (!userSessionId || !userRequestId) {
     const err = new Error(
       `runPipeline called without valid sessionId/requestId. ` +
         `Got sessionId="${userSessionId}", requestId="${userRequestId}"`
     );
-
     console.error("❌ [PIPELINE] Invalid IDs:", {
       sessionId: userSessionId,
       requestId: userRequestId,
     });
-
     throw err;
   }
 
@@ -63,7 +69,7 @@ export async function runPipeline({
     USER_SESSION_ID: userSessionId,
     USER_REQUEST_ID: userRequestId,
   });
-
+  console.log("[PIPELINE] workspace →", resolvedWorkspace);
   console.log("[PIPELINE] files", userAttachmentPaths);
   console.log("[PIPELINE] audio", userAudioPath || "(none)");
 
@@ -81,6 +87,10 @@ export async function runPipeline({
 
         // 📎 File Agent
         USER_ATTACHMENT_PATHS: JSON.stringify(userAttachmentPaths),
+
+        // 📁 Workspace — pipeline_agent.mjs should use this as the root
+        // for all file reads/writes instead of process.cwd()
+        WORKSPACE_PATH: resolvedWorkspace,
       },
 
       cwd: PROJECT_ROOT,
@@ -97,21 +107,15 @@ export async function runPipeline({
 
     const timer = setTimeout(() => {
       console.error("⏱️ [PIPELINE] Killing child process after timeout");
-
       child.kill("SIGTERM");
-
       setTimeout(() => {
-        if (!child.killed) {
-          child.kill("SIGKILL");
-        }
+        if (!child.killed) child.kill("SIGKILL");
       }, 5000);
-
       reject(new Error("Pipeline timed out after 5 minutes"));
     }, 300000);
 
     child.on("close", (code) => {
       clearTimeout(timer);
-
       if (code === 0) {
         console.log("✅ Pipeline completed successfully");
         resolve();

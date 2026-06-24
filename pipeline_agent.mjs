@@ -36,11 +36,9 @@ function extractSingleTextOutput(output) {
       if (typeof parsed.transcribed_text === "string") {
         return parsed.transcribed_text.trim();
       }
-
       if (typeof parsed.text === "string") {
         return parsed.text.trim();
       }
-
       if (typeof parsed.content === "string") {
         return parsed.content.trim();
       }
@@ -64,14 +62,12 @@ function extractFileAnalysisOutput(output) {
   const marker = "[Structured_File_Analysis_JSON]";
   const markerIndex = text.indexOf(marker);
 
-  // Prefer the human-readable section produced by file_agent.mjs
   if (markerIndex !== -1) {
     const beforeMarker = text.slice(0, markerIndex).trim();
     const firstFileIndex = beforeMarker.indexOf("File:");
     if (firstFileIndex !== -1) {
       return beforeMarker.slice(firstFileIndex).trim();
     }
-
     return beforeMarker || text.slice(markerIndex + marker.length).trim();
   }
 
@@ -95,6 +91,10 @@ const userRequestId =
   process.env.USER_REQUEST_ID ||
   `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
+// [KODO] Workspace path bound by the VS Code extension for this user session.
+// Passed from pipeline.service.mjs → pipeline_agent.mjs → all sub-agents.
+const userWorkspacePath = String(process.env.WORKSPACE_PATH || "").trim();
+
 if (!userMessage && !userAudioPath && userAttachmentPaths.length === 0) {
   console.error("Usage: node pipeline_agent.mjs <your request>");
   console.error('   or: USER_MESSAGE="your request" node pipeline_agent.mjs');
@@ -106,17 +106,12 @@ if (!userMessage && !userAudioPath && userAttachmentPaths.length === 0) {
 }
 
 console.log("🚀 Starting Pipeline...\n");
-if (userAudioPath) {
-  console.log(`🎙️  Audio: "${userAudioPath}"`);
-}
-if (userAttachmentPaths.length) {
-  console.log(`📎 Attachments: ${userAttachmentPaths.length} file(s)`);
-}
-if (userMessage) {
-  console.log(`📝 Request: "${userMessage}"`);
-}
+if (userAudioPath) console.log(`🎙️  Audio: "${userAudioPath}"`);
+if (userAttachmentPaths.length) console.log(`📎 Attachments: ${userAttachmentPaths.length} file(s)`);
+if (userMessage) console.log(`📝 Request: "${userMessage}"`);
 if (userSessionId) console.log(`🧾 Session ID: ${userSessionId}`);
 if (userRequestId) console.log(`🔁 Request ID: ${userRequestId}`);
+if (userWorkspacePath) console.log(`📁 Workspace: ${userWorkspacePath}`);
 console.log("=".repeat(60) + "\n");
 
 async function runAgent(agentName, scriptPath, input, options = {}) {
@@ -146,6 +141,9 @@ async function runAgent(agentName, scriptPath, input, options = {}) {
         USER_MESSAGE: userMessage,
         USER_AUDIO_PATH: userAudioPath,
         USER_ATTACHMENT_PATHS: JSON.stringify(userAttachmentPaths),
+        // [KODO] Pass workspace path to every sub-agent so they all
+        // write files to the correct VS Code project folder
+        WORKSPACE_PATH: userWorkspacePath,
         ...extraEnv,
       },
     });
@@ -162,7 +160,6 @@ async function runAgent(agentName, scriptPath, input, options = {}) {
 
     child.on("close", (code) => {
       const elapsed = ((Date.now() - startTime) / 1000).toFixed(2);
-
       console.log("-".repeat(60));
 
       if (code === 0) {
@@ -184,13 +181,9 @@ async function runAgent(agentName, scriptPath, input, options = {}) {
     const timeout = setTimeout(() => {
       console.error(`⏱️  ${agentName} timeout - killing process...`);
       child.kill("SIGTERM");
-
       setTimeout(() => {
-        if (!child.killed) {
-          child.kill("SIGKILL");
-        }
+        if (!child.killed) child.kill("SIGKILL");
       }, 5000);
-
       reject(new Error(`${agentName} timed out after 2 minutes`));
     }, 130000);
 
@@ -210,9 +203,7 @@ async function main() {
         "Whisper Agent",
         whisperScript,
         userAudioPath,
-        {
-          captureOutput: true,
-        }
+        { captureOutput: true }
       );
 
       const transcript = extractSingleTextOutput(whisperOutput);
@@ -235,9 +226,7 @@ async function main() {
         "File Agent",
         fileAgentScript,
         fileAgentInput,
-        {
-          captureOutput: true,
-        }
+        { captureOutput: true }
       );
 
       fileAnalysisText = extractFileAnalysisOutput(fileAgentOutput);
@@ -248,7 +237,6 @@ async function main() {
     }
 
     const plannerScript = path.resolve(__dirname, "planner_agent.mjs");
-
     const plannerInput = [
       finalMessage || "Please analyze the uploaded files.",
       fileAnalysisText ? `Uploaded file analysis:\n${fileAnalysisText}` : "",

@@ -1,0 +1,222 @@
+"use client";
+
+import React, { useState } from "react";
+import Image from "next/image";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import { login } from "./lib/api";
+import Cookies from "js-cookie";
+
+export default function LoginPage() {
+  const router = useRouter();
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // ----------------- JWT PARSER -----------------
+  function parseJwt(token: string | null | undefined): Record<string, any> | null {
+    if (!token) return null;
+    try {
+      const parts = token.split(".");
+      if (parts.length < 2) return null;
+      const payload = parts[1];
+
+      const b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+      const json = decodeURIComponent(
+        atob(b64)
+          .split("")
+          .map((c) => "%" + ("00" + c.charCodeAt(0).toString(16)).slice(-2))
+          .join("")
+      );
+
+      return JSON.parse(json);
+    } catch (e) {
+      // console.warn("parseJwt failed", e);
+      return null;
+    }
+  }
+
+  // ----------------- HANDLE SUBMIT -----------------
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+
+    if (!email.trim() || !password.trim()) {
+      setError("Please provide email and password.");
+      return;
+    }
+
+    setLoading(true);
+
+    try {
+      const res = await login(email, password);
+
+      if (!res) {
+        setError("Login failed. Check credentials and try again.");
+        setLoading(false);
+        return;
+      }
+
+      const token = res.token ?? null;
+      const jwtPayload = parseJwt(token);
+
+      // Extract ID
+      const idFromToken =
+        jwtPayload?.sub ??
+        jwtPayload?.id ??
+        jwtPayload?.user_id ??
+        jwtPayload?.uid ??
+        res.user?.id ??
+        null;
+
+      // Extract roles
+      const rolesFromToken =
+        jwtPayload?.roles ??
+        jwtPayload?.role ??
+        jwtPayload?.authorities ??
+        res.user?.roles ??
+        [];
+
+      const roles = Array.isArray(rolesFromToken)
+        ? rolesFromToken
+        : [rolesFromToken];
+
+      // Extract name
+      const userName =
+        res.user?.full_name ??
+        `${res.user?.first_name ?? ""} ${res.user?.last_name ?? ""}`.trim() ??
+        jwtPayload?.name ??
+        jwtPayload?.full_name ??
+        "";
+
+      // Save token
+      if (token) {
+        localStorage.setItem("token", token);
+        Cookies.set("token", token, { expires: 7 });
+      }
+
+      // Save user details
+      if (idFromToken != null) {
+        localStorage.setItem("user_id1", String(idFromToken));
+      }
+
+      localStorage.setItem("user_roles", JSON.stringify(roles));
+      localStorage.setItem("user_name", String(userName));
+      localStorage.setItem("id", res.user.id);
+
+      // DEBUG LOGS
+      // console.log("Logged in user:", res.user);
+      // console.log("JWT payload:", jwtPayload);
+      // console.log("Stored user_id1:", localStorage.getItem("user_id1"));
+
+      // ----------------- REDIRECT -----------------
+      if (roles.includes("ROLE_ADMIN")) {
+        router.push("/chatbot/admin");
+      } else {
+        // ❗ مهم: سشن اینجا ساخته نمی‌شود.
+        // فقط ریدایرکت می‌شود به چت → اولین پیام سشن می‌سازد.
+        localStorage.removeItem("session_id");
+        router.push("/chatbot");
+      }
+    } catch (err: any) {
+      // console.error("Login error:", err);
+      setError(err?.message ?? "Unexpected error occurred.");
+    } finally {
+      setLoading(false);
+    }
+  }
+const isValid = email.trim().length > 0 && password.trim().length > 0;
+  // ----------------- UI -----------------
+return (
+  <div className="min-h-screen w-screen flex items-center justify-center bg-[#F5F6FA]">
+    <div className="bg-white w-full min-h-screen flex flex-col items-center justify-center">
+      
+      {/* Logo */}
+      <div className="mb-8">
+        <Image
+          src="/media/app/IMG_4749.PNG"
+          alt="logo"
+          width={80}
+          height={80}
+          unoptimized
+        />
+      </div>
+
+      {/* Title */}
+      <h1 className="text-4xl font-100 text-gray-900 mb-8">Welcome Back</h1>
+
+      {/* Form */}
+      <form onSubmit={handleSubmit} className="flex flex-col items-center">
+        
+        {/* Email */}
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="example@gmail.com"
+          autoComplete="email"
+          className="
+            w-[306px] h-[52px]
+            rounded-lg border border-[#D1D5DB]
+            px-4 text-sm text-blue-500
+            placeholder-gray-400
+            focus:ring-2 focus:ring-blue-400 outline-none
+            mb-3
+          "
+        />
+
+        {/* Password */}
+        <input
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="Password"
+          autoComplete="current-password"
+          className="
+            w-[306px] h-[52px]
+            rounded-lg border border-[#D1D5DB]
+            px-4 text-sm text-blue-500
+            placeholder-gray-400
+            focus:ring-2 focus:ring-blue-400 outline-none
+            mb-4
+          "
+        />
+
+        {/* Error Message */}
+        {error && (
+          <div className="w-[306px] mb-3 text-sm text-red-600">
+            {error}
+          </div>
+        )}
+
+        {/* Submit Button */}
+<button
+  type="submit"
+  disabled={loading || !isValid}
+  className={`
+    w-[306px] h-[40px]
+    rounded-lg text-white text-sm font-300 shadow-sm transition
+    ${loading || !isValid
+      ? "bg-[#94BBF2] cursor-not-allowed"
+      : "bg-blue-500 hover:bg-blue-600"}
+  `}
+>
+  {loading ? "Logging in..." : "Log In"}
+</button>
+
+      </form>
+
+      {/* 
+      <p className="mt-6 text-sm text-gray-600 font-300">
+        Don't have an account?{" "}
+        <Link href="/signup" className="text-gray-600 font-300 hover:underline">
+          Sign up
+        </Link>
+      </p> 
+      */}
+    </div>
+  </div>
+);
+
+}

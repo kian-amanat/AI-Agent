@@ -5,6 +5,8 @@ import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import settingsRoute from "./routes/settings.mjs";
 import plannerAgentRoute from "./routes/plannerAgent.mjs";
+import authRoute from "./routes/auth.mjs";
+
 
 const fastify = Fastify({
   logger: true,
@@ -131,6 +133,11 @@ await fastify.register(plannerAgentRoute, {
 
 await fastify.register(settingsRoute, {
   prefix: "/api/settings",
+});
+
+
+await fastify.register(authRoute, {
+  prefix: "/api/auth",
 });
 
 
