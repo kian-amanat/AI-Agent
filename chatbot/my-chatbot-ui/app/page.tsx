@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { v4 as uuidv4 } from "uuid";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Sparkles, Bot, Copy, Check, UserIcon } from "lucide-react";
+import { useAgentPipeline } from "./hooks/useAgentPipeline";
 import {
   fetchSessions,
   fetchSessionMessages,
@@ -100,10 +101,7 @@ export default function MinimalChatComponent() {
   const [isInputFocused, setIsInputFocused] = useState(false);
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
 
-  const [isProcessing, setIsProcessing] = useState(false);
-  const [activeTask, setActiveTask] = useState("");
-  const [pipelineStage, setPipelineStage] = useState(0);
-  const [pipelineProgress, setPipelineProgress] = useState(0);
+  const pipeline = useAgentPipeline();
 
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [undoingMessageId, setUndoingMessageId] = useState<string | null>(null);
@@ -137,21 +135,7 @@ export default function MinimalChatComponent() {
     scrollToBottomSoon();
   }, [messages]);
 
-  useEffect(() => {
-    if (!isProcessing) return;
 
-    const progressMap = [12, 28, 48, 72, 90];
-    const timer = window.setInterval(() => {
-      setPipelineStage((prev) => {
-        const next = Math.min(prev + 1, AGENT_STAGES.length - 1);
-        const nextProgress = progressMap[next] ?? 95;
-        setPipelineProgress(nextProgress);
-        return next;
-      });
-    }, 1150);
-
-    return () => window.clearInterval(timer);
-  }, [isProcessing]);
 
   async function refreshSessions(preferredSessionId?: string | null) {
     try {
@@ -351,15 +335,8 @@ export default function MinimalChatComponent() {
     const text = messageInput.trim();
     if ((!text && selectedFiles.length === 0) || isSending) return;
 
-    setIsSending(true);
-    setIsProcessing(true);
-    setActiveTask(
-      selectedFiles.length > 0
-        ? `Analyzing ${selectedFiles.length} file${selectedFiles.length > 1 ? "s" : ""}`
-        : text
-    );
-    setPipelineStage(0);
-    setPipelineProgress(10);
+setIsSending(true);
+pipeline.start();
 
     const fileNames = selectedFiles.map((file) => file.name).join(", ");
 
@@ -408,11 +385,13 @@ export default function MinimalChatComponent() {
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
     const cleanup = sendMessage(
-      text,
-      selectedFiles.length > 0 ? selectedFiles : null,
-      selectedSessionIdRef.current,
-      (event: SSEEvent) => {
-        if (event.type === "content") {
+  text,
+  selectedFiles.length > 0 ? selectedFiles : null,
+  selectedSessionIdRef.current,
+  (event: SSEEvent) => {
+    pipeline.onSSEEvent(event);   // ← ADD THIS LINE FIRST
+
+    if (event.type === "content") {
           setMessages((prev) => {
             const updated = prev.map((msg) =>
               msg.id === assistantMessageId
@@ -516,12 +495,7 @@ export default function MinimalChatComponent() {
           );
         }
 
-        setPipelineStage(AGENT_STAGES.length - 1);
-        setPipelineProgress(100);
-
-        setTimeout(() => {
-          setIsProcessing(false);
-        }, 500);
+        pipeline.stop();
 
         setIsSending(false);
         abortRequestRef.current = null;
@@ -538,11 +512,7 @@ export default function MinimalChatComponent() {
           )
         );
 
-        setPipelineStage(AGENT_STAGES.length - 1);
-        setPipelineProgress(100);
-        setTimeout(() => {
-          setIsProcessing(false);
-        }, 500);
+        pipeline.stop();
 
         setIsSending(false);
         abortRequestRef.current = null;
@@ -619,14 +589,15 @@ export default function MinimalChatComponent() {
 
         <div className="flex min-h-0 flex-1 flex-col">
           <AnimatePresence mode="wait">
-            {isProcessing && (
+            {pipeline.active && (
               <AgentPipelinePanel
-                key="agent-pipeline"
-                task={activeTask}
-                stageIndex={pipelineStage}
-                progress={pipelineProgress}
-                stages={AGENT_STAGES}
-              />
+  key="agent-pipeline"
+  task={pipeline.liveLog || messageInput}
+  stageIndex={pipeline.stageIndex}
+  progress={pipeline.progress}
+  liveLog={pipeline.liveLog}
+  events={pipeline.events}
+/>
             )}
           </AnimatePresence>
 
