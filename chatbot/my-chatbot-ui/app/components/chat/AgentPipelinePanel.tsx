@@ -2,81 +2,92 @@
 
 import React, { useMemo, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import type { PipelineStage } from "./chat-types";
+import {
+  Cpu,
+  FolderSearch,
+  Code2,
+  ShieldCheck,
+  CircleCheckBig,
+  Check,
+  ChevronUp,
+  ChevronDown,
+  Activity,
+} from "lucide-react";
+import type { PipelineAgentEvent } from "../../hooks/useAgentPipeline";
 
 type StageKey = "planner" | "reading" | "mutate_files" | "validate" | "complete";
 
-type AgentEvent =
-  | { type: "stage"; stageKey: StageKey; at: number }
-  | { type: "plan"; text: string; at: number }
-  | { type: "read_files"; files: string[]; at: number }
-  | { type: "file_update"; path: string; operation: "create" | "update"; diffSummary?: string; at: number }
-  | { type: "validate"; result: "pass" | "fail"; notes?: string; at: number }
-  | { type: "complete"; summary: string; at: number }
-  | { type: "log"; stageKey?: StageKey; message: string; at: number };
+const STAGES: { key: StageKey; label: string; sub: string; Icon: React.ElementType }[] = [
+  { key: "planner",      label: "Planner",  sub: "Task planning",   Icon: Cpu },
+  { key: "reading",      label: "Context",  sub: "Reading files",   Icon: FolderSearch },
+  { key: "mutate_files", label: "Codegen",  sub: "Writing code",    Icon: Code2 },
+  { key: "validate",     label: "Validate", sub: "Running checks",  Icon: ShieldCheck },
+  { key: "complete",     label: "Done",     sub: "Ready to review", Icon: CircleCheckBig },
+];
 
-function clamp(n: number, a: number, b: number) {
-  return Math.max(a, Math.min(b, n));
-}
+const CIRC = 2 * Math.PI * 16;
 
-function truncate(text: string, max = 140) {
+function clamp(n: number, a: number, b: number) { return Math.max(a, Math.min(b, n)); }
+
+function truncate(text: string, max = 90) {
   if (!text) return "";
-  const t = text.replace(/\s+/g, " ").trim();
-  return t.length > max ? t.slice(0, max - 1) + "…" : t;
+  const clean = text
+    .replace(/[\u{1F000}-\u{1FFFF}]/gu, "")
+    .replace(/[\u2600-\u27BF]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return clean.length > max ? clean.slice(0, max - 1) + "…" : clean;
 }
 
-function stageKeyFromIndex(idx: number): StageKey {
-  return (["planner", "reading", "mutate_files", "validate", "complete"][clamp(idx, 0, 4)] as StageKey);
-}
-
-function deriveStageBlurb(stageKey: StageKey, events: AgentEvent[]) {
-  // آخرین رویداد مرتبط با همین stage را پیدا می‌کنیم
-  const reversed = [...events].reverse();
-
-  const find = <T extends AgentEvent["type"]>(type: T) =>
-    reversed.find((e) => e.type === type) as Extract<AgentEvent, { type: T }> | undefined;
-
-  switch (stageKey) {
-    case "planner": {
-      const plan = find("plan");
-      if (plan?.text) return { title: "Designing plan", body: truncate(plan.text, 180) };
-      const log = reversed.find((e) => e.type === "log" && (e as any).stageKey === "planner") as any;
-      return { title: "Designing plan", body: truncate(log?.message || "Generating a plan…") };
-    }
-    case "reading": {
-      const rf = find("read_files");
-      if (rf?.files?.length) return { title: "Reading files", body: truncate(rf.files.join(", "), 180) };
-      const log = reversed.find((e) => e.type === "log" && (e as any).stageKey === "reading") as any;
-      return { title: "Reading files", body: truncate(log?.message || "Scanning workspace…") };
-    }
-    case "mutate_files": {
-      const fu = find("file_update");
-      if (fu?.path) {
-        const verb = fu.operation === "create" ? "Creating" : "Updating";
-        return { title: "Create/Update", body: truncate(`${verb}: ${fu.path}${fu.diffSummary ? ` — ${fu.diffSummary}` : ""}`, 180) };
-      }
-      const log = reversed.find((e) => e.type === "log" && (e as any).stageKey === "mutate_files") as any;
-      return { title: "Create/Update", body: truncate(log?.message || "Applying targeted changes…") };
-    }
-    case "validate": {
-      const v = find("validate");
-      if (v) return { title: "Validate", body: truncate(`${v.result.toUpperCase()}${v.notes ? ` — ${v.notes}` : ""}`, 180) };
-      const log = reversed.find((e) => e.type === "log" && (e as any).stageKey === "validate") as any;
-      return { title: "Validate", body: truncate(log?.message || "Checking constraints…") };
-    }
-    case "complete": {
-      const c = find("complete");
-      if (c?.summary) return { title: "Complete", body: truncate(c.summary, 180) };
-      return { title: "Complete", body: "Ready for review." };
-    }
+// Interpolate between orange → bright orange → light green based on pct
+function getProgressColor(pct: number): { border: string; arc: [string, string]; dot: string; glow: string } {
+  if (pct >= 100) {
+    return {
+      border: "rgba(74, 222, 128, 0.45)",   // green-400
+      arc:    ["#4ade80", "#22c55e"],         // green
+      dot:    "#4ade80",
+      glow:   "rgba(74, 222, 128, 0.08)",
+    };
   }
+  if (pct >= 75) {
+    // orange → yellow-green transition
+    const t = (pct - 75) / 25;
+    const r = Math.round(255 + (74  - 255) * t);
+    const g = Math.round(138 + (222 - 138) * t);
+    const b = Math.round(61  + (128 - 61)  * t);
+    const brightness = 0.18 + t * 0.27; // border gets brighter
+    return {
+      border: `rgba(${r},${g},${b},${brightness})`,
+      arc:    [`rgb(${r},${g},${b})`, `rgb(${Math.round(r*0.85)},${Math.round(g*0.85)},${Math.round(b*0.85)})`],
+      dot:    `rgb(${r},${g},${b})`,
+      glow:   `rgba(${r},${g},${b},0.06)`,
+    };
+  }
+  if (pct >= 40) {
+    // orange brightens as it climbs
+    const t = (pct - 40) / 35;
+    const alpha = 0.12 + t * 0.1;
+    return {
+      border: `rgba(255, 138, 61, ${alpha})`,
+      arc:    ["#ff8a3d", "#ff3820"],
+      dot:    "#ff6432",
+      glow:   "rgba(255, 100, 50, 0.06)",
+    };
+  }
+  // 0–40: dim orange
+  return {
+    border: "rgba(255, 138, 61, 0.12)",
+    arc:    ["#ff8a3d", "#ff3820"],
+    dot:    "#ff6432",
+    glow:   "rgba(255, 100, 50, 0.04)",
+  };
 }
 
 export default function AgentPipelinePanel({
   task,
   stageIndex,
   progress,
-  stages,
+  liveLog = "",
   events = [],
   defaultCollapsed = false,
   onCollapsedChange,
@@ -84,89 +95,156 @@ export default function AgentPipelinePanel({
   task: string;
   stageIndex: number;
   progress: number;
-  stages: PipelineStage[]; // باید 5 stage مطابق کلیدها باشد
-  events?: AgentEvent[];
+  liveLog?: string;
+  events?: PipelineAgentEvent[];
   defaultCollapsed?: boolean;
   onCollapsedChange?: (v: boolean) => void;
 }) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
+  const safeIndex = clamp(stageIndex, 0, STAGES.length - 1);
+  const pct       = clamp(progress, 0, 100);
+  const arcOffset = CIRC * (1 - pct / 100);
 
-  const safeStageIndex = clamp(stageIndex, 0, Math.max(0, stages.length - 1));
-  const currentStage = stages[safeStageIndex];
+  const colors = useMemo(() => getProgressColor(pct), [pct]);
 
-  const currentStageKey = useMemo(() => stageKeyFromIndex(safeStageIndex), [safeStageIndex]);
-  const blurb = useMemo(() => deriveStageBlurb(currentStageKey, events), [currentStageKey, events]);
-
-  const pct = clamp(progress, 0, 100);
-
-  const toggleCollapsed = () => {
-    setCollapsed((v) => {
+  const toggle = () =>
+    setCollapsed(v => {
       const nv = !v;
       onCollapsedChange?.(nv);
       return nv;
     });
-  };
+
+  const latestLog = useMemo(() => {
+    const log = [...events].reverse().find(e => e.type === "log") as any;
+    const raw = liveLog || log?.message || "";
+    return truncate(raw) || STAGES[safeIndex]?.sub || "";
+  }, [events, liveLog, safeIndex]);
+
+  const isDone = pct >= 100;
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: -10, scale: 0.985 }}
+      initial={{ opacity: 0, y: -8, scale: 0.99 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
-      exit={{ opacity: 0, y: -10, scale: 0.985 }}
-      transition={{ duration: 0.35, ease: "easeOut" }}
+      exit={{ opacity: 0, y: -8, scale: 0.99 }}
+      transition={{ duration: 0.28, ease: [0.25, 0.46, 0.45, 0.94] }}
       className="mx-auto w-full max-w-4xl px-4 pt-4 md:px-8"
     >
-      <div className="relative overflow-hidden rounded-[30px] border border-white/8 bg-white/[0.035] shadow-[0_18px_60px_rgba(0,0,0,0.24)]">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_right,rgba(255,94,77,0.14),transparent_40%),radial-gradient(circle_at_left,rgba(255,138,61,0.12),transparent_34%)]" />
+      {/* Card — border color transitions with progress */}
+      <motion.div
+        className="relative overflow-hidden rounded-2xl bg-[#141414] shadow-[0_8px_32px_rgba(0,0,0,0.4)]"
+        animate={{ borderColor: colors.border }}
+        transition={{ duration: 0.8, ease: "easeOut" }}
+        style={{ border: `1px solid ${colors.border}` }}
+      >
+        {/* Top accent — color follows progress */}
+        <motion.div
+          className="absolute inset-x-[25%] top-0 h-px"
+          animate={{
+            background: `linear-gradient(90deg, transparent, ${colors.arc[0]}55, transparent)`,
+          }}
+          transition={{ duration: 0.8 }}
+        />
 
-        <div className="relative p-4">
+        {/* Ambient glow — color follows progress */}
+        <motion.div
+          className="pointer-events-none absolute -right-12 -top-10 h-[160px] w-[220px] rounded-full"
+          animate={{ background: `radial-gradient(ellipse, ${colors.glow} 0%, transparent 70%)` }}
+          transition={{ duration: 0.8 }}
+        />
+
+        <div className="relative px-5 pb-5 pt-4">
+
           {/* Header */}
-          <div className="flex items-start justify-between gap-3">
-            <div className="min-w-0">
-              <div className="text-[10px] uppercase tracking-[0.35em] text-white/30">
-                Running agent
+          <div className="flex items-center justify-between gap-4">
+            <div className="min-w-0 flex-1">
+
+              {/* Status indicator */}
+              <div className="flex items-center gap-2 mb-1.5">
+                <motion.span
+                  animate={{
+                    opacity: isDone ? 1 : [1, 0.15, 1],
+                    backgroundColor: colors.dot,
+                  }}
+                  transition={{
+                    opacity: { repeat: isDone ? 0 : Infinity, duration: 1.6, ease: "easeInOut" },
+                    backgroundColor: { duration: 0.8 },
+                  }}
+                  className="h-[5px] w-[5px] flex-shrink-0 rounded-full"
+                />
+                <motion.span
+                  animate={{ color: isDone ? "rgba(74,222,128,0.55)" : "rgba(255,255,255,0.25)" }}
+                  transition={{ duration: 0.8 }}
+                  className="text-[10px] font-medium uppercase tracking-widest"
+                >
+                  {isDone ? "Complete" : "Running"}
+                </motion.span>
               </div>
 
-              {/* title + short blurb based on REAL events */}
-              <div className="mt-1 text-sm text-white/88">
-                {task || "Processing request"}
-              </div>
+              <p className="truncate text-sm font-medium text-white/85">
+                {truncate(task, 80) || "Processing request"}
+              </p>
 
-              <div className="mt-1 text-xs text-white/38">
-                Current stage: {currentStage?.label} — {blurb.title}
-                <span className="block mt-1 text-[11px] text-white/45">
-                  {blurb.body}
-                </span>
-              </div>
+              {/* Live log */}
+              <AnimatePresence mode="wait">
+                <motion.div
+                  key={latestLog.slice(0, 20)}
+                  initial={{ opacity: 0, y: 3 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.15 }}
+                  className="mt-1 flex items-center gap-1.5"
+                >
+                  <motion.div animate={{ color: `${colors.arc[0]}70` }} transition={{ duration: 0.8 }}>
+                    <Activity className="h-[11px] w-[11px] flex-shrink-0" strokeWidth={2} />
+                  </motion.div>
+                  <span className="truncate text-[11px] text-white/30">{latestLog}</span>
+                </motion.div>
+              </AnimatePresence>
             </div>
 
-            <div className="flex items-center gap-2">
-              {/* percent pill */}
-              <div className="flex items-center gap-2 rounded-full border border-white/8 bg-white/[0.03] px-3 py-1.5">
+            <div className="flex items-center gap-2 flex-shrink-0">
+
+              {/* Arc progress — color follows progress */}
+              <div className="relative flex h-9 w-9 items-center justify-center">
+                <svg className="absolute inset-0 -rotate-90" viewBox="0 0 38 38" width="38" height="38">
+                  <defs>
+                    <linearGradient id="ag-dyn" x1="0%" y1="0%" x2="100%" y2="0%">
+                      <stop offset="0%" stopColor={colors.arc[0]} />
+                      <stop offset="100%" stopColor={colors.arc[1]} />
+                    </linearGradient>
+                  </defs>
+                  <circle cx="19" cy="19" r="16" fill="none" stroke="rgba(255,255,255,0.05)" strokeWidth="2.5" />
+                  <motion.circle
+                    cx="19" cy="19" r="16"
+                    fill="none"
+                    stroke="url(#ag-dyn)"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeDasharray={CIRC}
+                    animate={{ strokeDashoffset: arcOffset }}
+                    transition={{ duration: 0.55, ease: [0.4, 0, 0.2, 1] }}
+                  />
+                </svg>
                 <motion.span
-                  animate={{ scale: [1, 1.15, 1] }}
-                  transition={{ repeat: Infinity, duration: 1.35, ease: "easeInOut" }}
-                  className="h-2.5 w-2.5 rounded-full bg-gradient-to-br from-[#ff8a3d] via-[#ff5e4d] to-[#ff2d2d]"
-                />
-                <span className="text-xs text-white/50">{Math.round(pct)}%</span>
+                  animate={{ color: isDone ? "rgba(74,222,128,0.8)" : "rgba(255,255,255,0.6)" }}
+                  transition={{ duration: 0.8 }}
+                  className="relative z-10 text-[10px] font-semibold tabular-nums"
+                >
+                  {Math.round(pct)}%
+                </motion.span>
               </div>
 
-              {/* collapse button (X when open, chevron when collapsed—feel free) */}
+              {/* Collapse */}
               <button
                 type="button"
-                onClick={toggleCollapsed}
-                className="group inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-white/[0.02] text-white/70 hover:bg-white/[0.05] hover:text-white transition"
-                aria-label={collapsed ? "Open agent panel" : "Close agent panel"}
-                title={collapsed ? "Open" : "Close"}
+                onClick={toggle}
+                className="flex h-7 w-7 items-center justify-center rounded-lg border border-white/[0.07] bg-white/[0.03] text-white/35 transition-all hover:bg-white/[0.07] hover:text-white/70"
               >
-                {/* simple X icon */}
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className="opacity-90 group-hover:opacity-100">
-                  {collapsed ? (
-                    // "expand" icon
-                    <path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                  ) : (
-                    <path d="M6 6l12 12M18 6L6 18" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
-                  )}
-                </svg>
+                {collapsed
+                  ? <ChevronDown className="h-3.5 w-3.5" strokeWidth={1.75} />
+                  : <ChevronUp   className="h-3.5 w-3.5" strokeWidth={1.75} />
+                }
               </button>
             </div>
           </div>
@@ -179,116 +257,178 @@ export default function AgentPipelinePanel({
                 initial={{ height: 0, opacity: 0 }}
                 animate={{ height: "auto", opacity: 1 }}
                 exit={{ height: 0, opacity: 0 }}
-                transition={{ duration: 0.28, ease: "easeOut" }}
+                transition={{ duration: 0.24, ease: [0.25, 0.46, 0.45, 0.94] }}
               >
-                <div className="mt-4 grid gap-2 sm:grid-cols-5">
-                  {stages.map((stage, idx) => {
-                    const Icon = stage.icon;
-                    const isActive = idx === safeStageIndex;
-                    const isDone = idx < safeStageIndex;
+                {/* Stage cards */}
+                <div className="mt-4 grid grid-cols-5 gap-1.5">
+                  {STAGES.map((stage, idx) => {
+                    const isActive = idx === safeIndex;
+                    const isStgDone = idx < safeIndex;
+                    const { Icon } = stage;
 
                     return (
                       <motion.div
                         key={stage.key}
                         layout
-                        transition={{ type: "spring", stiffness: 280, damping: 24 }}
-                        className={`relative overflow-hidden rounded-2xl border px-3 py-3 transition-all duration-300 ${
+                        transition={{ type: "spring", stiffness: 350, damping: 30 }}
+                        className={`relative overflow-hidden rounded-xl border p-2.5 transition-all duration-300 ${
                           isActive
-                            ? "border-[#ff8a3d]/25 bg-white/[0.06] shadow-[0_0_0_1px_rgba(255,138,61,0.12),0_0_32px_rgba(255,94,77,0.10)]"
-                            : isDone
-                            ? "border-white/10 bg-white/[0.04]"
-                            : "border-white/6 bg-white/[0.025]"
+                            ? "bg-white/[0.045]"
+                            : isStgDone
+                            ? "bg-white/[0.02]"
+                            : "bg-white/[0.015]"
                         }`}
+                        style={{
+                          borderColor: isActive
+                            ? colors.border
+                            : isStgDone
+                            ? "rgba(255,255,255,0.06)"
+                            : "rgba(255,255,255,0.04)",
+                        }}
                       >
+                        {/* Active top accent */}
                         {isActive && (
                           <motion.div
-                            aria-hidden
-                            className="absolute inset-0 bg-[radial-gradient(circle_at_top,rgba(255,138,61,0.14),transparent_55%)]"
-                            animate={{ opacity: [0.6, 1, 0.6] }}
-                            transition={{ repeat: Infinity, duration: 1.8 }}
+                            className="absolute inset-x-0 top-0 h-px"
+                            animate={{
+                              background: `linear-gradient(90deg, transparent, ${colors.arc[0]}50, transparent)`,
+                            }}
+                            transition={{ duration: 0.8 }}
                           />
                         )}
 
-                        <div className="relative flex items-start gap-3">
-                          <div
-                            className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-all duration-300 ${
-                              isActive
-                                ? "border-[#ff8a3d]/30 bg-gradient-to-br from-[#ff8a3d]/18 to-[#ff5e4d]/12 text-white"
-                                : isDone
-                                ? "border-white/10 bg-white/[0.05] text-white"
-                                : "border-white/8 bg-white/[0.025] text-white/55"
-                            }`}
-                          >
-                            <Icon className={`h-4 w-4 ${isActive ? "text-[#ffb38a]" : ""}`} />
-                          </div>
+                        {/* Icon */}
+                        <motion.div
+                          className={`relative z-10 mb-2 flex h-7 w-7 items-center justify-center rounded-lg border transition-all duration-300 ${
+                            isStgDone ? "border-white/[0.08] bg-white/[0.04]" : "border-white/[0.05] bg-white/[0.025]"
+                          }`}
+                          style={isActive ? {
+                            borderColor: `${colors.arc[0]}30`,
+                            background: `${colors.arc[0]}12`,
+                          } : {}}
+                          animate={isActive && idx < 4 ? { y: [0, -1.5, 0] } : {}}
+                          transition={{ repeat: Infinity, duration: 3, ease: "easeInOut" }}
+                        >
+                          {isStgDone ? (
+                            <motion.div
+                              initial={{ scale: 0 }}
+                              animate={{ scale: 1 }}
+                              transition={{ type: "spring", stiffness: 500, damping: 22 }}
+                            >
+                              <Check className="h-3 w-3 text-white/40" strokeWidth={2.5} />
+                            </motion.div>
+                          ) : (
+                            <motion.div
+                              animate={{ color: isActive ? colors.arc[0] : "rgba(255,255,255,0.22)" }}
+                              transition={{ duration: 0.6 }}
+                            >
+                              <Icon className="h-[13px] w-[13px]" strokeWidth={1.75} />
+                            </motion.div>
+                          )}
+                        </motion.div>
 
-                          <div className="min-w-0">
-                            <p className="text-sm font-medium text-white">{stage.label}</p>
-                            <p className="mt-1 text-[11px] leading-5 text-white/38">
-                              {stage.description}
-                            </p>
-                          </div>
-                        </div>
+                        <p className={`relative z-10 text-[10px] font-medium leading-tight transition-colors duration-300 whitespace-nowrap ${
+                          isActive ? "text-white/88" : isStgDone ? "text-white/42" : "text-white/22"
+                        }`}>
+                          {stage.label}
+                        </p>
+
+                        <p className={`relative z-10 mt-0.5 text-[9px] leading-[1.4] transition-colors duration-300 overflow-hidden text-ellipsis whitespace-nowrap ${
+                          isStgDone ? "text-white/25" : "text-white/15"
+                        }`}
+                          style={isActive ? { color: `${colors.arc[0]}60` } : {}}
+                        >
+                          {isActive && idx < 4
+                            ? latestLog.slice(0, 32) || stage.sub
+                            : isStgDone ? "Complete" : stage.sub}
+                        </p>
                       </motion.div>
                     );
                   })}
                 </div>
 
-                <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-white/[0.05]">
+                {/* Progress bar */}
+                <div className="mt-3 h-[1.5px] rounded-full bg-white/[0.05] overflow-hidden">
                   <motion.div
-                    className="h-full rounded-full bg-gradient-to-r from-[#ff8a3d] via-[#ff5e4d] to-[#ff2d2d]"
-                    initial={false}
-                    animate={{ width: `${pct}%` }}
-                    transition={{ type: "spring", stiffness: 120, damping: 22 }}
+                    className="h-full rounded-full"
+                    animate={{
+                      width: `${pct}%`,
+                      background: `linear-gradient(90deg, ${colors.arc[0]}, ${colors.arc[1]})`,
+                    }}
+                    transition={{ duration: 0.6, ease: [0.4, 0, 0.2, 1] }}
                   />
                 </div>
               </motion.div>
             ) : (
-              // Collapsed: thin icon-only bar
+              /* Collapsed */
               <motion.div
                 key="collapsed"
-                initial={{ opacity: 0, y: -6 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -6 }}
-                transition={{ duration: 0.18 }}
-                className="mt-3 flex items-center justify-between rounded-2xl border border-white/8 bg-white/[0.02] px-3 py-2"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.14 }}
+                className="mt-3 flex items-center justify-between"
               >
-                <div className="flex items-center gap-2">
-                  {stages.map((stage, idx) => {
-                    const Icon = stage.icon;
-                    const isActive = idx === safeStageIndex;
-                    const isDone = idx < safeStageIndex;
-
+                <div className="flex items-center gap-1">
+                  {STAGES.map((stage, idx) => {
+                    const isActive  = idx === safeIndex;
+                    const isStgDone = idx < safeIndex;
+                    const { Icon }  = stage;
                     return (
                       <div
                         key={stage.key}
-                        className={`relative flex h-9 w-9 items-center justify-center rounded-xl border ${
-                          isActive
-                            ? "border-[#ff8a3d]/30 bg-white/[0.06]"
-                            : isDone
-                            ? "border-white/10 bg-white/[0.04]"
-                            : "border-white/8 bg-white/[0.02]"
-                        }`}
                         title={stage.label}
-                        aria-label={stage.label}
+                        className={`relative flex h-6 w-6 items-center justify-center rounded-md border transition-all ${
+                          isStgDone ? "border-white/[0.07] bg-white/[0.03]"
+                          :           "border-white/[0.04] bg-white/[0.015]"
+                        }`}
+                        style={isActive ? {
+                          borderColor: `${colors.arc[0]}25`,
+                          background: `${colors.arc[0]}10`,
+                        } : {}}
                       >
                         {isActive && (
-                          <span className="absolute -top-1 -right-1 h-2 w-2 rounded-full bg-[#ff8a3d]" />
+                          <motion.span
+                            animate={{ opacity: [0.4, 1, 0.4], backgroundColor: colors.dot }}
+                            transition={{ opacity: { repeat: Infinity, duration: 1.6 }, backgroundColor: { duration: 0.8 } }}
+                            className="absolute -right-px -top-px h-1 w-1 rounded-full"
+                          />
                         )}
-                        <Icon className={`h-4 w-4 ${isActive ? "text-[#ffb38a]" : "text-white/65"}`} />
+                        {isStgDone
+                          ? <Check className="h-2.5 w-2.5 text-white/35" strokeWidth={2.5} />
+                          : <motion.div animate={{ color: isActive ? colors.arc[0] : "rgba(255,255,255,0.18)" }} transition={{ duration: 0.6 }}>
+                              <Icon className="h-2.5 w-2.5" strokeWidth={1.75} />
+                            </motion.div>
+                        }
                       </div>
                     );
                   })}
                 </div>
 
-                <div className="text-[11px] text-white/45">
-                  {Math.round(pct)}%
+                <div className="flex items-center gap-2">
+                  <div className="w-16 h-[1.5px] rounded-full bg-white/[0.05] overflow-hidden">
+                    <motion.div
+                      className="h-full rounded-full"
+                      animate={{
+                        width: `${pct}%`,
+                        background: `linear-gradient(90deg, ${colors.arc[0]}, ${colors.arc[1]})`,
+                      }}
+                      transition={{ duration: 0.6, ease: [0.4, 0, 0.2, 1] }}
+                    />
+                  </div>
+                  <motion.span
+                    animate={{ color: isDone ? "rgba(74,222,128,0.55)" : "rgba(255,255,255,0.25)" }}
+                    transition={{ duration: 0.8 }}
+                    className="text-[10px] tabular-nums"
+                  >
+                    {Math.round(pct)}%
+                  </motion.span>
                 </div>
               </motion.div>
             )}
           </AnimatePresence>
         </div>
-      </div>
+      </motion.div>
     </motion.div>
   );
 }
