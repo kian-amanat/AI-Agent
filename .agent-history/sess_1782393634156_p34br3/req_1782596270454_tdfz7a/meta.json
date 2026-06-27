@@ -1,0 +1,13 @@
+{
+  "sessionId": "sess_1782393634156_p34br3",
+  "requestId": "req_1782596270454_tdfz7a",
+  "createdAt": "2026-06-27T21:39:11.689Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx",
+      "existedBefore": true,
+      "snapshotPath": ".agent-history/sess_1782393634156_p34br3/req_1782596270454_tdfz7a/files/chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx.before"
+    }
+  ]
+}
