@@ -300,7 +300,7 @@ export async function callUndo(
 
   const res = await fetch(`${BASE_URL}/undo`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: authHeaders(),
     body: JSON.stringify({ session_id: sessionId, request_id: requestId }),
   });
 

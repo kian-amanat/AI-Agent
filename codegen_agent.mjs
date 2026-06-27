@@ -36,12 +36,16 @@ const DEFAULT_CONFIG = {
   planPath: path.join(PROJECT_ROOT, "planner_plan.json"),
   workspace: PROJECT_ROOT,
   taskWorkspace: PROJECT_ROOT,
-  model: CODEGEN_MODEL,
+  model: process.env.USER_MODEL || CODEGEN_MODEL,
   temperature: 0.1,
   apiKey:
+    process.env.USER_API_KEY ||
     process.env.OPENAI_API_KEY ||
-    "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
-  baseURL: process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1",
+    "",
+  baseURL:
+    process.env.USER_BASE_URL ||
+    process.env.OPENAI_BASE_URL ||
+    "https://api.gapgpt.app/v1",
   skipExisting: true,
   maxContextFiles: 10,
   perFileMaxContextFiles: 8,
@@ -633,6 +637,7 @@ async function generateCode(
   const response = await client.chat.completions.create({
     model: config.model,
     temperature: config.temperature,
+    max_tokens: 4096,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: prompt },
@@ -643,7 +648,11 @@ async function generateCode(
   return cleanGeneratedCode(raw);
 }
 
-function findBestOutputPath(workspaceRoot, relativeFile) {
+async function findBestOutputPath(workspaceRoot, relativeFile) {
+  // Prefer modifying the file where it already exists in the project
+  const existing = await resolveExistingPathByName(workspaceRoot, relativeFile);
+  if (existing) return existing;
+
   const normalized = normalizeRelativePath(relativeFile);
   return resolveFilePath(workspaceRoot, normalized);
 }
@@ -723,6 +732,7 @@ function saveRequestMeta(sessionId, requestId, meta) {
     requestId,
     createdAt: meta.createdAt || new Date().toISOString(),
     files: Array.isArray(meta.files) ? meta.files : [],
+    workspacePath: PROJECT_ROOT,
   };
 
   const metaPath = path.join(dir, "meta.json");
@@ -820,6 +830,8 @@ export async function runCodegen(options = {}) {
   const client = new OpenAI({
     apiKey: config.apiKey,
     baseURL: config.baseURL,
+    timeout: 100000,
+    maxRetries: 1,
   });
 
   if (!fs.existsSync(config.planPath)) {
@@ -894,7 +906,7 @@ export async function runCodegen(options = {}) {
     results.stats.totalFiles++;
 
     const relativeFile = normalizeRelativePath(entry.path);
-    const fullPath = findBestOutputPath(effectiveWorkspace, relativeFile);
+    const fullPath = await findBestOutputPath(effectiveWorkspace, relativeFile);
     const progress = `[${i + 1}/${fileEntries.length}]`;
 
     const currentContent = await readExistingFileContent(effectiveWorkspace, relativeFile);

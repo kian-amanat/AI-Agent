@@ -95,6 +95,11 @@ const userRequestId =
 // Passed from pipeline.service.mjs → pipeline_agent.mjs → all sub-agents.
 const userWorkspacePath = String(process.env.WORKSPACE_PATH || "").trim();
 
+// User's stored API credentials — forwarded from pipeline.service.mjs
+const userApiKey = String(process.env.USER_API_KEY || "").trim();
+const userBaseUrl = String(process.env.USER_BASE_URL || "").trim();
+const userModel = String(process.env.USER_MODEL || "").trim();
+
 if (!userMessage && !userAudioPath && userAttachmentPaths.length === 0) {
   console.error("Usage: node pipeline_agent.mjs <your request>");
   console.error('   or: USER_MESSAGE="your request" node pipeline_agent.mjs');
@@ -115,7 +120,7 @@ if (userWorkspacePath) console.log(`📁 Workspace: ${userWorkspacePath}`);
 console.log("=".repeat(60) + "\n");
 
 async function runAgent(agentName, scriptPath, input, options = {}) {
-  const { captureOutput = false, extraEnv = {} } = options;
+  const { captureOutput = false, extraEnv = {}, timeoutMs = 130000 } = options;
 
   return new Promise((resolve, reject) => {
     console.log(`\n${"▶".repeat(3)} Running ${agentName}...`);
@@ -144,6 +149,10 @@ async function runAgent(agentName, scriptPath, input, options = {}) {
         // [KODO] Pass workspace path to every sub-agent so they all
         // write files to the correct VS Code project folder
         WORKSPACE_PATH: userWorkspacePath,
+        // 🔑 User's stored API credentials
+        USER_API_KEY: userApiKey,
+        USER_BASE_URL: userBaseUrl,
+        USER_MODEL: userModel,
         ...extraEnv,
       },
     });
@@ -184,8 +193,8 @@ async function runAgent(agentName, scriptPath, input, options = {}) {
       setTimeout(() => {
         if (!child.killed) child.kill("SIGKILL");
       }, 5000);
-      reject(new Error(`${agentName} timed out after 2 minutes`));
-    }, 130000);
+      reject(new Error(`${agentName} timed out after ${Math.round(timeoutMs / 60000)} minutes`));
+    }, timeoutMs);
 
     child.on("close", () => {
       clearTimeout(timeout);
@@ -251,7 +260,7 @@ async function main() {
     });
 
     const codegenScript = path.resolve(__dirname, "codegen_agent.mjs");
-    await runAgent("Codegen Agent", codegenScript, finalMessage);
+    await runAgent("Codegen Agent", codegenScript, finalMessage, { timeoutMs: 300000 });
 
     console.log("\n🎉 Pipeline finished successfully.\n");
     process.exit(0);

@@ -1,12 +1,24 @@
 import path from "path";
+import fs from "fs";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const PROJECT_ROOT = path.resolve(__dirname, "..");
+// Two levels up: services/ → backend1/ → ai-sandbox/
+const PROJECT_ROOT = path.resolve(__dirname, "../..");
 const PIPELINE_SCRIPT = path.resolve(process.cwd(), "../pipeline_agent.mjs");
+
+const SETTINGS_PATH = path.join(PROJECT_ROOT, "backend1", "data", "settings.json");
+let _cachedSettings = null;
+function loadSettings() {
+  if (_cachedSettings) return _cachedSettings;
+  try {
+    _cachedSettings = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf-8"));
+  } catch { _cachedSettings = {}; }
+  return _cachedSettings;
+}
 
 export async function runPipeline({
   message,
@@ -91,6 +103,16 @@ export async function runPipeline({
         // 📁 Workspace — pipeline_agent.mjs should use this as the root
         // for all file reads/writes instead of process.cwd()
         WORKSPACE_PATH: resolvedWorkspace,
+
+        // 🔑 User's stored API credentials — forwarded to all sub-agents
+        ...(() => {
+          const s = loadSettings();
+          return {
+            USER_API_KEY: s.textApiKey || "",
+            USER_BASE_URL: s.textBaseUrl || "",
+            USER_MODEL: s.textModel || "",
+          };
+        })(),
       },
 
       cwd: PROJECT_ROOT,
