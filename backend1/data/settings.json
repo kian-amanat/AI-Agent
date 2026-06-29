@@ -1,11 +1,11 @@
 {
   "provider": "gapgpt",
   "model": "gpt-4o-mini",
-  "apiKey": "sk-ZrCqzqvdDsbHaV1s6PKirrzSSrBRPm4GRSuuNHBpub6i7v17",
+  "apiKey": "sk-xgHHbIcXrgI4qin9eJKONZAOFZqxXdGiUW0kHBBfurEtzu9z",
   "baseUrl": "https://api.gapgpt.app/v1",
   "textProvider": "gapgpt",
   "textModel": "gpt-4o-mini",
-  "textApiKey": "sk-ZrCqzqvdDsbHaV1s6PKirrzSSrBRPm4GRSuuNHBpub6i7v17",
+  "textApiKey": "sk-xgHHbIcXrgI4qin9eJKONZAOFZqxXdGiUW0kHBBfurEtzu9z",
   "textBaseUrl": "https://api.gapgpt.app/v1",
   "visionProvider": null,
   "visionModel": null,

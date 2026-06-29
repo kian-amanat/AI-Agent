@@ -28,6 +28,7 @@ export interface AssistantMessageMetadata {
   intent?: string;
   requestId?: string;
   undoResult?: UndoResult;
+  // هر فیلد دیگری که قبلاً داشتی هم می‌تواند اینجا اضافه شود
 }
 
 function parseAssistantContent(content: string) {
@@ -39,9 +40,9 @@ function parseAssistantContent(content: string) {
 
   lines.forEach((line) => {
     if (line.trim().startsWith("```")) {
-      if (!inCodeBlock) {
-        if (currentSection) sections.push(currentSection);
-        codeLanguage = line.trim().replace(/```/g, "").trim();
+if (!inCodeBlock) {
+if (currentSection) sections.push(currentSection);
+codeLanguage = line.trim().replace(/```/g, "").trim();
         currentSection = { type: "code", content: "", language: codeLanguage };
         inCodeBlock = true;
       } else {
@@ -116,7 +117,9 @@ function parseAssistantContent(content: string) {
 type AssistantMessageProps = {
   content: string;
   metadata?: AssistantMessageMetadata;
+  /** وقتی روی دکمه Undo کلیک می‌شود */
   onUndoClick?: () => void;
+  /** آیا الان در حال اجرای Undo برای این پیام هستیم؟ */
   isUndoing?: boolean;
 };
 
@@ -127,9 +130,12 @@ export default function AssistantMessage({
   isUndoing,
 }: AssistantMessageProps) {
   const sections = parseAssistantContent(content);
-  const canShowUndo = !!metadata?.requestId && !!onUndoClick;
+  const canShowUndo =
+    !!metadata?.requestId && !!onUndoClick;
+
   const undoResult = metadata?.undoResult;
 
+  // حالت موفقیت دائمی بعد از اتمام Undo (تا وقتی metadata عوض نشه)
   const [undoSucceeded, setUndoSucceeded] = React.useState(false);
 
   React.useEffect(() => {
@@ -139,7 +145,7 @@ export default function AssistantMessage({
   }, [undoResult]);
 
   return (
-    <div className="space-y-3 bg-transparent p-0 text-white/88">
+    <div className="space-y-3">
       {sections.map((section, idx) => {
         if (section.type === "bullet") {
           const items = section.content.split("\n").filter((l) => l.trim());
@@ -158,7 +164,7 @@ export default function AssistantMessage({
 
                 return (
                   <li key={i} className="flex items-start gap-2.5">
-                    <span className="mt-2 h-1 w-1 rounded-full bg-white/28" />
+                    <span className="mt-1 text-white/30">•</span>
                     <span className="flex-1 text-[15px] leading-7 text-white/84">
                       {cleanText}
                     </span>
@@ -182,7 +188,7 @@ export default function AssistantMessage({
 
                 return (
                   <li key={i} className="flex items-start gap-2.5">
-                    <span className="min-w-[20px] text-sm font-medium text-white/42">
+                    <span className="min-w-[24px] text-sm font-medium text-white/42">
                       {i + 1}.
                     </span>
                     <span className="flex-1 text-[15px] leading-7 text-white/84">
@@ -199,14 +205,14 @@ export default function AssistantMessage({
           return (
             <div
               key={idx}
-              className="overflow-x-auto rounded-2xl bg-white/[0.03] p-4 shadow-none"
+              className="overflow-x-auto rounded-2xl border border-white/10 bg-[#0f0f0f] p-4 shadow-inner"
             >
               {section.language && (
-                <div className="mb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-white/28">
+                <div className="mb-2 font-mono text-[11px] uppercase tracking-[0.18em] text-white/35">
                   {section.language}
                 </div>
               )}
-              <pre className="whitespace-pre-wrap break-words font-mono text-[13px] leading-6 text-white/86">
+              <pre className="whitespace-pre-wrap break-words font-mono text-[13px] leading-6 text-white/88">
                 {section.content}
               </pre>
             </div>
@@ -222,7 +228,7 @@ export default function AssistantMessage({
               key={idx}
               className={`${
                 sizes[level - 1] || "text-base"
-              } mb-1.5 mt-3 font-semibold tracking-[-0.01em] text-white`}
+              } mb-1.5 mt-3 font-semibold text-white`}
             >
               {text}
             </h3>
@@ -230,7 +236,12 @@ export default function AssistantMessage({
         }
 
         if (section.type === "divider") {
-          return <div key={idx} className="my-4 h-px bg-white/6" />;
+          return (
+            <div
+              key={idx}
+              className="my-4 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent"
+            />
+          );
         }
 
         if (section.content.trim()) {
@@ -247,6 +258,7 @@ export default function AssistantMessage({
         return null;
       })}
 
+      {/* دکمه Undo برای پیام‌های technical با requestId */}
       {canShowUndo && (
         <div className="mt-3">
           <button
@@ -255,14 +267,13 @@ export default function AssistantMessage({
             disabled={isUndoing || undoSucceeded}
             className={[
               "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium",
+              // ترنزیشن نرم برای رنگ، بوردِر، سایه و scale
               "transition-all duration-300 ease-out",
-              "bg-transparent border-0 shadow-none",
-              "hover:bg-white/[0.04]",
               isUndoing
-                ? "text-amber-200/90"
+                ? "border border-amber-400/60 bg-amber-400/10 text-amber-50 shadow-[0_0_0_1px_rgba(251,191,36,0.25)] scale-[0.98]"
                 : undoSucceeded
-                ? "text-emerald-200/90"
-                : "text-white/62 hover:text-white/82",
+                ? "border border-emerald-400/80 bg-emerald-400/10 text-emerald-50 shadow-[0_0_18px_rgba(16,185,129,0.25)]"
+                : "border border-white/14 bg-white/[0.02] text-white/80 hover:border-white/26 hover:bg-white/[0.06]",
               (isUndoing || undoSucceeded) && "cursor-default",
             ]
               .filter(Boolean)

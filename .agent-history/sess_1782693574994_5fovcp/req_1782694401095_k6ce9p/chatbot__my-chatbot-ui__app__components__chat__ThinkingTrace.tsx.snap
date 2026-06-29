@@ -1,0 +1,347 @@
+"use client";
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  ChevronDown,
+  Search,
+  FileText,
+  ListChecks,
+  Pencil,
+  Plus,
+  Trash2,
+  CheckCircle2,
+  Loader2,
+  Sparkles,
+} from "lucide-react";
+
+/**
+ * ThinkingTrace — Apple-style inline "thinking" stream.
+ *
+ * One clean layer. The active node glows with a hot orange→red gradient
+ * and a soft halo. Completed steps settle into calm, refined per-action
+ * colors. Collapses into a "Thought for Xs" pill when finished.
+ */
+
+export type ThinkingStepKind =
+  | "route"
+  | "explore"
+  | "file_loaded"
+  | "plan"
+  | "edit"
+  | "create"
+  | "delete"
+  | "verify"
+  | "info";
+
+export interface ThinkingStep {
+  id: string;
+  kind: ThinkingStepKind;
+  text: string;
+  detail?: string;
+  status?: "running" | "done" | "error";
+  at: number;
+}
+
+const KIND_ICON: Record<ThinkingStepKind, React.ElementType> = {
+  route:       Search,
+  explore:     FileText,
+  file_loaded: FileText,
+  plan:        ListChecks,
+  edit:        Pencil,
+  create:      Plus,
+  delete:      Trash2,
+  verify:      CheckCircle2,
+  info:        Sparkles,
+};
+
+// Refined, distinct per-action colors (calm but legible on dark)
+const KIND_ACCENT: Record<ThinkingStepKind, string> = {
+  route:       "#ff9456",  // warm amber-orange
+  explore:     "#7dd3fc",  // sky
+  file_loaded: "#94a3b8",  // slate
+  plan:        "#c084fc",  // violet
+  edit:        "#60a5fa",  // blue
+  create:      "#34d399",  // emerald
+  delete:      "#fb7185",  // rose
+  verify:      "#4ade80",  // green
+  info:        "#94a3b8",  // slate
+};
+
+// Soft background tint per action for the icon chip (subtle, Apple-like)
+const KIND_TINT: Record<ThinkingStepKind, string> = {
+  route:       "rgba(255,148,86,0.12)",
+  explore:     "rgba(125,211,252,0.12)",
+  file_loaded: "rgba(148,163,184,0.10)",
+  plan:        "rgba(192,132,252,0.12)",
+  edit:        "rgba(96,165,250,0.12)",
+  create:      "rgba(52,211,153,0.12)",
+  delete:      "rgba(251,113,133,0.12)",
+  verify:      "rgba(74,222,128,0.12)",
+  info:        "rgba(148,163,184,0.10)",
+};
+
+function formatDuration(ms: number): string {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
+
+export default function ThinkingTrace({
+  steps,
+  isActive,
+  startedAt,
+}: {
+  steps: ThinkingStep[];
+  isActive: boolean;
+  startedAt: number | null;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const [elapsed, setElapsed]   = useState(0);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isActive || !startedAt) return;
+    const id = setInterval(() => setElapsed(Date.now() - startedAt), 200);
+    return () => clearInterval(id);
+  }, [isActive, startedAt]);
+
+  useEffect(() => {
+    if (!isActive && startedAt) {
+      const t = setTimeout(() => setExpanded(false), 800);
+      return () => clearTimeout(t);
+    }
+  }, [isActive, startedAt]);
+
+  useEffect(() => {
+    if (expanded && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [steps, expanded]);
+
+  const totalDuration = useMemo(() => {
+    if (!startedAt) return 0;
+    if (isActive) return elapsed;
+    const last = steps[steps.length - 1]?.at ?? startedAt;
+    return Math.max(elapsed, last - startedAt);
+  }, [steps, isActive, elapsed, startedAt]);
+
+  if (steps.length === 0 && !isActive) return null;
+
+  const lastIndex = steps.length - 1;
+
+  return (
+    <div className="mb-3">
+      {/* ───────── Header pill ───────── */}
+      <motion.button
+        type="button"
+        onClick={() => setExpanded(v => !v)}
+        whileTap={{ scale: 0.98 }}
+        className="group relative flex items-center gap-2.5 overflow-hidden rounded-full px-3 py-1.5"
+        style={{
+          border: isActive
+            ? "1px solid rgba(255,122,61,0.30)"
+            : "1px solid rgba(255,255,255,0.08)",
+          background: isActive
+            ? "linear-gradient(100deg, rgba(255,122,61,0.14), rgba(255,46,46,0.06))"
+            : "rgba(255,255,255,0.03)",
+          backdropFilter: "blur(8px)",
+          boxShadow: isActive ? "0 2px 16px rgba(255,90,40,0.18)" : "none",
+        }}
+      >
+        {isActive && (
+          <motion.div
+            className="pointer-events-none absolute inset-0"
+            initial={{ x: "-130%" }}
+            animate={{ x: "130%" }}
+            transition={{ repeat: Infinity, duration: 2.4, ease: "easeInOut" }}
+            style={{
+              background:
+                "linear-gradient(105deg, transparent, rgba(255,160,90,0.18), transparent)",
+            }}
+          />
+        )}
+
+        <span className="relative flex h-2 w-2 flex-shrink-0">
+          {isActive && (
+            <motion.span
+              className="absolute inset-0 rounded-full"
+              animate={{ scale: [1, 2.4, 1], opacity: [0.7, 0, 0.7] }}
+              transition={{ repeat: Infinity, duration: 1.6, ease: "easeOut" }}
+              style={{ background: "#ff7a3d" }}
+            />
+          )}
+          <span
+            className="relative h-2 w-2 rounded-full"
+            style={{
+              background: isActive
+                ? "linear-gradient(135deg, #ff7a3d, #ff2e2e)"
+                : "rgba(255,255,255,0.25)",
+              boxShadow: isActive ? "0 0 8px rgba(255,90,40,0.8)" : "none",
+            }}
+          />
+        </span>
+
+        <span className="relative text-[12.5px] font-medium tracking-tight">
+          {isActive ? (
+            <span
+              className="bg-clip-text text-transparent"
+              style={{ backgroundImage: "linear-gradient(90deg, #ff9a5d, #ff5e4d)" }}
+            >
+              Thinking…
+            </span>
+          ) : (
+            <span className="text-white/60">
+              Thought for {formatDuration(totalDuration)}
+            </span>
+          )}
+        </span>
+
+        {steps.length > 0 && (
+          <span className="relative rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white/40">
+            {steps.length}
+          </span>
+        )}
+
+        <motion.div
+          animate={{ rotate: expanded ? 0 : -90 }}
+          transition={{ duration: 0.25 }}
+          className="relative flex-shrink-0"
+        >
+          <ChevronDown className="h-3.5 w-3.5 text-white/30 group-hover:text-white/55" strokeWidth={2} />
+        </motion.div>
+      </motion.button>
+
+      {/* ───────── Step list ───────── */}
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.28, ease: [0.25, 0.46, 0.45, 0.94] }}
+            className="overflow-hidden"
+          >
+            {/*
+              Layout: the rail sits at the far left (left:2px). Each row
+              reserves left padding so the 24px icon chip sits to the RIGHT
+              of the rail with a clear gap — the line never crosses the icons.
+            */}
+            <div
+              ref={scrollRef}
+              className="relative mt-2 max-h-[320px] overflow-y-auto pr-1"
+            >
+              {/* Timeline rail (base) — far left */}
+              <div className="absolute bottom-3 left-[2px] top-2.5 w-px bg-white/[0.08]" />
+              {/* Filled rail */}
+              <motion.div
+                className="absolute left-[2px] top-2.5 w-px"
+                initial={{ height: 0 }}
+                animate={{ height: isActive ? "calc(100% - 30px)" : "calc(100% - 22px)" }}
+                transition={{ duration: 0.5, ease: "easeOut" }}
+                style={{
+                  background: "linear-gradient(180deg, #ff7a3d, #ff2e2e 80%, transparent)",
+                  opacity: 0.5,
+                }}
+              />
+
+              <div className="space-y-0.5 py-0.5">
+                <AnimatePresence initial={false}>
+                  {steps.map((step, idx) => {
+                    const Icon    = KIND_ICON[step.kind] || Sparkles;
+                    const accent  = KIND_ACCENT[step.kind] || "#94a3b8";
+                    const tint    = KIND_TINT[step.kind] || "rgba(148,163,184,0.10)";
+                    const isLive  = isActive && idx === lastIndex;
+                    const isError = step.status === "error";
+
+                    return (
+                      <motion.div
+                        key={step.id}
+                        layout
+                        initial={{ opacity: 0, x: -8 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0 }}
+                        transition={{ duration: 0.25, ease: "easeOut" }}
+                        className="relative flex items-center gap-2.5 rounded-xl py-1 pl-[38px] pr-2"
+                        style={
+                          isLive
+                            ? { background: "linear-gradient(100deg, rgba(255,122,61,0.10), transparent 75%)" }
+                            : {}
+                        }
+                      >
+                        {/* Icon chip — sits to the RIGHT of the rail (rail left:2px, chip left:14px → ~12px gap) */}
+                        <div className="absolute left-[14px] top-1/2 z-10 -translate-y-1/2">
+                          {/* Glow halo behind active node */}
+                          {isLive && (
+                            <motion.span
+                              className="absolute -inset-2 rounded-full"
+                              animate={{ opacity: [0.4, 0.9, 0.4], scale: [0.85, 1.2, 0.85] }}
+                              transition={{ repeat: Infinity, duration: 1.6, ease: "easeInOut" }}
+                              style={{
+                                background:
+                                  "radial-gradient(circle, rgba(255,90,40,0.6), transparent 70%)",
+                              }}
+                            />
+                          )}
+                          <div
+                            className="relative flex h-6 w-6 items-center justify-center rounded-full"
+                            style={{
+                              background: isLive
+                                ? "linear-gradient(135deg, #ff7a3d, #ff2e2e)"
+                                : isError
+                                ? "rgba(251,113,133,0.14)"
+                                : tint,
+                              border: isLive
+                                ? "none"
+                                : `1px solid ${isError ? "rgba(251,113,133,0.35)" : "rgba(255,255,255,0.06)"}`,
+                              boxShadow: isLive
+                                ? "0 0 14px rgba(255,90,40,0.75), inset 0 1px 1px rgba(255,255,255,0.35)"
+                                : "none",
+                            }}
+                          >
+                            {isLive ? (
+                              <Loader2 className="h-3 w-3 animate-spin text-white" strokeWidth={2.6} />
+                            ) : (
+                              <Icon
+                                className="h-[13px] w-[13px]"
+                                strokeWidth={2.3}
+                                style={{ color: isError ? "#fb7185" : accent }}
+                              />
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Text */}
+                        <div className="min-w-0 flex-1">
+                          <span
+                            className="text-[12.5px] leading-5"
+                            style={{
+                              color: isLive
+                                ? "rgba(255,255,255,0.95)"
+                                : isError
+                                ? "rgba(255,150,150,0.88)"
+                                : "rgba(255,255,255,0.58)",
+                              fontWeight: isLive ? 500 : 400,
+                            }}
+                          >
+                            {step.text}
+                          </span>
+                          {step.detail && (
+                            <span className="ml-1.5 rounded-md bg-white/[0.05] px-1.5 py-px font-mono text-[10.5px] text-white/40">
+                              {step.detail.split("/").pop()}
+                            </span>
+                          )}
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                </AnimatePresence>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
