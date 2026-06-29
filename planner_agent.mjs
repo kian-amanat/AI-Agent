@@ -19,16 +19,16 @@ const FRONTEND_ROOT = path.join(PROJECT_ROOT, "frontend");
 const BACKEND_CWD_REL = path.relative(PROJECT_ROOT, BACKEND_ROOT) || "backend";
 const FRONTEND_CWD_REL = path.relative(PROJECT_ROOT, FRONTEND_ROOT) || "frontend";
 
-// [KODO] Read user settings first, fallback to env/hardcoded
+// [KODO] Credentials: env vars passed from pipeline take priority, then settings.json fallback
 const SETTINGS_PATH = path.join(PROJECT_ROOT, "backend1", "data", "settings.json");
 let userSettings = null;
 try {
   userSettings = JSON.parse(fs.readFileSync(SETTINGS_PATH, "utf-8"));
 } catch { /* no settings file yet — use defaults */ }
 
-const OPENAI_MODEL = userSettings?.textModel || process.env.OPENAI_MODEL || PLANNING_MODEL;
-const OPENAI_BASE_URL = userSettings?.textBaseUrl || process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1";
-const OPENAI_API_KEY = userSettings?.textApiKey || process.env.OPENAI_API_KEY || "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD";
+const OPENAI_MODEL = process.env.USER_MODEL || userSettings?.textModel || process.env.OPENAI_MODEL || PLANNING_MODEL;
+const OPENAI_BASE_URL = process.env.USER_BASE_URL || userSettings?.textBaseUrl || process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1";
+const OPENAI_API_KEY = process.env.USER_API_KEY || userSettings?.textApiKey || process.env.OPENAI_API_KEY || "";
 
 if (!OPENAI_API_KEY) {
   throw new Error("Missing OPENAI_API_KEY env var.");

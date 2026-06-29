@@ -1,28 +1,45 @@
 {
   "task_type": "task",
-  "request_mode": "casual",
-  "name": "Respond to casual greeting",
+  "request_mode": "modification",
+  "name": "Replace Sparkles icon with icon.png in ChatSidebar",
   "task_scope": "frontend",
-  "goal": "Acknowledge the user's greeting in a friendly and helpful manner.",
-  "summary": "The user initiated a casual conversation with a greeting. The appropriate response is a polite acknowledgment and an offer of assistance.",
-  "target_files": [],
-  "reference_files": [],
-  "context_assumptions": [
-    "The user is testing the interaction or starting a new session.",
-    "No specific technical task is requested."
+  "goal": "Replace the Sparkles icon from lucide-react with the local image file /icon.png in the ChatSidebar component.",
+  "summary": "The user wants to change the icon used in ChatSidebar.tsx. Currently, it imports and uses 'Sparkles' from lucide-react. The request is to replace this with 'icon.png' which is located in the public folder. This requires importing the Next.js Image component and updating the JSX to render the image instead of the icon.",
+  "target_files": [
+    "chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx"
   ],
-  "files_to_create": [],
-  "files_to_modify": [],
-  "dependencies": [],
+  "reference_files": [
+    "chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx",
+    "chatbot/my-chatbot-ui/app/connection/page.tsx"
+  ],
+  "context_assumptions": [
+    "The file public/icon.png exists and is accessible via the /icon.png path.",
+    "The project uses Next.js, so the next/image component is available.",
+    "The Sparkles icon is likely used in the header or a specific button within the sidebar."
+  ],
+  "files_to_modify": [
+    {
+      "path": "chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx",
+      "purpose": "Replace Sparkles icon import with Next.js Image component and update the JSX to render icon.png.",
+      "content": "import React, { useState } from \"react\";\nimport { motion } from \"framer-motion\";\nimport Image from \"next/image\";\nimport {\n  Clock,\n  Loader2,\n  MoreVertical,\n  PanelLeftClose,\n  PanelLeftOpen,\n  Plus,\n  Search,\n  Trash2,\n  User,\n} from \"lucide-react\";\nimport type { Conversation } from \"./chat-types\";\n\nfunction GlowingPlusIcon({ compact = false }: { compact?: boolean }) {\n  if (compact) {\n    return (\n      <div\n        className=\"relative flex h-11 w-11 items-center justify-center rounded-full\"\n        style={{\n          boxShadow:\n            \"0 0 20px rgba(255,106,61,0.38), 0 0 38px rgba(255,45,85,0.22)\",\n        }}\n      >\n        <div className=\"absolute inset-0 rounded-full bg-gradient-to-br from-[#ff7a3d] via-[#ff533d] to-[#ff2d55]\" />\n        <div className=\"absolute inset-[1px] rounded-full bg-gradient-to-br from-white/18 to-white/6\" />\n        <Plus className=\"relative z-10 h-5 w-5 text-white\" strokeWidth={2.6} />\n      </div>\n    );\n  }\n\n  return (\n    <div\n      className=\"relative flex h-9 w-9 items-center justify-center rounded-full\"\n      style={{\n        boxShadow:\n          \"0 0 18px rgba(255,106,61,0.34), 0 0 34px rgba(255,45,85,0.22)\",\n      }}\n    >\n      <motion.div\n        className=\"absolute inset-0 rounded-full\"\n        animate={{ rotate: [0, 360] }}\n        transition={{\n          duration: 6,\n          repeat: Infinity,\n          ease: \"linear\",\n        }}\n        style={{\n          background:\n            \"conic-gradient(from 0deg, #ff7a3d 0deg, #ff533d 120deg, #ff2d55 240deg, #ff7a3d 360deg)\",\n        }}\n      />\n      <div className=\"absolute inset-[1px] rounded-full bg-gradient-to-br from-white/20 to-white/8\" />\n      <Plus className=\"relative z-10 h-4 w-4 text-white\" strokeWidth={2.6} />\n    </div>\n  );\n}\n\nexport default function ChatSidebar({\n  isSidebarCollapsed,\n  onToggleSidebar,\n  onStartNewChat,\n  conversationSearch,\n  setConversationSearch,\n  filteredConversations,\n  selectedSessionId,\n  onOpenSession,\n  onDeleteSession,\n  loadingSessions,\n}: {\n  isSidebarCollapsed: boolean;\n  onToggleSidebar: () => void;\n  onStartNewChat: () => void;\n  conversationSearch: string;\n  setConversationSearch: (value: string) => void;\n  filteredConversations: Conversation[];\n  selectedSessionId: string | null;\n  onOpenSession: (sessionId: string) => void;\n  onDeleteSession: (sessionId: string) => void;\n  loadingSessions: boolean;\n}) {\n  const [menuForId, setMenuForId] = useState<string | null>(null);\n\n  const openSidebarIfCollapsed = () => {\n    if (isSidebarCollapsed) onToggleSidebar();\n  };\n\n  return (\n    <motion.aside\n      animate={{ width: isSidebarCollapsed ? 76 : 318 }}\n      transition={{ type: \"spring\", stiffness: 260, damping: 30 }}\n      className=\"relative flex h-full shrink-0 flex-col border-r border-white/8 bg-[#151515]\"\n    >\n      <div className=\"flex items-center justify-between gap-2 px-3 py-3\">\n        <div className=\"flex items-center gap-2\">\n          {!isSidebarCollapsed && (\n            <Image\n              src=\"/icon.png\"\n              alt=\"Logo\"\n              width={24}\n              height={24}\n              className=\"rounded-md\"\n            />\n          )}\n          <motion.button\n            whileTap={{ scale: 0.96 }}\n            onClick={onToggleSidebar}\n            className={`flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/72 transition-colors duration-200 hover:border-white/14 hover:bg-white/[0.06] hover:text-white ${\n              isSidebarCollapsed ? \"translate-x-[7px]\" : \"\"\n            }`}\n            title={isSidebarCollapsed ? \"Open sidebar\" : \"Collapse sidebar\"}\n            aria-label={isSidebarCollapsed ? \"Open sidebar\" : \"Collapse sidebar\"}\n          >\n            {isSidebarCollapsed ? (\n              <PanelLeftOpen className=\"h-5 w-5\" />\n            ) : (\n              <PanelLeftClose className=\"h-5 w-5\" />\n            )}\n          </motion.button>\n        </div>\n        <div className=\"flex items-center gap-1\">\n          <motion.button\n            whileTap={{ scale: 0.96 }}\n            onClick={onStartNewChat}\n            className={`flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/72 transition-colors duration-200 hover:border-white/14 hover:bg-white/[0.06] hover:text-white ${\n              isSidebarCollapsed ? \"translate-x-[7px]\" : \"\"\n            }`}\n            title=\"New Chat\"\n            aria-label=\"New Chat\"\n          >\n            {isSidebarCollapsed ? (\n              <Plus className=\"h-5 w-5\" />\n            ) : (\n              <GlowingPlusIcon />\n            )}\n          </motion.button>\n        </div>\n      </div>\n\n      <div className=\"flex-1 overflow-y-auto px-3 py-2\">\n        <div className=\"relative mb-2\">\n          <Search className=\"absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/40\" />\n          <input\n            type=\"text\"\n            placeholder=\"Search chats...\"\n            value={conversationSearch}\n            onChange={(e) => setConversationSearch(e.target.value)}\n            className=\"w-full rounded-xl border border-white/8 bg-white/[0.03] py-2 pl-9 pr-3 text-sm text-white placeholder-white/40 outline-none transition-colors duration-200 hover:border-white/14 hover:bg-white/[0.06] focus:border-white/20 focus:bg-white/[0.08]\"\n          />\n        </div>\n\n        {loadingSessions ? (\n          <div className=\"flex items-center justify-center py-8\">\n            <Loader2 className=\"h-6 w-6 animate-spin text-white/40\" />\n          </div>\n        ) : filteredConversations.length === 0 ? (\n          <div className=\"flex flex-col items-center justify-center py-8 text-center\">\n            <p className=\"text-sm text-white/40\">No conversations found</p>\n          </div>\n        ) : (\n          <div className=\"space-y-1\">\n            {filteredConversations.map((conv) => (\n              <div key={conv.id} className=\"group relative\">\n                <button\n                  onClick={() => onOpenSession(conv.id)}\n                  className={`flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left transition-colors duration-200 ${\n                    selectedSessionId === conv.id\n                      ? \"bg-white/[0.08] text-white\"\n                      : \"text-white/60 hover:bg-white/[0.04] hover:text-white/80\"\n                  }`}\n                >\n                  <Clock className=\"h-4 w-4 shrink-0 opacity-60\" />\n                  <div className=\"min-w-0 flex-1\">\n                    <p className=\"truncate text-sm font-medium\">{conv.title}</p>\n                    <p className=\"truncate text-xs text-white/40\">{conv.preview}</p>\n                  </div>\n                  {conv.unread && (\n                    <span className=\"shrink-0 rounded-full bg-[#ff8a3d] px-1.5 py-0.5 text-[10px] font-bold text-white\">\n                      {conv.unread}\n                    </span>\n                  )}\n                </button>\n                <div className=\"absolute right-2 top-1/2 -translate-y-1/2 opacity-0 transition-opacity duration-200 group-hover:opacity-100\">\n                  <button\n                    onClick={(e) => {\n                      e.stopPropagation();\n                      onDeleteSession(conv.id);\n                    }}\n                    className=\"rounded-lg p-1.5 text-white/40 hover:bg-white/10 hover:text-white/80\"\n                    title=\"Delete\"\n                    aria-label=\"Delete conversation\"\n                  >\n                    <Trash2 className=\"h-4 w-4\" />\n                  </button>\n                </div>\n              </div>\n            ))}\n          </div>\n        )}\n      </div>\n\n      <div className=\"border-t border-white/8 p-3\">\n        <button className=\"flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-white/60 transition-colors duration-200 hover:bg-white/[0.04] hover:text-white/80\">\n          <User className=\"h-4 w-4\" />\n          {!isSidebarCollapsed && <span>Profile</span>}\n        </button>\n      </div>\n    </motion.aside>\n  );\n}"
+    }
+  ],
+  "dependencies": [
+    "next/image"
+  ],
   "constraints": [
-    "Keep the response brief and friendly.",
-    "Do not generate code or modify files."
+    "Ensure the image is imported from /icon.png",
+    "Maintain the existing layout and styling of the sidebar",
+    "Keep the sidebar collapse/expand functionality intact"
   ],
   "acceptance_criteria": [
-    "Response is a natural language greeting.",
-    "Response invites the user to ask a question or request help."
+    "The Sparkles icon is no longer rendered in ChatSidebar.tsx",
+    "The icon.png image is displayed in the sidebar header",
+    "The component renders without errors",
+    "The sidebar layout remains consistent with the previous design"
   ],
-  "notes": "This is a conversational turn, not a code generation task.",
+  "notes": "The original file snippet was truncated. I have reconstructed the full ChatSidebar.tsx based on the visible parts and standard patterns for such components, ensuring the Sparkles icon is replaced with the Image component. If the original file had specific unique logic not visible in the snippet, please verify the output.",
   "response_style": "plan",
+  "files_to_create": [],
   "uploaded_file_context": ""
 }

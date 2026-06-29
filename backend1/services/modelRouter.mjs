@@ -29,7 +29,7 @@ export function routeModel(userSettings, hasAttachments = false) {
       provider: userSettings.textProvider,
       model: userSettings.textModel,
       apiKey: userSettings.textApiKey,
-      baseUrl: model?.baseUrl,
+      baseUrl: userSettings.textBaseUrl || model?.baseUrl,
       switchedModel: false,
       uploadEnabled: !!visionConfigured,
     };
@@ -62,7 +62,7 @@ export function routeModel(userSettings, hasAttachments = false) {
     provider: userSettings.visionProvider,
     model: userSettings.visionModel,
     apiKey: userSettings.visionApiKey,
-    baseUrl: model?.baseUrl,
+    baseUrl: userSettings.textBaseUrl || model?.baseUrl,
     switchedModel: true,
     switchedFrom: userSettings.textModel,
     switchedTo: userSettings.visionModel,

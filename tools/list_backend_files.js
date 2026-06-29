@@ -17,6 +17,14 @@ const DEFAULT_IGNORES = new Set([
 
 function normalizeDir(inputDir) {
   if (!inputDir || typeof inputDir !== "string") return "";
+  // If it's an absolute path, make it relative to PROJECT_ROOT so the
+  // path.resolve(PROJECT_ROOT, relDir) dance works correctly.
+  if (path.isAbsolute(inputDir)) {
+    const rel = path.relative(PROJECT_ROOT, inputDir);
+    // If outside PROJECT_ROOT (starts with ".."), fall back to root
+    if (rel.startsWith("..")) return "";
+    return rel.replace(/\\/g, "/") || "";
+  }
   let dir = inputDir.trim().replace(/^["'`]+|["'`]+$/g, "");
   dir = dir.replace(/^\.?\//, "");
   return path.normalize(dir).replace(/\\/g, "/");
