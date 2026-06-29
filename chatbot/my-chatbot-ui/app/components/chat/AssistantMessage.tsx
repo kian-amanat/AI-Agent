@@ -131,7 +131,7 @@ export default function AssistantMessage({
 }: AssistantMessageProps) {
   const sections = parseAssistantContent(content);
   const canShowUndo =
-    metadata?.intent === "technical" && !!metadata?.requestId && !!onUndoClick;
+    !!metadata?.requestId && !!onUndoClick;
 
   const undoResult = metadata?.undoResult;
 

@@ -15,7 +15,9 @@ export default function SignUpPage() {
       >
         {/* Liquid Glass Decorative Side */}
         <div className="hidden md:flex w-2/5 flex-col items-center justify-center p-8 relative overflow-hidden">
-
+          <div className="absolute inset-0 bg-gradient-to-br from-[#ff2d2d]/20 via-[#ff5e4d]/10 to-[#ff8a3d]/5" />
+          <div className="absolute -top-10 -right-10 w-40 h-40 bg-[#ff2d2d]/30 rounded-full blur-3xl animate-pulse" />
+          <div className="absolute -bottom-10 -left-10 w-40 h-40 bg-[#ff8a3d]/30 rounded-full blur-3xl animate-pulse delay-700" />
           
           <div className="relative z-10 flex flex-col items-center text-center">
             <Image

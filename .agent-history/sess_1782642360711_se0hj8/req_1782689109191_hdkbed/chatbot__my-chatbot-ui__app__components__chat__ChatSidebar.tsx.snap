@@ -99,7 +99,7 @@ export default function ChatSidebar({
 <motion.button
   whileTap={{ scale: 0.96 }}
   onClick={onToggleSidebar}
-  className={`flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 text-white/72 transition-colors duration-200 hover:border-white/14 hover:text-white ${
+  className={`flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/72 transition-colors duration-200 hover:border-white/14 hover:bg-white/[0.06] hover:text-white ${
     isSidebarCollapsed ? "translate-x-[7px]" : ""
   }`}
   title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
@@ -108,13 +108,23 @@ export default function ChatSidebar({
   {isSidebarCollapsed ? (
     <PanelLeftOpen className="h-5 w-5" />
   ) : (
-    <Image src="/icon.png" alt="Collapse" width={32} height={32} quality={100} />
+    <Image src="/icon.png" alt="Collapse" width={16} height={16} />
   )}
 </motion.button>
 
         {!isSidebarCollapsed && (
           <div className="flex min-w-0 items-center gap-2">
-
+            <div className="flex h-9 w-9 items-center justify-center rounded-2xl border border-white/8 bg-white/[0.03] text-white/88">
+              <Image src="/icon.png" alt="AI Assistant" width={32} height={32} />
+            </div>
+            <div className="min-w-0">
+              <p className="truncate text-sm font-semibold text-white">
+                AI Assistant
+              </p>
+              <p className="truncate text-xs text-white/38">
+                Minimal chat interface
+              </p>
+            </div>
           </div>
         )}
       </div>
