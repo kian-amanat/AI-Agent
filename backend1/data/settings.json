@@ -1,10 +1,10 @@
 {
   "provider": "gapgpt",
-  "model": "gapgpt-qwen-3.6",
+  "model": "gpt-4o-mini",
   "apiKey": "sk-ZrCqzqvdDsbHaV1s6PKirrzSSrBRPm4GRSuuNHBpub6i7v17",
   "baseUrl": "https://api.gapgpt.app/v1",
   "textProvider": "gapgpt",
-  "textModel": "gapgpt-qwen-3.6",
+  "textModel": "gpt-4o-mini",
   "textApiKey": "sk-ZrCqzqvdDsbHaV1s6PKirrzSSrBRPm4GRSuuNHBpub6i7v17",
   "textBaseUrl": "https://api.gapgpt.app/v1",
   "visionProvider": null,

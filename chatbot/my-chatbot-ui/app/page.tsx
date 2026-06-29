@@ -687,7 +687,7 @@ pipeline.start();
                                     content={m.content}
                                     metadata={m.metadata}
                                     onUndoClick={
-                                      m.metadata?.intent === "technical" &&
+                                      m.metadata?.intent === "technical" || m.metadata?.intent === "graph" &&
                                       m.metadata?.requestId
                                         ? () => handleUndoClick(m.id)
                                         : undefined

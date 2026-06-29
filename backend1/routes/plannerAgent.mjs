@@ -1,3 +1,7 @@
+/**
+ * routes/plannerAgent.mjs  — UPDATED for LangGraph + Memory (Tier 1+2)
+ */
+
 import { promises as fs, createReadStream, createWriteStream } from "fs";
 import path from "path";
 import { pipeline } from "stream/promises";
@@ -20,38 +24,27 @@ import {
   rememberAssistantMessage,
   rememberTargetFile,
 } from "../services/memory.service.mjs";
-import { parseIncomingPayload } from "../utils/request.util.mjs";
-import { loadAttachmentsFromPaths } from "../services/attachments.service.mjs";
-import { classifyIntent, detectLanguage } from "../services/intent.service.mjs";
-import {
-  generateGreetingResponse,
-  generateInspectionResponse,
-  generateCodeResponse,
-  generateClarificationResponse,
-  generateCasualResponse,
-  streamPlanSummary,
-} from "../services/response.service.mjs";
-import { runPipeline } from "../services/pipeline.service.mjs";
-import {
-  PLANS_DIR,
-  OPENAI_API_KEY,
-  OPENAI_BASE_URL,
-  WHISPER_MODEL,
-  openai,
-} from "../config/openai.mjs";
-import { uniq } from "../utils/text.util.mjs";
-import { undoRequestChanges } from "../services/undo.service.mjs";
-
-// [KODO] Smart model routing
+import { parseIncomingPayload }        from "../utils/request.util.mjs";
+import { loadAttachmentsFromPaths }    from "../services/attachments.service.mjs";
+import { detectLanguage }              from "../services/intent.service.mjs";
+import { streamPlanSummary }           from "../services/response.service.mjs";
+import { PLANS_DIR, OPENAI_API_KEY, OPENAI_BASE_URL, WHISPER_MODEL, openai } from "../config/openai.mjs";
+import { uniq }                        from "../utils/text.util.mjs";
+import { undoRequestChanges }          from "../services/undo.service.mjs";
 import { routeModel, getCapabilities } from "../services/modelRouter.mjs";
+import db                              from "../db.mjs";
 
-// [KODO] Auth db — to read workspace_path from the authenticated session
-import db from "../db.mjs";
+// ★ LangGraph runner + working-set memory
+import { runKodoGraph } from "../services/graph_runner.mjs";
+import {
+  getLastTouchedFile,
+  recordFilesTouched,
+  buildWorkingSetContext,
+} from "../services/workingset.mjs";
 
-const FILE_AGENT_SCRIPT = path.resolve(process.cwd(), "../file_agent.mjs");
-
-// [KODO] Settings loader
 const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
+
+// ── Helpers ───────────────────────────────────────────────────
 
 async function loadSettings() {
   try {
@@ -66,43 +59,22 @@ function getAuthSessionFromRequest(request) {
   try {
     const auth = request.headers["authorization"];
     if (!auth?.startsWith("Bearer ")) return null;
-
     const token = auth.slice(7).trim();
-    const session = db
+    return db
       .prepare("SELECT user_id, workspace_path FROM auth_sessions WHERE token = ?")
-      .get(token);
-
-    return session || null;
+      .get(token) || null;
   } catch {
     return null;
-  }
-}
-
-// [KODO] Read the workspace path bound by the VS Code extension from the auth session.
-// Returns empty string if the request has no valid token or no workspace is bound.
-function getWorkspaceFromRequest(request) {
-  try {
-    const session = getAuthSessionFromRequest(request);
-    const wp = session?.workspace_path || "";
-    if (wp) console.log(`[Kodo] 📁 Workspace from auth session: ${wp}`);
-    return wp;
-  } catch {
-    return "";
   }
 }
 
 function requireUserSession(request, reply) {
-  const authSession = getAuthSessionFromRequest(request);
-
-  if (!authSession?.user_id) {
-    reply.code(401).send({
-      ok: false,
-      error: "Unauthorized",
-    });
+  const s = getAuthSessionFromRequest(request);
+  if (!s?.user_id) {
+    reply.code(401).send({ ok: false, error: "Unauthorized" });
     return null;
   }
-
-  return authSession;
+  return s;
 }
 
 function startSSE(reply) {
@@ -112,7 +84,7 @@ function startSSE(reply) {
   reply.raw.writeHead(200, {
     "Content-Type": "text/event-stream",
     "Cache-Control": "no-cache",
-    Connection: "keep-alive",
+    Connection:      "keep-alive",
     "X-Accel-Buffering": "no",
   });
 }
@@ -125,282 +97,66 @@ function setCors(reply) {
 
 function toStringArray(value) {
   if (Array.isArray(value)) {
-    return value
-      .map((item) => (typeof item === "string" ? item : item?.path))
-      .filter((item) => typeof item === "string" && item.trim());
+    return value.map(i => (typeof i === "string" ? i : i?.path)).filter(s => typeof s === "string" && s.trim());
   }
-
   if (typeof value === "string") {
     const trimmed = value.trim();
     if (!trimmed) return [];
-
     try {
       const parsed = JSON.parse(trimmed);
-      if (Array.isArray(parsed)) {
-        return parsed.filter((item) => typeof item === "string" && item.trim());
-      }
-    } catch {
-      // ignore JSON parsing errors
-    }
-
-    return trimmed
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
+      if (Array.isArray(parsed)) return parsed.filter(i => typeof i === "string" && i.trim());
+    } catch {}
+    return trimmed.split(",").map(s => s.trim()).filter(Boolean);
   }
-
   return [];
-}
-
-function extractCandidateFilePaths(message) {
-  const msg = String(message || "");
-
-  const pathRegex =
-    /(?:\/?[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js))/g;
-
-  const filenameRegex =
-    /\b[A-Za-z0-9._-]+\.(?:tsx?|jsx?|css|scss|md|json|ya?ml|html|xml|mjs|cjs|ts|js)\b/g;
-
-  const matches = uniq([
-    ...(msg.match(pathRegex) || []),
-    ...(msg.match(filenameRegex) || []),
-  ]);
-
-  return matches.map((item) => String(item || "").trim()).filter(Boolean);
 }
 
 function previewText(value, maxChars = 140) {
   const text = String(value || "").trim();
-  if (!text) return "";
   return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
 }
 
-function buildMemoryContext(memory) {
-  if (!memory) return "";
-
+function buildMemoryContext(memory, workingSetContext = "") {
   const lines = [];
-
-  if (memory.last_task) lines.push(`LAST TASK: ${memory.last_task}`);
-  if (memory.last_task_type) lines.push(`LAST TASK TYPE: ${memory.last_task_type}`);
-  if (memory.last_project_scope) {
-    lines.push(`LAST PROJECT SCOPE: ${memory.last_project_scope}`);
+  if (memory) {
+    if (memory.last_task)             lines.push(`LAST TASK: ${memory.last_task}`);
+    if (memory.last_task_type)        lines.push(`LAST TASK TYPE: ${memory.last_task_type}`);
+    if (memory.last_target_file)      lines.push(`LAST TARGET FILE: ${memory.last_target_file}`);
+    if (memory.last_user_message)     lines.push(`LAST USER MESSAGE: ${previewText(memory.last_user_message)}`);
+    if (memory.last_assistant_message)lines.push(`LAST ASSISTANT MESSAGE: ${previewText(memory.last_assistant_message)}`);
   }
-
-  if (memory.last_target_file) {
-    lines.push(`LAST TARGET FILE: ${memory.last_target_file}`);
-  }
-
-  if (memory.last_target_component) {
-    lines.push(`LAST TARGET COMPONENT: ${memory.last_target_component}`);
-  }
-
-  if (Array.isArray(memory.last_attachment_paths) && memory.last_attachment_paths.length) {
-    lines.push(`LAST ATTACHMENTS: ${memory.last_attachment_paths.join(", ")}`);
-  }
-
-  if (memory.last_user_message) {
-    lines.push(`LAST USER MESSAGE: ${previewText(memory.last_user_message)}`);
-  }
-
-  if (memory.last_assistant_message) {
-    lines.push(`LAST ASSISTANT MESSAGE: ${previewText(memory.last_assistant_message)}`);
-  }
-
+  if (workingSetContext) lines.push(workingSetContext);
   return lines.join("\n").trim();
 }
 
-function syncSessionMemory(
-  sessionId,
-  userId,
-  {
-    userMessage = "",
-    assistantMessage = "",
-    attachmentPaths = [],
-    task = "",
-    taskType = "",
-    projectScope = "",
-    targetFile = "",
-  } = {}
-) {
+function syncSessionMemory(sessionId, userId, {
+  userMessage = "",
+  assistantMessage = "",
+  attachmentPaths = [],
+  task = "",
+  taskType = "",
+  projectScope = "",
+  targetFile = "",
+} = {}) {
   if (!sessionId || !userId) return;
-
-  if (typeof userMessage === "string" && userMessage.trim()) {
-    rememberUserMessage(sessionId, userId, userMessage.trim());
-  }
-
-  if (Array.isArray(attachmentPaths) && attachmentPaths.length > 0) {
-    rememberFiles(sessionId, userId, attachmentPaths);
-  }
-
-  if (typeof assistantMessage === "string" && assistantMessage.trim()) {
-    rememberAssistantMessage(sessionId, userId, assistantMessage.trim());
-  }
-
-  if (task || taskType || projectScope) {
-    rememberTask(sessionId, userId, {
-      task: task || null,
-      taskType: taskType || null,
-      projectScope: projectScope || null,
-    });
-  }
-
-  if (typeof targetFile === "string" && targetFile.trim()) {
-    rememberTargetFile(sessionId, userId, targetFile.trim());
-  }
+  if (userMessage.trim())           rememberUserMessage(sessionId, userId, userMessage.trim());
+  if (attachmentPaths.length)       rememberFiles(sessionId, userId, attachmentPaths);
+  if (assistantMessage.trim())      rememberAssistantMessage(sessionId, userId, assistantMessage.trim());
+  if (task || taskType || projectScope) rememberTask(sessionId, userId, { task, taskType, projectScope });
+  if (targetFile.trim())            rememberTargetFile(sessionId, userId, targetFile.trim());
 }
 
-function extractPrimaryTargetFile(plan) {
-  if (Array.isArray(plan?.target_files) && plan.target_files.length > 0) {
-    return String(plan.target_files[0] || "").trim();
-  }
-
-  if (Array.isArray(plan?.files_to_modify)) {
-    const firstModify = plan.files_to_modify.find((item) => item?.path);
-    if (firstModify?.path) return String(firstModify.path).trim();
-  }
-
-  if (Array.isArray(plan?.files_to_create)) {
-    const firstCreate = plan.files_to_create.find((item) => item?.path);
-    if (firstCreate?.path) return String(firstCreate.path).trim();
-  }
-
-  return "";
-}
-
-function parseFileAgentOutput(output) {
-  const marker = "[Structured_File_Analysis_JSON]";
-  const idx = output.lastIndexOf(marker);
-
-  if (idx === -1) {
-    return { rawText: output.trim(), structured: null };
-  }
-
-  const rawText = output.slice(0, idx).trim();
-  const jsonText = output.slice(idx + marker.length).trim();
-
-  try {
-    return { rawText, structured: JSON.parse(jsonText) };
-  } catch {
-    return { rawText, structured: null };
-  }
-}
-
-function buildFileAnalysisContext(fileAnalysis) {
-  if (!fileAnalysis?.files || !Array.isArray(fileAnalysis.files)) return "";
-
-  const lines = [];
-
-  for (const file of fileAnalysis.files) {
-    lines.push(`FILE: ${file.file || "unknown"}`);
-    lines.push(`TYPE: ${file.fileType || "unknown"}`);
-
-    if (file.natural_summary) {
-      lines.push(`SUMMARY: ${file.natural_summary}`);
-    }
-
-    const structured = file.structured;
-    if (structured) {
-      if (structured.detected_kind) {
-        lines.push(`KIND: ${structured.detected_kind}`);
-      }
-      if (Array.isArray(structured.key_elements) && structured.key_elements.length > 0) {
-        lines.push(`KEY ELEMENTS: ${structured.key_elements.slice(0, 6).join(", ")}`);
-      }
-      if (Array.isArray(structured.possible_tasks) && structured.possible_tasks.length > 0) {
-        lines.push(`POSSIBLE TASKS: ${structured.possible_tasks.slice(0, 6).join(", ")}`);
-      }
-      if (Array.isArray(structured.domain_entities) && structured.domain_entities.length > 0) {
-        lines.push(`DOMAIN ENTITIES: ${structured.domain_entities.slice(0, 6).join(", ")}`);
-      }
-    }
-
-    lines.push("");
-  }
-
-  return lines.join("\n").trim();
-}
-
-function runFileAgent({ files, userMessage = "" }) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      "node",
-      [FILE_AGENT_SCRIPT, JSON.stringify({ files, userMessage })],
-      {
-        cwd: process.cwd(),
-        stdio: ["ignore", "pipe", "pipe"],
-        env: { ...process.env, FORCE_COLOR: "1" },
-      }
-    );
-
-    let stdout = "";
-    let stderr = "";
-
-    child.stdout.on("data", (data) => {
-      stdout += data.toString();
-    });
-    child.stderr.on("data", (data) => {
-      stderr += data.toString();
-      process.stderr.write(data);
-    });
-
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve(parseFileAgentOutput(stdout));
-      } else {
-        reject(
-          new Error(
-            stderr.trim() || stdout.trim() || `file_agent exited with code ${code}`
-          )
-        );
-      }
-    });
-
-    child.on("error", (error) => {
-      reject(error);
-    });
-  });
-}
-
-async function transcribeAudio(audioPath) {
-  console.log("🎙️ Using Whisper model:", WHISPER_MODEL);
-  console.log("📡 Base URL:", OPENAI_BASE_URL);
-
-  try {
-    const response = await openai.audio.transcriptions.create({
-      model: WHISPER_MODEL || "gapgpt/whisper-1",
-      file: createReadStream(audioPath),
-    });
-
-    console.log("📥 Whisper SDK response:", response);
-
-    const text = (response.text || "").trim();
-    if (!text) throw new Error("Empty transcription text returned from Whisper");
-
-    return text;
-  } catch (err) {
-    console.error("❌ Whisper transcription error via SDK:", err);
-
-    if (err?.code === "api_limit" || err?.status === 429) {
-      throw new Error(
-        "Whisper API rate limit reached (429). Please wait or check your GapGPT plan/quota."
-      );
-    }
-
-    const apiError = err?.error || err?.response || err;
-    throw new Error(
-      `Whisper transcription failed via SDK: ${apiError?.message || String(apiError)}`
-    );
-  }
-}
+// ── Route ──────────────────────────────────────────────────────
 
 export default async function plannerAgentRoute(fastify) {
-  // [KODO] Capabilities endpoint — frontend checks this on load
+
   fastify.get("/capabilities", async (request, reply) => {
     setCors(reply);
     const settings = await loadSettings();
     return { ok: true, ...getCapabilities(settings) };
   });
 
+  // POST /run — main chat endpoint (LangGraph)
   fastify.post("/run", async (request, reply) => {
     setCors(reply);
 
@@ -408,19 +164,17 @@ export default async function plannerAgentRoute(fastify) {
     if (!authSession) return;
 
     const userId = authSession.user_id;
-
-    const body = await parseIncomingPayload(request);
+    const body   = await parseIncomingPayload(request);
 
     const message =
       typeof body.message === "string" ? body.message.trim()
-      : typeof body.text === "string" ? body.text.trim()
+      : typeof body.text   === "string" ? body.text.trim()
       : typeof body.prompt === "string" ? body.prompt.trim()
       : "";
 
-    const session_id =
-      typeof body.session_id === "string" && body.session_id.trim()
-        ? body.session_id.trim()
-        : "";
+    const session_id = typeof body.session_id === "string" && body.session_id.trim()
+      ? body.session_id.trim()
+      : "";
 
     const attachment_paths = uniq([
       ...toStringArray(body.attachment_paths),
@@ -428,693 +182,268 @@ export default async function plannerAgentRoute(fastify) {
       ...toStringArray(body.files),
     ]);
 
-    // [KODO] Get the workspace path bound by the VS Code extension.
-    // Falls back to empty string if no auth token or no workspace bound.
     const workspacePath = authSession.workspace_path || "";
 
-    console.log("BODY RECEIVED =>", body);
-    console.log("MESSAGE =>", message);
-    console.log("ATTACHMENT PATHS =>", attachment_paths);
-    console.log(
-      "WORKSPACE PATH =>",
-      workspacePath || "(not set — will use pipeline default)"
-    );
-
-    // [KODO] Smart model routing
-    const settings = await loadSettings();
+    const settings       = await loadSettings();
     const hasAttachments = attachment_paths.length > 0;
-    const modelRoute = routeModel(settings, hasAttachments);
+    const modelRoute     = routeModel(settings, hasAttachments);
 
-    if (!modelRoute.ok && modelRoute.error === "no_config") {
-      return reply.code(400).send({
-        ok: false,
-        error: "not_configured",
-        message: modelRoute.message,
-        action: "open_settings",
-      });
+    if (!modelRoute.ok) {
+      const errorMap = {
+        no_config:        { error: "not_configured",   action: "open_settings" },
+        no_vision:        { error: "no_vision_model",  action: "open_settings" },
+        model_no_vision:  { error: "model_no_vision",  action: "open_settings" },
+      };
+      const mapped = errorMap[modelRoute.error] || { error: modelRoute.error };
+      return reply.code(400).send({ ok: false, message: modelRoute.message, ...mapped });
     }
 
-    if (!modelRoute.ok && modelRoute.error === "no_vision") {
-      return reply.code(400).send({
-        ok: false,
-        error: "no_vision_model",
-        message: modelRoute.message,
-        action: "open_settings",
-      });
-    }
-
-    if (!modelRoute.ok && modelRoute.error === "model_no_vision") {
-      return reply.code(400).send({
-        ok: false,
-        error: "model_no_vision",
-        message: modelRoute.message,
-        action: "open_settings",
-      });
-    }
-
-    if (modelRoute.switchedModel) {
-      console.log(
-        `[Kodo] 🔄 Auto-switched: ${modelRoute.switchedFrom} → ${modelRoute.switchedTo}`
-      );
-    } else {
-      console.log(`[Kodo] 🤖 Using model: ${modelRoute.provider}/${modelRoute.model}`);
-    }
-
-    const attachments = attachment_paths.length
-      ? await loadAttachmentsFromPaths(attachment_paths)
-      : [];
-
-    const sessionId =
-      typeof session_id === "string" && session_id.trim()
-        ? session_id.trim()
-        : `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-
-    const memory = getMemory(sessionId, userId);
-    const memoryContext = buildMemoryContext(memory);
-
-    let fileAnalysisContext = "";
-    if (attachment_paths.length > 0) {
-      try {
-        const fileAnalysis = await runFileAgent({
-          files: attachment_paths,
-          userMessage: message,
-        });
-        fileAnalysisContext = buildFileAnalysisContext(fileAnalysis);
-      } catch (error) {
-        console.warn("⚠️ File analysis agent failed:", error.message);
-      }
-    }
-
-    const effectiveMessage =
-      message || (attachments.length ? "Please analyze the uploaded attachment(s)." : "");
+    const effectiveMessage = message
+      || (attachment_paths.length ? "Please analyse the uploaded attachment(s)." : "");
 
     if (!effectiveMessage) {
-      return reply
-        .code(400)
-        .send({ ok: false, error: "Message is required and must be a string" });
+      return reply.code(400).send({ ok: false, error: "Message is required" });
     }
 
-    const explicitFileRefs = extractCandidateFilePaths(message);
-    const rememberedTargetFile =
-      !explicitFileRefs.length && memory?.last_target_file
-        ? String(memory.last_target_file).trim()
-        : "";
+    const sessionId = session_id
+      || `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    // ★ Memory: read DB memory + working-set of recent files
+    const memory            = getMemory(sessionId, userId);
+    const workingSetContext = buildWorkingSetContext(sessionId);
+    const memoryContext     = buildMemoryContext(memory, workingSetContext);
+
+    // ★ The file the user most recently edited in this session.
+    //   Validate: must look like a real path (slash or extension), else ignore.
+    function isRealPath(p) {
+      return typeof p === "string" && p.length > 4 &&
+             (p.includes("/") || /\.[a-z0-9]+$/i.test(p));
+    }
+    const wsFile  = getLastTouchedFile(sessionId);
+    const memFile = memory?.last_target_file || "";
+    const rememberedFile = isRealPath(wsFile) ? wsFile
+                         : isRealPath(memFile) ? memFile
+                         : "";
 
     const plannerContextMessage = [
       effectiveMessage,
       memoryContext ? `Conversation memory:\n${memoryContext}` : "",
-      rememberedTargetFile ? `Remembered target file:\n${rememberedTargetFile}` : "",
-      fileAnalysisContext ? `Uploaded file context:\n${fileAnalysisContext}` : "",
-    ]
-      .filter(Boolean)
-      .join("\n\n");
+    ].filter(Boolean).join("\n\n");
 
-    const sessionLabel = normalizeSessionLabel(message, attachments);
-
+    const sessionLabel = normalizeSessionLabel(message, []);
     createSession(sessionId, userId, sessionLabel);
     saveMessage(sessionId, userId, "user", effectiveMessage);
     touchSession(sessionId, userId);
-
     syncSessionMemory(sessionId, userId, {
       userMessage: effectiveMessage,
       attachmentPaths: attachment_paths,
     });
 
-    try {
-      const intent = classifyIntent(plannerContextMessage, attachments);
-      console.log(`📊 Intent: ${intent.type}`);
+    const msgId     = `msg_${Date.now()}`;
+    const timestamp = new Date().toISOString();
+    const lang      = detectLanguage(plannerContextMessage);
 
-      const msgId = `msg_${Date.now()}`;
-      const timestamp = new Date().toISOString();
-      const lang = detectLanguage(plannerContextMessage);
+    const modelMeta = {
+      model:        modelRoute.model,
+      provider:     modelRoute.provider,
+      switchedModel: modelRoute.switchedModel || false,
+      switchedFrom: modelRoute.switchedFrom || null,
+      switchedTo:   modelRoute.switchedTo   || null,
+    };
 
-      // [KODO] Model metadata for SSE events
-      const modelMeta = {
-        model: modelRoute.model,
-        provider: modelRoute.provider,
-        switchedModel: modelRoute.switchedModel || false,
-        switchedFrom: modelRoute.switchedFrom || null,
-        switchedTo: modelRoute.switchedTo || null,
-      };
+    startSSE(reply);
 
-      if (intent.type === "crisis") {
-        startSSE(reply);
-        const content =
-          lang === "en"
-            ? "💙 I hear you, and I'm really glad you reached out. Please talk to someone who can help right now:\n\n• **Iran Crisis Line:** ☎️ 1480\n• **International:** https://findahelpline.com\n\nYou don't have to go through this alone. 💙"
-            : "💙 می‌فهمم که الان خیلی سخته. لطفاً همین الان با یه متخصص صحبت کن:\n\n• **اورژانس اجتماعی ایران:** ☎️ ۱۲۳\n• **خط بحران:** ☎️ ۱۴۸۰\n\nتنها نیستی. 💙";
+    reply.raw.write(`data: ${JSON.stringify({
+      type:       "start",
+      id:         msgId,
+      session_id: sessionId,
+      request_id: requestId,
+      createdAt:  timestamp,
+      metadata:   { intent: "graph", ...modelMeta },
+    })}\n\n`);
 
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "start",
-            id: msgId,
-            session_id: sessionId,
-            createdAt: timestamp,
-            metadata: { intent: "crisis", ...modelMeta },
-          })}\n\n`
-        );
-        reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(
-          `data: ${JSON.stringify({ type: "done", metadata: { type: "crisis" } })}\n\n`
-        );
-        reply.raw.end();
-
-        saveMessage(sessionId, userId, "assistant", content, "crisis");
-        touchSession(sessionId, userId);
-        syncSessionMemory(sessionId, userId, { assistantMessage: content });
-        return reply;
-      }
-
-      if (intent.type === "inspection") {
-        startSSE(reply);
-        const content = await generateInspectionResponse(
-          plannerContextMessage,
-          attachments,
-          sessionId,
-          modelRoute
-        );
-
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "start",
-            id: msgId,
-            session_id: sessionId,
-            createdAt: timestamp,
-            metadata: { intent: "inspection", ...modelMeta },
-          })}\n\n`
-        );
-        reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "done",
-            metadata: { type: "inspection" },
-          })}\n\n`
-        );
-        reply.raw.end();
-
-        saveMessage(sessionId, userId, "assistant", content, "inspection");
-        touchSession(sessionId, userId);
-        syncSessionMemory(sessionId, userId, { assistantMessage: content });
-        return reply;
-      }
-
-      if (intent.type === "code_request") {
-        startSSE(reply);
-        const content = await generateCodeResponse(
-          plannerContextMessage,
-          attachments,
-          sessionId,
-          modelRoute
-        );
-
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "start",
-            id: msgId,
-            session_id: sessionId,
-            createdAt: timestamp,
-            metadata: { intent: "code_request", ...modelMeta },
-          })}\n\n`
-        );
-        reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "done",
-            metadata: { type: "code_request" },
-          })}\n\n`
-        );
-        reply.raw.end();
-
-        saveMessage(sessionId, userId, "assistant", content, "code_request");
-        touchSession(sessionId, userId);
-        syncSessionMemory(sessionId, userId, {
-          assistantMessage: content,
-          targetFile: rememberedTargetFile,
-        });
-        return reply;
-      }
-
-      if (intent.type === "greeting") {
-        startSSE(reply);
-        const content = await generateGreetingResponse(
-          effectiveMessage,
-          sessionId,
-          modelRoute
-        );
-
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "start",
-            id: msgId,
-            session_id: sessionId,
-            createdAt: timestamp,
-            metadata: { intent: "greeting", ...modelMeta },
-          })}\n\n`
-        );
-        reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "done",
-            metadata: { type: "greeting" },
-          })}\n\n`
-        );
-        reply.raw.end();
-
-        saveMessage(sessionId, userId, "assistant", content, "greeting");
-        touchSession(sessionId, userId);
-        syncSessionMemory(sessionId, userId, { assistantMessage: content });
-        return reply;
-      }
-
-      if (intent.type === "clarification") {
-        startSSE(reply);
-        const content = await generateClarificationResponse(effectiveMessage, modelRoute);
-
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "start",
-            id: msgId,
-            session_id: sessionId,
-            createdAt: timestamp,
-            metadata: { intent: "clarification", ...modelMeta },
-          })}\n\n`
-        );
-        reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "done",
-            metadata: { type: "clarification" },
-          })}\n\n`
-        );
-        reply.raw.end();
-
-        saveMessage(sessionId, userId, "assistant", content, "clarification");
-        touchSession(sessionId, userId);
-        syncSessionMemory(sessionId, userId, { assistantMessage: content });
-        return reply;
-      }
-
-      if (intent.type === "technical") {
-        startSSE(reply);
-
-        const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        console.log("[AGENT /run] pipeline call", { sessionId, requestId, workspacePath });
-
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "start",
-            id: msgId,
-            session_id: sessionId,
-            request_id: requestId,
-            createdAt: timestamp,
-            metadata: { intent: intent.type, ...modelMeta },
-          })}\n\n`
-        );
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "progress",
-            stage: "pipeline_start",
-            message:
-              lang === "en"
-                ? "🚀 Starting full development pipeline..."
-                : "🚀 شروع پایپلاین کامل توسعه...",
-          })}\n\n`
-        );
-
-        if (modelRoute.switchedModel) {
-          reply.raw.write(
-            `data: ${JSON.stringify({
-              type: "progress",
-              stage: "model_switch",
-              message: `🔄 Switched to ${modelRoute.switchedTo} for file analysis`,
-            })}\n\n`
-          );
+    function emit(event) {
+      try {
+        if (!reply.raw.writableEnded) {
+          reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
         }
-
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "progress",
-            stage: "planning",
-            message:
-              lang === "en"
-                ? "📋 Phase 1/5: Planning architecture..."
-                : "📋 فاز 1/5: طراحی معماری...",
-          })}\n\n`
-        );
-
-        try {
-          // [KODO] Pass workspacePath so pipeline writes to the correct project
-          await runPipeline({
-            message: plannerContextMessage,
-            sessionId,
-            requestId,
-            attachmentPaths: attachment_paths,
-            audioPath: "",
-            workspacePath,
-          });
-        } catch (pipelineError) {
-          reply.raw.write(
-            `data: ${JSON.stringify({
-              type: "error",
-              error: "Pipeline execution failed",
-              details: pipelineError.message,
-              request_id: requestId,
-            })}\n\n`
-          );
-          reply.raw.end();
-
-          saveMessage(
-            sessionId,
-            userId,
-            "assistant",
-            `Pipeline failed: ${pipelineError.message}`,
-            "technical"
-          );
-          touchSession(sessionId, userId);
-          syncSessionMemory(sessionId, userId, {
-            assistantMessage: `Pipeline failed: ${pipelineError.message}`,
-            task: effectiveMessage,
-            taskType: intent.type,
-            projectScope: "technical",
-            targetFile: rememberedTargetFile,
-          });
-          return reply;
-        }
-
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "progress",
-            stage: "completed",
-            message:
-              lang === "en"
-                ? "✅ All phases completed! Preparing summary..."
-                : "✅ همه فازها تکمیل شد! آماده‌سازی خلاصه...",
-          })}\n\n`
-        );
-
-        const plannerPlanPath = path.resolve(PLANS_DIR, "planner_plan.json");
-        let plan = {};
-        const latestPlan = "planner_plan.json";
-
-        try {
-          plan = JSON.parse(await fs.readFile(plannerPlanPath, "utf-8"));
-        } catch (err) {
-          console.warn("⚠️  Could not read planner_plan.json:", err.message);
-        }
-
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "plan_metadata",
-            plan_file: latestPlan,
-            plan_path: plannerPlanPath,
-            phases_count: plan.phases?.length || 0,
-            files_count: plan.files?.length || 0,
-            tech_stack: plan.tech_stack || {},
-          })}\n\n`
-        );
-
-        const summary = await streamPlanSummary(plan, plannerContextMessage, reply, modelRoute);
-
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "done",
-            summary,
-            metadata: {
-              type: "pipeline",
-              intent: intent.type,
-              plan_file: latestPlan,
-              plan_path: plannerPlanPath,
-              plan_summary: {
-                name: plan.name,
-                project_type: plan.project_type,
-                goal: plan.goal,
-                tech_stack: plan.tech_stack,
-                phases_count: plan.phases?.length || 0,
-                files_count: plan.files?.length || 0,
-              },
-              plan,
-              full_plan_url: `/api/agent/plan/${latestPlan}`,
-              request_id: requestId,
-              ...modelMeta,
-            },
-          })}\n\n`
-        );
-        reply.raw.end();
-
-        saveMessage(sessionId, userId, "assistant", summary, "technical");
-        touchSession(sessionId, userId);
-
-        const primaryTargetFile = extractPrimaryTargetFile(plan) || rememberedTargetFile || "";
-
-        syncSessionMemory(sessionId, userId, {
-          assistantMessage: summary,
-          task: effectiveMessage,
-          taskType: intent.type,
-          projectScope: plan.project_type || plan.task_scope || "technical",
-          targetFile: primaryTargetFile,
-          attachmentPaths: attachment_paths,
-        });
-
-        return reply;
-      }
-
-      startSSE(reply);
-      const content = await generateCasualResponse(effectiveMessage, modelRoute);
-
-      reply.raw.write(
-        `data: ${JSON.stringify({
-          type: "start",
-          id: msgId,
-          session_id: sessionId,
-          createdAt: timestamp,
-          metadata: { intent: "casual", ...modelMeta },
-        })}\n\n`
-      );
-      reply.raw.write(`data: ${JSON.stringify({ type: "content", content })}\n\n`);
-      reply.raw.write(
-        `data: ${JSON.stringify({
-          type: "done",
-          metadata: { type: "casual" },
-        })}\n\n`
-      );
-      reply.raw.end();
-
-      saveMessage(sessionId, userId, "assistant", content, "casual");
-      touchSession(sessionId, userId);
-      syncSessionMemory(sessionId, userId, { assistantMessage: content });
-      return reply;
-    } catch (error) {
-      console.error("❌ Error in agent route:", error);
-      if (reply.raw.headersSent) {
-        reply.raw.write(
-          `data: ${JSON.stringify({
-            type: "error",
-            error: "Internal server error",
-            details: error.message,
-          })}\n\n`
-        );
-        reply.raw.end();
-      } else {
-        return reply.code(500).send({
-          ok: false,
-          error: "Internal server error",
-          details: error.message,
-        });
+      } catch (e) {
+        console.warn("[SSE emit] write error:", e.message);
       }
     }
+
+    // ── Run the LangGraph ─────────────────────────────────────
+    let finalAnswer = "";
+    let editedFiles = [];
+
+    try {
+      const result = await runKodoGraph({
+        userMessage:          plannerContextMessage,
+        rememberedTargetFile: rememberedFile,   // ★ memory in
+        sessionId,
+        requestId,
+        userId,
+        workspacePath,
+        modelRoute,
+        attachmentPaths: attachment_paths,
+        emit,
+      });
+
+      finalAnswer = result.finalAnswer || "";
+      editedFiles = result.editedFiles || [];   // ★ files out
+    } catch (graphError) {
+      console.error("❌ LangGraph error:", graphError);
+
+      emit({ type: "error", error: "Graph execution failed", details: graphError.message });
+      reply.raw.end();
+
+      saveMessage(sessionId, userId, "assistant", `Error: ${graphError.message}`, "error");
+      touchSession(sessionId, userId);
+      syncSessionMemory(sessionId, userId, { assistantMessage: `Error: ${graphError.message}` });
+      return reply;
+    }
+
+    // ── Done ──────────────────────────────────────────────────
+    if (finalAnswer) {
+      emit({ type: "content", content: finalAnswer });
+    }
+
+    emit({
+      type:     "done",
+      request_id: requestId,
+      summary:  finalAnswer,
+      metadata: {
+        type:       "graph",
+        request_id: requestId,
+        ...modelMeta,
+      },
+    });
+
+    reply.raw.end();
+
+    saveMessage(sessionId, userId, "assistant", finalAnswer || "(no output)", "graph");
+    touchSession(sessionId, userId);
+
+    // ★ Memory: record which files were edited this turn
+    if (editedFiles.length > 0) {
+      recordFilesTouched(sessionId, editedFiles, effectiveMessage.slice(0, 80));
+      console.log(`[Memory] 📝 Recorded ${editedFiles.length} edited file(s): ${editedFiles.join(", ")}`);
+    }
+
+    syncSessionMemory(sessionId, userId, {
+      assistantMessage: finalAnswer,
+      task:             effectiveMessage,
+      taskType:         "graph",
+      targetFile:       editedFiles[0] || "",
+    });
+
+    return reply;
   });
+
+  // ── Unchanged endpoints ────────────────────────────────────
 
   fastify.get("/plan/:filename", async (request, reply) => {
     setCors(reply);
     const { filename } = request.params;
-
     if (!/^planner(_plan|\d+)\.json$/.test(filename)) {
       return reply.code(400).send({ ok: false, error: "Invalid filename format" });
     }
-
     const filepath = path.join(PLANS_DIR, filename);
     try {
       const plan = JSON.parse(await fs.readFile(filepath, "utf-8"));
       return reply.send({ ok: true, plan, filename, filepath });
     } catch (error) {
-      if (error.code === "ENOENT") {
-        return reply.code(404).send({ ok: false, error: "Plan not found" });
-      }
-      return reply.code(500).send({
-        ok: false,
-        error: "Failed to read plan",
-        details: error.message,
-      });
+      if (error.code === "ENOENT") return reply.code(404).send({ ok: false, error: "Plan not found" });
+      return reply.code(500).send({ ok: false, error: "Failed to read plan", details: error.message });
     }
   });
 
   fastify.get("/sessions", async (request, reply) => {
     setCors(reply);
-
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
-
     try {
-      const sessions = listSessions(authSession.user_id);
-      return reply.send({ ok: true, sessions });
+      return reply.send({ ok: true, sessions: listSessions(authSession.user_id) });
     } catch (error) {
-      return reply.code(500).send({
-        ok: false,
-        error: "Failed to list sessions",
-        details: error.message,
-      });
+      return reply.code(500).send({ ok: false, error: "Failed to list sessions", details: error.message });
     }
   });
 
   fastify.get("/sessions/:sessionId", async (request, reply) => {
     setCors(reply);
-
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
-
     try {
       const messages = getSessionMessages(request.params.sessionId, authSession.user_id);
-      return reply.send({
-        ok: true,
-        session_id: request.params.sessionId,
-        messages,
-      });
+      return reply.send({ ok: true, session_id: request.params.sessionId, messages });
     } catch (error) {
-      return reply.code(500).send({
-        ok: false,
-        error: "Failed to get session",
-        details: error.message,
-      });
+      return reply.code(500).send({ ok: false, error: "Failed to get session", details: error.message });
     }
   });
 
   fastify.delete("/sessions/:sessionId", async (request, reply) => {
     setCors(reply);
-
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
-
     try {
       deleteSession(request.params.sessionId, authSession.user_id);
       return reply.send({ ok: true, deleted: request.params.sessionId });
     } catch (error) {
-      return reply.code(500).send({
-        ok: false,
-        error: "Failed to delete session",
-        details: error.message,
-      });
+      return reply.code(500).send({ ok: false, error: "Failed to delete session", details: error.message });
     }
   });
 
   fastify.post("/transcribe", async (request, reply) => {
-    console.log("🎙️ /transcribe hit");
     setCors(reply);
-
     try {
       if (typeof request.file !== "function") {
-        return reply.code(400).send({
-          ok: false,
-          error:
-            "Multipart upload is not enabled. Install and register @fastify/multipart.",
-        });
+        return reply.code(400).send({ ok: false, error: "Multipart upload is not enabled." });
       }
-
       const data = await request.file();
-      if (!data) {
-        return reply.code(400).send({
-          ok: false,
-          error: "No audio file provided. Upload audio file in 'audio' field.",
-        });
-      }
+      if (!data) return reply.code(400).send({ ok: false, error: "No audio file provided." });
 
       const tempDir = path.join(process.cwd(), "temp_audio");
       await fs.mkdir(tempDir, { recursive: true });
-
       const tempAudioPath = path.join(tempDir, `audio_${Date.now()}.webm`);
       await pipeline(data.file, createWriteStream(tempAudioPath));
 
-      const transcript = await transcribeAudio(tempAudioPath);
+      const response = await openai.audio.transcriptions.create({
+        model: WHISPER_MODEL || "whisper-1",
+        file:  createReadStream(tempAudioPath),
+      });
       await fs.unlink(tempAudioPath).catch(() => {});
 
-      const session_id = data.fields?.session_id?.[0]?.value || "";
-      const attachment_paths = uniq([
-        ...toStringArray(data.fields?.attachment_paths?.[0]?.value),
-        ...toStringArray(data.fields?.attachments?.[0]?.value),
-        ...toStringArray(data.fields?.files?.[0]?.value),
-      ]);
+      const transcript = (response.text || "").trim();
+      if (!transcript) throw new Error("Empty transcription returned");
 
-      return reply.send({
-        ok: true,
-        transcribed_text: transcript,
-        session_id: session_id || undefined,
-        attachment_paths: attachment_paths.length > 0 ? attachment_paths : undefined,
-        message:
-          "Audio transcribed successfully. Use the 'transcribed_text' as the message for /run endpoint.",
-      });
+      return reply.send({ ok: true, transcribed_text: transcript });
     } catch (error) {
-      console.error("❌ Transcription endpoint error:", error);
-
-      const msg = error.message || "";
-      const isRateLimit =
-        msg.includes("rate limit") || msg.includes("429") || error.code === "api_limit";
-
+      const isRateLimit = /rate limit|429/.test(error.message);
       return reply.code(isRateLimit ? 429 : 500).send({
         ok: false,
-        error: isRateLimit
-          ? "Whisper API rate limit reached on GapGPT. Please try again later or check your plan/quota."
-          : "Failed to transcribe audio",
-        details: msg,
+        error: isRateLimit ? "Whisper API rate limit reached." : "Failed to transcribe audio",
+        details: error.message,
       });
     }
   });
 
   fastify.post("/undo", async (request, reply) => {
     setCors(reply);
-
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
-
     try {
       const body = await parseIncomingPayload(request);
-
-      const sessionId =
-        typeof body.session_id === "string" && body.session_id.trim()
-          ? body.session_id.trim()
-          : null;
-
-      const requestId =
-        typeof body.request_id === "string" && body.request_id.trim()
-          ? body.request_id.trim()
-          : null;
-
-      if (!sessionId || !requestId) {
-        return reply.code(400).send({
-          ok: false,
-          error: "session_id and request_id are required",
-        });
+      const sessionId  = typeof body.session_id  === "string" ? body.session_id.trim()  : null;
+      const requestId_ = typeof body.request_id  === "string" ? body.request_id.trim()  : null;
+      if (!sessionId || !requestId_) {
+        return reply.code(400).send({ ok: false, error: "session_id and request_id are required" });
       }
-
-      console.log(`🕙 Undo requested for session=${sessionId}, request=${requestId}`);
-
-      const result = undoRequestChanges({
-        sessionId,
-        requestId,
-        userId: authSession.user_id,
-      });
-
-      return reply.send({
-        ok: true,
-        session_id: sessionId,
-        request_id: requestId,
-        result,
-      });
+      const result = undoRequestChanges({ sessionId, requestId: requestId_, userId: authSession.user_id });
+      return reply.send({ ok: true, session_id: sessionId, request_id: requestId_, result });
     } catch (err) {
-      console.error("❌ Error in /undo route:", err);
-      return reply.code(500).send({
-        ok: false,
-        error: "Failed to undo changes",
-        details: err.message,
-      });
+      return reply.code(500).send({ ok: false, error: "Failed to undo changes", details: err.message });
     }
   });
 }
