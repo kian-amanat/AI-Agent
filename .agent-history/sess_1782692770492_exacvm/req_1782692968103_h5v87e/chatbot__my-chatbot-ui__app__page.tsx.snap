@@ -111,7 +111,7 @@ export default function MinimalChatComponent() {
   const [undoingMessageId, setUndoingMessageId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const abortRequestRef = useRef<null | (() => void)>(null);
   const messagesRef = useRef<Message[]>([]);
   const selectedSessionIdRef = useRef<string | null>(null);
@@ -652,96 +652,104 @@ export default function MinimalChatComponent() {
                           (trace.steps.length > 0 || trace.isActive);
 
                         return (
- <motion.div
-  key={m.id}
-  layout
-  initial={{ opacity: 0, y: 14, scale: 0.985 }}
-  animate={{ opacity: 1, y: 0, scale: 1 }}
-  exit={{ opacity: 0, y: -8, scale: 0.99 }}
-  transition={{ type: "spring", stiffness: 240, damping: 24 }}
-  className={`flex w-full ${
-    m.role === "user" ? "justify-end" : "justify-start"
-  }`}
->
-  <div className="group max-w-[min(92%,48rem)]">
-    {m.role === "user" ? (
-      <div className="rounded-[24px] border border-[#ff8a3d]/18 bg-gradient-to-br from-[#ff8a3d]/10 via-[#ff5e4d]/8 to-[#ff2d2d]/6 px-4 py-3.5 shadow-sm md:px-5 md:py-4 text-white">
-        <div className="mb-2 flex items-center gap-2 text-xs text-white/32">
-          <UserIcon className="h-4 w-4 text-[#ff8a3d]" />
-          <span>You</span>
-        </div>
+                        <motion.div
+                          key={m.id}
+                          layout
+                          initial={{ opacity: 0, y: 14, scale: 0.985 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: -8, scale: 0.99 }}
+                          transition={{ type: "spring", stiffness: 240, damping: 24 }}
+                          className={`flex w-full ${
+                            m.role === "user" ? "justify-end" : "justify-start"
+                          }`}
+                        >
+                          <div className="group max-w-[min(92%,48rem)]">
+                            <div
+                              className={`rounded-[24px] bg-transparent shadow-sm transition-all duration-300 md:px-5 md:py-4 ${
+                                m.role === "user"
+                                  ? "bg-transparent text-white"
+                                  : "bg-transparent text-white"
+                              }`}
+                            >
+                              <div className="mb-2 flex items-center gap-2 text-xs text-white/32">
+                                {m.role === "assistant" ? (
+                                  <>
+                                    <Bot className="h-4 w-4 text-[#ff8a3d]" />
+                                    <span>Assistant</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <UserIcon className="h-4 w-4 text-[#ff8a3d]" />
+                                    <span>You</span>
+                                  </>
+                                )}
+                              </div>
 
-        <div className="whitespace-pre-wrap text-[15px] leading-7 text-white/92">
-          {m.content}
-        </div>
-      </div>
-    ) : (
-      <div className="px-0 py-0 text-white">
-        <div className="mb-2 flex items-center gap-2 text-xs text-white/30">
-          <Bot className="h-4 w-4 text-[#ff8a3d]" />
-          <span>Assistant</span>
-        </div>
+                              {m.role === "assistant" ? (
+                                <>
+                                  {showTrace && (
+                                    <ThinkingTrace
+                                      steps={trace.steps}
+                                      isActive={trace.isActive}
+                                      startedAt={trace.startedAt}
+                                    />
+                                  )}
 
-{showTrace && (
-  <div className="mb-4">
-    <ThinkingTrace
-      steps={trace.steps}
-      isActive={trace.isActive}
-      startedAt={trace.startedAt}
-    />
-  </div>
-)}
+                                  {m.content ? (
+                                    <AssistantMessage
+                                      content={m.content}
+                                      metadata={m.metadata}
+                                      onUndoClick={
+                                        m.metadata?.requestId
+                                          ? () => handleUndoClick(m.id)
+                                          : undefined
+                                      }
+                                      isUndoing={undoingMessageId === m.id}
+                                    />
+                                  ) : !trace.isActive ? (
+                                    <div className="flex items-center gap-2 text-white/40">
+                                      <TypingIndicator />
+                                      <span className="text-sm">Running agent…</span>
+                                    </div>
+                                  ) : null}
+                                </>
+                              ) : (
+                                <div className="whitespace-pre-wrap text-[15px] leading-7 text-white/92">
+                                  {m.content}
+                                </div>
+                              )}
+                            </div>
 
-        {m.content ? (
-          <AssistantMessage
-            content={m.content}
-            metadata={m.metadata}
-            onUndoClick={
-              m.metadata?.requestId
-                ? () => handleUndoClick(m.id)
-                : undefined
-            }
-            isUndoing={undoingMessageId === m.id}
-          />
-        ) : !trace.isActive ? (
-          <div className="flex items-center gap-2 text-white/40">
-            <TypingIndicator />
-            <span className="text-sm">Running agent…</span>
-          </div>
-        ) : null}
-      </div>
-    )}
+                            {m.role === "assistant" && m.content && (
+                              <div className="mt-2 flex items-center gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+                                <motion.button
+                                  whileTap={{ scale: 0.96 }}
+                                  onClick={() => copyToClipboard(m.content, m.id)}
+                                  className="inline-flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs text-white/60 transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-[#ff8a3d]/8 hover:text-white"
+                                >
+                                  {copiedMessageId === m.id ? (
+                                    <>
+                                      <Check className="h-3.5 w-3.5 text-[#ff8a3d]" />
+                                      Copied
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="h-3.5 w-3.5" />
+                                      Copy
+                                    </>
+                                  )}
+                                </motion.button>
+                              </div>
+                            )}
 
-    {m.role === "assistant" && m.content && (
-      <div className="mt-2 flex items-center gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-        <motion.button
-          whileTap={{ scale: 0.96 }}
-          onClick={() => copyToClipboard(m.content, m.id)}
-          className="inline-flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs text-white/60 transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-[#ff8a3d]/8 hover:text-white"
-        >
-          {copiedMessageId === m.id ? (
-            <>
-              <Check className="h-3.5 w-3.5 text-[#ff8a3d]" />
-              Copied
-            </>
-          ) : (
-            <>
-              <Copy className="h-3.5 w-3.5" />
-              Copy
-            </>
-          )}
-        </motion.button>
-      </div>
-    )}
-
-    <div className="mt-1.5 px-1 text-[11px] text-white/24">
-      {new Date(m.createdAt).toLocaleTimeString([], {
-        hour: "2-digit",
-        minute: "2-digit",
-      })}
-    </div>
-  </div>
-</motion.div>
+                            <div className="mt-1.5 px-1 text-[11px] text-white/24">
+                              {new Date(m.createdAt).toLocaleTimeString([], {
+                                hour: "2-digit",
+                                minute: "2-digit",
+                              })}
+                            </div>
+                          </div>
+                        </motion.div>
                         );
                       })}
                     </AnimatePresence>
