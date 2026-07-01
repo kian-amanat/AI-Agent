@@ -5,7 +5,10 @@ import { AnimatePresence, motion } from "framer-motion";
 import { v4 as uuidv4 } from "uuid";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Sparkles, Bot, Copy, Check, UserIcon } from "lucide-react";
+import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import { useAgentPipeline } from "./hooks/useAgentPipeline";
+import { useThinkingSteps } from "./hooks/useThinkingSteps";
+
 import {
   fetchSessions,
   fetchSessionMessages,
@@ -25,6 +28,7 @@ import { AGENT_STAGES } from "./components/chat/chat-types";
 import ChatSidebar from "./components/chat/ChatSidebar";
 import ChatHeader from "./components/chat/ChatHeader";
 import AgentPipelinePanel from "./components/chat/AgentPipelinePanel";
+import ThinkingTrace from "./components/chat/ThinkingTrace";
 import AssistantMessage from "./components/chat/AssistantMessage";
 import TypingIndicator from "./components/chat/TypingIndicator";
 import EmptyStateCard from "./components/chat/EmptyStateCard";
@@ -102,12 +106,13 @@ export default function MinimalChatComponent() {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
 
   const pipeline = useAgentPipeline();
+  const thinking = useThinkingSteps();
 
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [undoingMessageId, setUndoingMessageId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const abortRequestRef = useRef<null | (() => void)>(null);
   const messagesRef = useRef<Message[]>([]);
   const selectedSessionIdRef = useRef<string | null>(null);
@@ -335,8 +340,8 @@ export default function MinimalChatComponent() {
     const text = messageInput.trim();
     if ((!text && selectedFiles.length === 0) || isSending) return;
 
-setIsSending(true);
-pipeline.start();
+    setIsSending(true);
+    pipeline.start();
 
     const fileNames = selectedFiles.map((file) => file.name).join(", ");
 
@@ -359,6 +364,9 @@ pipeline.start();
       createdAt: nowIso(),
       metadata: undefined,
     };
+
+    // Begin a thinking trace for this assistant message
+    thinking.begin(assistantMessageId);
 
     const nextMessages = [...messagesRef.current, userMessage, assistantMessage];
     setMessages(nextMessages);
@@ -385,13 +393,14 @@ pipeline.start();
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
     const cleanup = sendMessage(
-  text,
-  selectedFiles.length > 0 ? selectedFiles : null,
-  selectedSessionIdRef.current,
-  (event: SSEEvent) => {
-    pipeline.onSSEEvent(event);   // ← ADD THIS LINE FIRST
+      text,
+      selectedFiles.length > 0 ? selectedFiles : null,
+      selectedSessionIdRef.current,
+      (event: SSEEvent) => {
+        pipeline.onSSEEvent(event);
+        thinking.onSSEEvent(assistantMessageId, event);
 
-    if (event.type === "content") {
+        if (event.type === "content") {
           setMessages((prev) => {
             const updated = prev.map((msg) =>
               msg.id === assistantMessageId
@@ -495,6 +504,8 @@ pipeline.start();
           );
         }
 
+        // Close the thinking trace for this message
+        thinking.end(assistantMessageId);
         pipeline.stop();
 
         setIsSending(false);
@@ -512,6 +523,7 @@ pipeline.start();
           )
         );
 
+        thinking.end(assistantMessageId);
         pipeline.stop();
 
         setIsSending(false);
@@ -588,19 +600,6 @@ pipeline.start();
         <ChatHeader onToggleSidebar={() => setIsSidebarCollapsed((p) => !p)} />
 
         <div className="flex min-h-0 flex-1 flex-col">
-          <AnimatePresence mode="wait">
-            {pipeline.active && (
-              <AgentPipelinePanel
-  key="agent-pipeline"
-  task={pipeline.liveLog || messageInput}
-  stageIndex={pipeline.stageIndex}
-  progress={pipeline.progress}
-  liveLog={pipeline.liveLog}
-  events={pipeline.events}
-/>
-            )}
-          </AnimatePresence>
-
           <div
             ref={scrollRef}
             className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8"
@@ -647,97 +646,114 @@ pipeline.start();
                 ) : (
                   <motion.div layout className="space-y-5 pb-8">
                     <AnimatePresence initial={false}>
-                      {messages.map((m) => (
-                        <motion.div
-                          key={m.id}
-                          layout
-                          initial={{ opacity: 0, y: 14, scale: 0.985 }}
-                          animate={{ opacity: 1, y: 0, scale: 1 }}
-                          exit={{ opacity: 0, y: -8, scale: 0.99 }}
-                          transition={{ type: "spring", stiffness: 240, damping: 24 }}
-                          className={`flex w-full ${
-                            m.role === "user" ? "justify-end" : "justify-start"
-                          }`}
-                        >
-                          <div className="group max-w-[min(92%,48rem)]">
-                            <div
-                              className={`rounded-[24px] border px-4 py-3.5 shadow-sm transition-all duration-300 md:px-5 md:py-4 ${
-                                m.role === "user"
-                                  ? "border-[#ff8a3d]/18 bg-gradient-to-br from-[#ff8a3d]/10 via-[#ff5e4d]/8 to-[#ff2d2d]/6 text-white"
-                                  : "border-white/8 bg-white/[0.03] text-white"
-                              }`}
-                            >
-                              <div className="mb-2 flex items-center gap-2 text-xs text-white/32">
-                                {m.role === "assistant" ? (
-                                  <>
-                                    <Bot className="h-4 w-4 text-[#ff8a3d]" />
-                                    <span>Assistant</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <UserIcon className="h-4 w-4 text-[#ff8a3d]" />
-                                    <span>You</span>
-                                  </>
-                                )}
-                              </div>
+                      {messages.map((m) => {
+                        const trace = thinking.getTrace(m.id);
+                        const showTrace =
+                          m.role === "assistant" &&
+                          (trace.steps.length > 0 || trace.isActive);
 
-                              {m.role === "assistant" ? (
-                                m.content ? (
-                                  <AssistantMessage
-                                    content={m.content}
-                                    metadata={m.metadata}
-                                    onUndoClick={
-                                      m.metadata?.intent === "technical" || m.metadata?.intent === "graph" &&
-                                      m.metadata?.requestId
-                                        ? () => handleUndoClick(m.id)
-                                        : undefined
-                                    }
-                                    isUndoing={undoingMessageId === m.id}
-                                  />
-                                ) : (
-                                  <div className="flex items-center gap-2 text-white/40">
-                                    <TypingIndicator />
-                                    <span className="text-sm">Running agent…</span>
-                                  </div>
-                                )
-                              ) : (
-                                <div className="whitespace-pre-wrap text-[15px] leading-7 text-white/92">
-                                  {m.content}
-                                </div>
-                              )}
-                            </div>
+                        return (
+ <motion.div
+  key={m.id}
+  layout
+  initial={{ opacity: 0, y: 14, scale: 0.985 }}
+  animate={{ opacity: 1, y: 0, scale: 1 }}
+  exit={{ opacity: 0, y: -8, scale: 0.99 }}
+  transition={{ type: "spring", stiffness: 240, damping: 24 }}
+  className={`flex w-full ${
+    m.role === "user" ? "justify-end" : "justify-start"
+  }`}
+>
+  <div className="group max-w-[min(92%,48rem)]">
+    {m.role === "user" ? (
+      <div className="rounded-[24px] border border-[#ff8a3d]/18 bg-gradient-to-br from-[#ff8a3d]/10 via-[#ff5e4d]/8 to-[#ff2d2d]/6 px-4 py-3.5 shadow-sm md:px-5 md:py-4 text-white">
+        <div className="mb-2 flex items-center gap-2 text-xs text-white/32">
+          <UserIcon className="h-4 w-4 text-[#ff8a3d]" />
+          <span>You</span>
+        </div>
 
-                            {m.role === "assistant" && m.content && (
-                              <div className="mt-2 flex items-center gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-                                <motion.button
-                                  whileTap={{ scale: 0.96 }}
-                                  onClick={() => copyToClipboard(m.content, m.id)}
-                                  className="inline-flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs text-white/60 transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-[#ff8a3d]/8 hover:text-white"
-                                >
-                                  {copiedMessageId === m.id ? (
-                                    <>
-                                      <Check className="h-3.5 w-3.5 text-[#ff8a3d]" />
-                                      Copied
-                                    </>
-                                  ) : (
-                                    <>
-                                      <Copy className="h-3.5 w-3.5" />
-                                      Copy
-                                    </>
-                                  )}
-                                </motion.button>
-                              </div>
-                            )}
+        <div className="whitespace-pre-wrap text-[15px] leading-7 text-white/92">
+          {m.content}
+        </div>
+      </div>
+    ) : (
+      <div className="px-0 py-0 text-white">
+        <div className="mb-2 flex items-center gap-2 text-xs text-white/30">
+          <Bot className="h-4 w-4 text-[#ff8a3d]" />
+          <span>Assistant</span>
+        </div>
 
-                            <div className="mt-1.5 px-1 text-[11px] text-white/24">
-                              {new Date(m.createdAt).toLocaleTimeString([], {
-                                hour: "2-digit",
-                                minute: "2-digit",
-                              })}
-                            </div>
-                          </div>
-                        </motion.div>
-                      ))}
+{showTrace && (
+  <div className="mb-4">
+    <ThinkingTrace
+      steps={trace.steps}
+      isActive={trace.isActive}
+      startedAt={trace.startedAt}
+    />
+  </div>
+)}
+
+        {m.content ? (
+          <AssistantMessage
+            content={m.content}
+            metadata={m.metadata}
+            onUndoClick={
+              m.metadata?.requestId
+                ? () => handleUndoClick(m.id)
+                : undefined
+            }
+            isUndoing={undoingMessageId === m.id}
+          />
+        ) : !trace.isActive ? (
+          <div className="flex items-center gap-2 text-white/40">
+            <TypingIndicator />
+            <span className="text-sm">Running agent…</span>
+          </div>
+        ) : null}
+      </div>
+    )}
+
+    {m.role === "assistant" && m.content && (
+      <div className="mt-2 flex items-center gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+        <motion.button
+          whileTap={{ scale: 0.96 }}
+          onClick={() => copyToClipboard(m.content, m.id)}
+          className="inline-flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs text-white/60 transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-[#ff8a3d]/8 hover:text-white"
+        >
+          {copiedMessageId === m.id ? (
+            <>
+              <Check className="h-3.5 w-3.5 text-[#ff8a3d]" />
+              Copied
+            </>
+          ) : (
+            <>
+              <Copy className="h-3.5 w-3.5" />
+              Copy
+            </>
+          )}
+        </motion.button>
+        <motion.button
+          whileTap={{ scale: 0.96 }}
+          onClick={scrollToBottomSoon}
+          title="Scroll to latest"
+          className="inline-flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs text-white/60 transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-[#ff8a3d]/8 hover:text-white"
+        >
+          <KeyboardArrowDownRoundedIcon style={{ fontSize: 14 }} />
+          Latest
+        </motion.button>
+      </div>
+    )}
+
+    <div className="mt-1.5 px-1 text-[11px] text-white/24">
+      {new Date(m.createdAt).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      })}
+    </div>
+  </div>
+</motion.div>
+                        );
+                      })}
                     </AnimatePresence>
                   </motion.div>
                 )}

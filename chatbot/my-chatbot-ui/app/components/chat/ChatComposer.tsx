@@ -16,7 +16,7 @@ type ChatComposerProps = {
   setIsRecording: React.Dispatch<React.SetStateAction<boolean>>;
   onSendMessage: () => void;
   onMessageKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
-  selectedFiles?: File[];
+  selectedFiles: File[];
   setSelectedFiles: React.Dispatch<React.SetStateAction<File[]>>;
 };
 
@@ -48,7 +48,7 @@ export default function ChatComposer({
   setIsRecording,
   onSendMessage,
   onMessageKeyDown,
-  selectedFiles = [],
+  selectedFiles,
   setSelectedFiles,
 }: ChatComposerProps) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
@@ -252,7 +252,9 @@ export default function ChatComposer({
                         key={`${file.name}_${file.size}_${file.lastModified}`}
                         className="flex max-w-full items-center gap-2 rounded-xl border border-[#ff8a3d]/18 bg-[#ff8a3d]/8 px-2.5 py-1.5 text-xs text-white/84"
                       >
-                        <span className="min-w-0 truncate">📎 {file.name}</span>
+                        <span className="min-w-0 truncate">
+                          📎 {file.name}
+                        </span>
                         <button
                           type="button"
                           onClick={() => {

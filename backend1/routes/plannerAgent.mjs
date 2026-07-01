@@ -306,7 +306,11 @@ export default async function plannerAgentRoute(fastify) {
     }
 
     // ── Done ──────────────────────────────────────────────────
-    if (finalAnswer) {
+    // NOTE: the answer node already streamed the content via emit().
+    // The explore/plan path doesn't stream, so we emit content here
+    // only for non-streaming (edit) responses.
+    const isEditResponse = (editedFiles || []).length > 0;
+    if (finalAnswer && isEditResponse) {
       emit({ type: "content", content: finalAnswer });
     }
 

@@ -1,86 +1,129 @@
 /**
- * router.mjs — NO LLM, pure heuristics.
- * "explore"  → read / edit / create / delete project files
- * "pipeline" → build a full new app from scratch
- * "answer"   → greetings, Q&A, explanations
+ * router.mjs
+ * Heuristic intent router.
+ * "investigate" → bug/debug/root-cause workflow
+ * "explore"     → normal workspace edit flow
+ * "pipeline"    → full app / feature flow
+ * "answer"      → everything else
  */
 
 const GREETING_PATTERNS = [
-  /^(hi|hello|hey|سلام|مرحبا|hola|bonjour|ciao|yo|sup|howdy)[!.,\s]*$/i,
-  /^(how are you|how's it going|what's up|whats up|good morning|good evening|good afternoon)/i,
-  /^(thanks|thank you|thx|ممنون|مرسی|cheers)[!.,\s]*$/i,
-  /^(ok|okay|got it|understood|sure|alright|sounds good)[!.,\s]*$/i,
+  /^(hi|hello|hey|سلام|مرحبا|hola|bonjour|ciao|yo|sup|howdy|greetings|salut|hiya|heya)[!.,\s]*$/i,
+  /^(how are you|how's it going|what's up|whats up|good morning|good evening|good afternoon|good night)/i,
+  /^(thanks|thank you|thx|ty|ممنون|مرسی|cheers|appreciate it|great job|nice work|well done)[!.,\s]*$/i,
+  /^(ok|okay|got it|understood|sure|alright|sounds good|perfect|great|cool|nice|awesome|👍)[!.,\s]*$/i,
+  /^(bye|goodbye|see you|later|cya|take care)[!.,\s]*$/i,
+  /^(who are you|what are you|what('s| is) your name|tell me about yourself)[?!.,\s]*$/i,
+  /^(what (model|ai|llm) (are you|is this)|your model name)[?!.,\s]*/i,
+];
+
+const QUESTION_PATTERNS = [
+  /^(what|how|why|when|where|who|which|can you|could you|would you|do you|is it|are you|should i|explain|describe|tell me)/i,
+  /\b(what is|what are|how do|how does|how can|why does|why is|explain|describe|difference between|pros and cons|best practice|recommend)\b/i,
+];
+
+const INSTALL_PATTERNS = [
+  /\b(install|add)\s+(@[\w][\w\-./@]*|[\w][\w]*[-./][\w][\w\-./@]*)/i,
+  /\bnpm\s+(install|i)\b/i,
+  /\byarn\s+add\b/i,
+  /\bpnpm\s+add\b/i,
+  /\badd\s+(shadcn|shadcn-ui|tailwind|radix|react-query|zustand|prisma|axios|zod|framer|lucide)\b/i,
+  /\binstall\s+(shadcn|package|packages|dependency|dependencies)\b/i,
+  /\bshadcn\b.*\b(add|install|button|card|dialog|form|input|table|badge|avatar|select|dropdown|modal|sheet|toast|sidebar)\b/i,
+];
+
+const TEST_PATTERNS = [
+  /\b(run|execute|start|trigger)\s+(the\s+)?(tests?|test suite|unit tests?|integration tests?)\b/i,
+  /\b(npm\s+test|npm\s+run\s+test)\b/i,
+  /\bdo (the\s+)?tests? (pass|work|run|fail)\b/i,
+  /\b(check|verify)\s+(if\s+)?(tests?|specs?)\s+(pass|work|are ok)\b/i,
+  /^(test|tests|run tests?|check tests?)[\s!?]*$/i,
 ];
 
 const PIPELINE_PATTERNS = [
   /\b(build|scaffold|develop)\s+(a\s+)?(full|complete|entire|whole)\s+(app|project|system|platform|website|application)\b/i,
   /\b(create|make|generate)\s+(a\s+)?(full.?stack|end.?to.?end)\b/i,
+  /\b(start|create|build)\s+(my\s+)?(ai\s+)?agent\b/i,
+  /\b(codex|cursor|claude code)\b/i,
 ];
 
-// Files of any kind — code, images, styles, config
-const FILE_EXTENSION = /\.(tsx?|jsx?|mjs|cjs|css|scss|sass|less|json|md|ya?ml|html|xml|env|sh|py|rs|go|png|jpe?g|gif|svg|webp|ico|woff2?|ttf|eot|mp4|webm|pdf)\b/i;
+const FILE_EXTENSION = /\.(tsx?|jsx?|mjs|cjs|css|scss|sass|less|json|md|ya?ml|html|xml|env|sh|py|rs|go|png|jpe?g|gif|svg|webp|ico)\b/i;
+const FILE_PATH = /\b(src\/|app\/|components?\/|pages?\/|routes?\/|lib\/|utils?\/|hooks?\/|api\/|services?\/|public\/|styles?\/)\S+/i;
+const COMPONENT_NAME = /\b(chatsidebar|chatheader|chatcomposer|agentpipeline|thinkingtrace|authguard|emptystatecard|typingindicator|assistantmessage|useagenthook|usethinkingsteps|planchanges|kodo_graph|graph_runner|workingset|modelrouter)\b/i;
+const CODE_EDIT_VERB = /\b(refactor|rewrite|implement|scaffold|migrate|lint|typecheck|import|export|instantiate|destructure|annotate)\b/i;
+const EDIT_VERB = /\b(remove|delete|add|change|make|update|fix|rename|move|edit|modify|replace|adjust|tweak|set|put|insert|clear|hide|show|toggle|disable|enable|style|color|colour|animate|resize|rotate|translate|scale)\b/i;
 
-// Common component/file names that appear WITHOUT an extension
-const COMPONENT_NAME = /\b(sidebar|navbar|header|footer|button|modal|dialog|card|layout|page|composer|chatbox|chatsidebar|chatheader|message|avatar|dropdown|menu|tooltip|badge|input|form|table|list|grid|panel|drawer|tab|accordion|carousel|slider|toggle|switch|checkbox|radio|select|textarea|spinner|loader|toast|alert|banner|hero|section|container|wrapper|provider|context|hook|util|helper|service|store|reducer|action|route|controller|model|schema|config|middleware)\b/i;
-
-const EXPLORE_PATTERNS = [
-  // any file extension present
-  FILE_EXTENSION,
-  // directory references
-  /\b(src\/|app\/|components?\/|pages?\/|routes?\/|lib\/|utils?\/|hooks?\/|api\/|services?\/|config\/|public\/|styles?\/|assets?\/)/i,
-  // read operations
-  /\b(read|open|show|display|print|list|find|search|look at|check|inspect|view)\b.{0,40}\b(file|files|folder|directory|dir|code|content|source|component|page|function)\b/i,
-  // write / modify operations (broad)
-  /\b(edit|update|modify|change|fix|refactor|rename|rewrite|replace|patch|adjust|tweak|alter|set|make|add|remove|delete|increase|decrease|resize|enlarge|shrink|move|style|color|colour)\b/i,
-  // create operations
-  /\b(create|add|write|generate|scaffold|new)\b.{0,30}\b(file|component|page|route|module|class|function|hook|service|util|helper|test|spec|style)\b/i,
-  // workspace references
-  /\b(my (project|workspace|codebase|repo|files|code|app|component|sidebar)|in (the |my )?(project|workspace|codebase|repo|sidebar|component|file))\b/i,
-  /\b(what('s| is) in|content of|show me the)\b/i,
+const DEBUG_HINTS = [
+  /bad request/i,
+  /stack trace/i,
+  /trace/i,
+  /typeerror/i,
+  /referenceerror/i,
+  /syntaxerror/i,
+  /fstd_err_ctp_empty_json_body/i,
+  /500/i,
+  /404/i,
+  /failed/i,
+  /exception/i,
+  /crash/i,
+  /broken/i,
+  /not working/i,
+  /doesn't work/i,
+  /doesn.t work/i,
+  /while i delete/i,
+  /delete session/i,
+  /session delete/i,
+  /api\/agent\/sessions/i,
+  /sessions\//i,
 ];
+
+function isDebugReport(msg) {
+  return (
+    DEBUG_HINTS.some((p) => p.test(msg)) ||
+    /\b(fix|bug|error|crash|broken|failed|exception)\b/i.test(msg)
+  );
+}
 
 function classifyByHeuristic(message) {
   const msg = String(message || "").trim();
   if (!msg) return "answer";
 
-  // Strip the "Conversation memory:" suffix the route appends, so it
-  // doesn't pollute routing
   const cleanMsg = msg.split(/conversation memory:/i)[0].trim();
+  if (!cleanMsg) return "answer";
 
-  // Greetings → answer
+  const wordCount = cleanMsg.split(/\s+/).filter(Boolean).length;
+
   for (const p of GREETING_PATTERNS) {
     if (p.test(cleanMsg)) return "answer";
   }
 
-  // Pipeline check first (full builds)
   for (const p of PIPELINE_PATTERNS) {
     if (p.test(cleanMsg)) return "pipeline";
   }
 
-  // Strong signal: a filename, file extension, or known component name
-  // combined with anything → explore
-  const hasFile      = FILE_EXTENSION.test(cleanMsg);
-  const hasComponent = COMPONENT_NAME.test(cleanMsg);
+  const isQuestion = QUESTION_PATTERNS.some((p) => p.test(cleanMsg));
 
-  // Action verbs that imply editing code
-  const hasEditVerb = /\b(edit|update|modify|change|fix|refactor|rename|rewrite|replace|patch|adjust|tweak|alter|make|add|remove|delete|increase|decrease|resize|enlarge|shrink|move|bigger|smaller|larger|style|color|colour|background|padding|margin|width|height|font|border|round|shadow)\b/i.test(cleanMsg);
+  if (INSTALL_PATTERNS.some((p) => p.test(cleanMsg))) return "install";
+  if (TEST_PATTERNS.some((p) => p.test(cleanMsg))) return "test";
+  if (isDebugReport(cleanMsg)) return "investigate";
 
-  // If they mention a file/component AND want to do something → explore
-  if ((hasFile || hasComponent) && hasEditVerb) return "explore";
+  const hasFileExtension = FILE_EXTENSION.test(cleanMsg);
+  const hasFilePath = FILE_PATH.test(cleanMsg);
+  const hasComponentName = COMPONENT_NAME.test(cleanMsg);
+  const hasCodeEditVerb = CODE_EDIT_VERB.test(cleanMsg);
 
-  // If they just mention a file/component at all → explore (likely want to read/edit)
-  if (hasFile) return "explore";
+  if (hasFileExtension) return "explore";
+  if (hasFilePath) return "explore";
+  if (hasComponentName) return "explore";
+  if (hasCodeEditVerb) return "explore";
 
-  // Run the full explore pattern list
-  for (const p of EXPLORE_PATTERNS) {
-    if (p.test(cleanMsg)) return "explore";
+  if (wordCount <= 15 && EDIT_VERB.test(cleanMsg) && !isQuestion) {
+    return "explore";
   }
 
-  // Short greeting-like messages with no file signal → answer
-  const wordCount = cleanMsg.split(/\s+/).length;
-  if (wordCount < 6 && !hasComponent) return "answer";
+  if (wordCount <= 8 && !hasFileExtension && !hasFilePath) return "answer";
+  if (isQuestion) return "answer";
 
-  // Default
   return "answer";
 }
 
@@ -88,16 +131,18 @@ export async function routerNode(state) {
   const { userMessage, emit } = state;
 
   const intent = classifyByHeuristic(userMessage);
-
   console.log(`[Router] intent="${intent}" for: "${String(userMessage).slice(0, 80)}"`);
 
   emit?.({
-    type:    "progress",
-    stage:   "routed",
+    type: "progress",
+    stage: "routed",
     message:
-      intent === "explore"  ? "📂 Entering workspace mode..." :
+      intent === "investigate" ? "🧠 Starting investigation mode..." :
+      intent === "explore" ? "📂 Entering workspace mode..." :
       intent === "pipeline" ? "🚀 Starting full pipeline..." :
-                              "💬 Preparing response...",
+      intent === "test" ? "🧪 Running tests..." :
+      intent === "install" ? "📦 Installing packages..." :
+      "💬 Preparing response...",
   });
 
   return { intent };

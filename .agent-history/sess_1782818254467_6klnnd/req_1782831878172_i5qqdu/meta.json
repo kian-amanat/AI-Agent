@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess_1782818254467_6klnnd",
+  "requestId": "req_1782831878172_i5qqdu",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox/backend1",
+  "createdAt": "2026-06-30T15:05:03.531Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/lib/api.ts",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/chatbot/my-chatbot-ui/app/lib/api.ts",
+      "existedBefore": false,
+      "snapshotPath": null
+    }
+  ]
+}
