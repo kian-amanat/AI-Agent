@@ -1,0 +1,44 @@
+{
+  "sessionId": "sess_1782818254467_6klnnd",
+  "requestId": "req_1782833752279_o7a4ut",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox/backend1",
+  "createdAt": "2026-06-30T15:36:25.937Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/lib/api.ts",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/chatbot/my-chatbot-ui/app/lib/api.ts",
+      "existedBefore": false,
+      "snapshotPath": null
+    },
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/connection/page.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/chatbot/my-chatbot-ui/app/connection/page.tsx",
+      "existedBefore": false,
+      "snapshotPath": null
+    },
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/login/page.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/chatbot/my-chatbot-ui/app/login/page.tsx",
+      "existedBefore": false,
+      "snapshotPath": null
+    },
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/page.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/chatbot/my-chatbot-ui/app/page.tsx",
+      "existedBefore": false,
+      "snapshotPath": null
+    },
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/settings/page.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/chatbot/my-chatbot-ui/app/settings/page.tsx",
+      "existedBefore": false,
+      "snapshotPath": null
+    },
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/signup/page.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/chatbot/my-chatbot-ui/app/signup/page.tsx",
+      "existedBefore": false,
+      "snapshotPath": null
+    }
+  ]
+}

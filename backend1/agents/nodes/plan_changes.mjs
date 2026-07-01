@@ -1,193 +1,816 @@
+/**
+ * plan_changes.mjs
+ * Builds structured patch plans from evidence + investigation.
+ *
+ * Goals:
+ * - Keep prompts small enough to avoid provider timeouts.
+ * - Prefer the remembered/target file and investigation priority files.
+ * - Canonicalize plan paths to exact workspace paths when possible.
+ * - Retry once on transient LLM failures.
+ */
+
 import { AIMessage } from "@langchain/core/messages";
 import { callLLM } from "../../services/llm.mjs";
 
-/**
- * plan_changes.mjs — DIFF-BASED with memory awareness
- * The LLM outputs minimal SEARCH/REPLACE blocks.
- * If a remembered target file exists and the user didn't name a new
- * file, the LLM is told to edit ONLY the remembered file.
- */
+const MAX_PROMPT_FILES = 5;
+const MAX_FILE_CHARS = 2200;
+const MAX_TOTAL_CONTEXT_CHARS = 11000;
 
-// Does the message explicitly name a file or component?
-function mentionsExplicitFile(message) {
-  const m = String(message || "");
-  if (/\.(tsx?|jsx?|mjs|cjs|css|scss|json|md|html)\b/i.test(m)) return true;
-  // component-name words that imply a specific file
-  if (/\b(sidebar|navbar|header|footer|composer|chatsidebar|chatheader|login|signup|connection|dashboard|settings)\b/i.test(m)) return true;
+function delay(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isCreativeRequest(msg) {
+  return /\b(creative|exciting|beautiful|stunning|amazing|cool|fancy|animate|animation|gradient|glow|shadow|color|colour|design|be creative|advanced|premium|modern|sleek|vibrant|dynamic|make it (pop|shine|stand out))\b/i.test(
+    String(msg || "")
+  );
+}
+
+function isBugFixRequest(msg) {
+  return /\b(fix|bug|error|crash|broken|failed|exception|stack trace|TypeError|ReferenceError|SyntaxError|Bad Request|404|500|401|503|not working|doesn't work|doesn.t work)\b/i.test(
+    String(msg || "")
+  );
+}
+
+function isLintFixRequest(msg) {
+  return /\b(lint|linting|eslint|tslint|typecheck|type.check|no-explicit-any|no-unused|prefer-const|lint error|lint warning|lint fix|fix lint|fix.*lint|fix.*typescript|fix.*eslint)\b/i.test(
+    String(msg || "")
+  );
+}
+
+function mentionsExplicitFile(msg) {
+  const m = String(msg || "");
+  if (/\.(tsx?|jsx?|mjs|cjs|css|scss|json|md|html|ts|js|yml|yaml)\b/i.test(m)) return true;
+  if (/\b(sidebar|navbar|header|footer|composer|chatsidebar|chatheader|login|signup|connection|dashboard|settings|page|route|layout)\b/i.test(m))
+    return true;
   return false;
 }
 
-function buildSystemPrompt(rememberedTargetFile, lockToRemembered) {
-  let focusRule = "";
-  if (lockToRemembered && rememberedTargetFile) {
-    focusRule = `
-🎯 CRITICAL FOCUS RULE:
-The user is continuing to work on this file: "${rememberedTargetFile}"
-The user did NOT name a different file, so this is a follow-up to the previous edit.
-You MUST make your edits ONLY in "${rememberedTargetFile}".
-Do NOT edit any other file, even if the same text/keyword appears elsewhere.
-If the requested change cannot be applied to "${rememberedTargetFile}", return a "read_only" plan explaining why.`;
+function addLineNumbers(content) {
+  return String(content || "")
+    .split("\n")
+    .map((line, i) => `${String(i + 1).padStart(4, " ")} | ${line}`)
+    .join("\n");
+}
+
+function buildJsxOutline(content, filePath) {
+  if (!/\.(tsx?|jsx?)$/.test(filePath)) return "";
+  const lines = String(content || "").split("\n");
+  const outline = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(return\s*[\(\{]|<[A-Z][a-zA-Z]*|<\/[A-Z][a-zA-Z]*|<div|<section|<main|<aside|<button|<span|<p\b)/.test(lines[i])) {
+      outline.push(`L${i + 1}: ${lines[i].slice(0, 90).trimEnd()}`);
+    }
   }
 
-  return `You are Kodo, an expert AI software engineer embedded in VS Code.
-You make PRECISE, surgical edits to the user's project files.
-${focusRule}
+  if (outline.length === 0) return "";
+  return `\n\n### Structure (${pathBase(filePath)}):\n${outline.slice(0, 30).join("\n")}`;
+}
 
-You MUST respond with ONLY a JSON object (no markdown fences, no prose):
+function pathBase(p) {
+  return String(p || "").split("/").pop() || String(p || "");
+}
+
+function normalizeSnippet(content) {
+  return String(content || "")
+    .replace(/\r\n/g, "\n")
+    .replace(/[ \t]+$/gm, "")
+    .trimEnd();
+}
+
+function shortenContent(content, maxChars = MAX_FILE_CHARS) {
+  const text = normalizeSnippet(content);
+  if (text.length <= maxChars) return text;
+
+  const headLen = Math.floor(maxChars * 0.72);
+  const tailLen = Math.floor(maxChars * 0.28);
+  const head = text.slice(0, headLen);
+  const tail = text.slice(-tailLen);
+
+  return `${head}\n... [truncated ${text.length - headLen - tailLen} chars]\n${tail}`;
+}
+
+function scoreFileForPrompt(file, cleanMsg, rememberedTargetFile, investigation) {
+  const msg = String(cleanMsg || "").toLowerCase();
+  const fp = String(file?.path || "").toLowerCase();
+  const base = pathBase(fp).toLowerCase();
+  let score = 0;
+
+  if (rememberedTargetFile) {
+    const remembered = String(rememberedTargetFile).toLowerCase();
+    const rememberedBase = pathBase(remembered);
+    if (fp === remembered) score += 500;
+    else if (fp.endsWith(remembered)) score += 250;
+    else if (base === rememberedBase) score += 180;
+  }
+
+  const priorityFiles = Array.isArray(investigation?.priorityFiles) ? investigation.priorityFiles : [];
+  for (const p of priorityFiles) {
+    const pp = String(p || "").toLowerCase();
+    if (!pp) continue;
+    if (fp === pp) score += 220;
+    else if (fp.endsWith(pp)) score += 140;
+    else if (base === pathBase(pp).toLowerCase()) score += 120;
+  }
+
+  if (msg.includes(base)) score += 100;
+
+  fp.split("/").forEach((seg) => {
+    if (seg && msg.includes(seg)) score += 18;
+  });
+
+  if (fp.endsWith(".tsx") || fp.endsWith(".jsx")) score += 8;
+  if (fp.endsWith("page.tsx") || fp.endsWith("page.jsx")) score += 12;
+  if (fp.endsWith("layout.tsx") || fp.endsWith("layout.jsx")) score += 10;
+  if (fp.endsWith("route.ts") || fp.endsWith("route.js")) score += 10;
+
+  const keywords = [
+    ["component", "components"],
+    ["route", "routes"],
+    ["layout", "layout"],
+    ["login", "login"],
+    ["auth", "auth"],
+    ["api", "api"],
+    ["sidebar", "sidebar"],
+    ["chat", "chat"],
+    ["settings", "settings"],
+    ["session", "session"],
+    ["delete", "delete"],
+    ["undo", "undo"],
+    ["pipeline", "pipeline"],
+    ["agent", "agent"],
+    ["model", "model"],
+    ["kodo", "kodo"],
+    ["collapse", "sidebar"],
+    ["hover", "sidebar"],
+    ["icon", "icon"],
+  ];
+
+  for (const [kw, segment] of keywords) {
+    if (msg.includes(kw) && fp.includes(segment)) score += 16;
+  }
+
+  if (/bad request|400|fstd_err_ctp_empty_json_body|body cannot be empty/i.test(msg)) {
+    if (/app\/lib\/api\.ts$|lib\/api\.ts$|api\.ts$/i.test(fp)) score += 200;
+    if (/route\.ts$|route\.js$|route\.mjs$/i.test(fp)) score += 120;
+    if (/session\.service\.(mjs|js|ts)$/i.test(fp)) score += 110;
+    if (/server\.mjs$|server\.js$|fastify|app\.mjs$/i.test(fp)) score += 90;
+    if (/request|fetch|api|sessions|session/i.test(fp)) score += 60;
+  }
+
+  if (/delete session|\/sessions|sessions\//i.test(msg)) {
+    if (/app\/lib\/api\.ts$|lib\/api\.ts$|api\.ts$/i.test(fp)) score += 150;
+    if (/session\.service\.(mjs|js|ts)$/i.test(fp)) score += 120;
+    if (/route\.ts$|route\.js$|route\.mjs$/i.test(fp)) score += 100;
+    if (/server\.mjs$|server\.js$|fastify|app\.mjs$/i.test(fp)) score += 80;
+  }
+
+  return score;
+}
+
+function pickFilesForPrompt(fileContext, cleanMsg, rememberedTargetFile, investigation, mode) {
+  const files = Array.isArray(fileContext) ? fileContext.filter((f) => f && f.content) : [];
+  const scored = files
+    .map((f) => ({
+      ...f,
+      score: scoreFileForPrompt(f, cleanMsg, rememberedTargetFile, investigation),
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  const picked = [];
+  const seen = new Set();
+
+  const push = (file) => {
+    if (!file?.path || seen.has(file.path)) return;
+    seen.add(file.path);
+    picked.push(file);
+  };
+
+  const priorityFiles = Array.isArray(investigation?.priorityFiles) ? investigation.priorityFiles : [];
+  for (const p of priorityFiles) {
+    const pp = String(p || "");
+    const match = scored.find((f) => f.path === pp || f.path.endsWith(pp) || pathBase(f.path) === pathBase(pp));
+    if (match) push(match);
+  }
+
+  if (rememberedTargetFile) {
+    const rt = String(rememberedTargetFile);
+    const match = scored.find((f) => f.path === rt || f.path.endsWith(rt) || pathBase(f.path) === pathBase(rt));
+    if (match) push(match);
+  }
+
+  for (const f of scored) {
+    if (picked.length >= MAX_PROMPT_FILES) break;
+    push(f);
+  }
+
+  // Debug mode can use a bit more context, but we still keep it capped.
+  return picked.slice(0, mode === "debug" ? Math.max(MAX_PROMPT_FILES, 6) : MAX_PROMPT_FILES);
+}
+
+function buildSystemPrompt({ rememberedTargetFile, lockToRemembered, mode, investigation }) {
+  const focusRule = lockToRemembered && rememberedTargetFile
+    ? `\nFOCUS: Edit ONLY "${rememberedTargetFile}". Do NOT touch unrelated files.\n`
+    : "";
+
+  const investigationSection = investigation
+    ? `
+## DEBUG INVESTIGATION CONTEXT
+Root cause: ${investigation.likelyRootCause || "unknown"}
+Confidence: ${typeof investigation.confidence === "number" ? investigation.confidence : "unknown"}
+Evidence:
+${Array.isArray(investigation.evidence) ? investigation.evidence.map((e) => `- ${e}`).join("\n") : "- none"}
+
+Hypotheses:
+${Array.isArray(investigation.hypotheses) ? investigation.hypotheses.map((h) => `- ${h}`).join("\n") : "- none"}
+
+Priority files:
+${Array.isArray(investigation.priorityFiles) ? investigation.priorityFiles.map((p) => `- ${p}`).join("\n") : "- none"}
+
+Next checks:
+${Array.isArray(investigation.nextChecks) ? investigation.nextChecks.map((n) => `- ${n}`).join("\n") : "- none"}
+`
+    : "";
+
+  const modeSection = {
+    creative: `
+## CREATIVE MODE
+Use stronger visual design, better layout, thoughtful motion, and polished UI.
+Be bold when it improves the result. Do not introduce random complexity.`,
+
+    debug: `
+## DEBUG MODE
+The user reported an error or bug. Fix the root cause, not the symptom.
+
+THINK IN LAYERS before writing the plan:
+1. CONTRACT layer — does the client send what the server expects (method, headers, body, path)?
+2. HANDLER layer — does the server route/handler parse and process it correctly?
+3. SERVICE layer — does the service function use only symbols it actually imports?
+4. STATE layer — does the UI reflect the server response correctly?
+
+Fix the LOWEST broken layer first. Do not add workarounds on top of a broken foundation.
+If the investigation says the backend is rejecting the request, fix the request/contract mismatch.
+If a service function references an undefined variable, fix the import — do not rewrite callers.
+You may edit multiple files when the bug spans layers (e.g. frontend header + backend parser).`,
+
+    lint: `
+## LINT FIX MODE
+Fix ONLY the specific lint/type errors. Preserve every line of logic, every component, every import that is not directly causing the error.
+
+STRICT RULES:
+- NEVER use rewrite_file — it destroys code. Use replace_text or replace_block only.
+- ONE patch per lint violation. Touch only the exact line(s) reported.
+- no-explicit-any → replace \`any\` with \`unknown\`, a proper interface, or a narrower type. Do NOT remove the variable or the block it lives in.
+- no-unused-vars / no-unused-imports → remove only that one declaration/import. Keep everything else.
+- prefer-const → change \`let\` to \`const\` on that one line only.
+- If fixing an \`any\` type requires knowing the shape, use \`unknown\` and add \`as unknown\` cast rather than removing code.
+- Do NOT delete functions, components, hooks, handlers, or any business logic.
+- Do NOT restructure, reformat, or reorder code.`,
+
+    surgical: `
+## SURGICAL MODE
+Do exactly what was asked. Nothing more.
+- Prefer one-file changes when possible.
+- Avoid unrelated refactors.
+- Keep behavior unchanged outside the requested scope.`,
+  };
+
+  return `You are Kodo, a surgical AI code editor.
+${focusRule}${investigationSection}${modeSection[mode] || modeSection.surgical}
+
+DEPENDENCY RULES
+- ALWAYS use the EXACT file path shown in "### File: <path>" headers below. Never abbreviate.
+- If an error trace says "app/lib/api.ts" but the file is shown as "chatbot/my-chatbot-ui/app/lib/api.ts", use the full path.
+- Before emitting a plan step, verify the path appears in the file list below.
+- If you need to edit a file NOT in the list, emit a read_only step explaining what you need.
+
+OUTPUT FORMAT
+Return ONLY valid JSON:
 {
-  "reasoning": "One short sentence describing the change.",
+  "reasoning": "Root cause in one sentence. Which layer is broken and why.",
+  "dependencyNotes": "Which files call which, and why editing X requires or does not require editing Y.",
   "plan": [
     {
-      "action": "edit",
-      "path": "relative/path/to/file.tsx",
-      "description": "what changed",
-      "edits": [
-        { "search": "EXACT text to find (verbatim, with whitespace)", "replace": "new text" }
+      "action": "edit | create | delete | read_only",
+      "path": "exact/path/from/file/list",
+      "description": "what changed and why",
+      "patches": [
+        {
+          "kind": "rewrite_file | replace_text | replace_block | insert_before | insert_after | delete_text",
+          "search": "unique text or anchor",
+          "replace": "replacement text",
+          "content": "full file content for rewrite_file"
+        }
       ]
     }
   ]
 }
 
-ACTION TYPES:
-- "edit"      → provide "edits": array of {search, replace}. NO "content".
-- "create"    → provide "content": full new file. NO "edits".
-- "delete"    → no content/edits.
-- "read_only" → no changes; explanation in "description".
+PATCH RULES
+- Use the EXACT path from the "### File: <path>" header — never shorten it.
+- Prefer rewrite_file for small files or broad JSX restructuring.
+- Prefer replace_block for a small unique section change.
+- Prefer insert_before / insert_after for additive changes.
+- Use replace_text only when the anchor is unique in the file.
+- Use the SHORTEST unique anchor that safely locates the target.
+- Never include line numbers in search text.
+- Never include markdown fences.
+- For JSX, keep tags balanced.
+- Keep patches narrow when the user asked for a narrow change.
 
-RULES FOR "search":
-- Copy EXACT text from the file, character-for-character, including indentation.
-- Include 3-6 lines of surrounding context so the match is UNIQUE.
-- Each {search} must appear exactly once. Make multiple small edits.
-- NEVER paste the whole file. Change ONLY what the user asked for.
-- Preserve existing code style.
-
-Output ONLY the JSON.`;
+If you cannot confidently fix the issue, return a read_only step explaining the exact blocker.`;
 }
 
-function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToRemembered) {
+function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToRemembered, mode, investigation) {
   const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
 
-  // If locked to remembered file, only show THAT file's content to the LLM
-  let filesToShow = fileContext.filter(f => f.content);
-  if (lockToRemembered && rememberedTargetFile) {
-    const onlyRemembered = filesToShow.filter(f =>
-      f.path === rememberedTargetFile ||
-      f.path.endsWith(rememberedTargetFile) ||
-      rememberedTargetFile.endsWith(f.path)
-    );
-    if (onlyRemembered.length > 0) filesToShow = onlyRemembered;
+  const filesToShow = pickFilesForPrompt(fileContext, cleanMsg, rememberedTargetFile, investigation, mode);
+
+  const fileSnippets = [];
+  let totalChars = 0;
+
+  for (const f of filesToShow) {
+    const outline = buildJsxOutline(f.content, f.path);
+    const numbered = addLineNumbers(shortenContent(f.content));
+    const summary = f.summary ? `\nSummary: ${f.summary}` : "";
+    const block = `### File: ${f.path}${summary}${outline}\n\`\`\`\n${numbered}\n\`\`\``;
+
+    if (totalChars + block.length > MAX_TOTAL_CONTEXT_CHARS && fileSnippets.length > 0) break;
+    totalChars += block.length;
+    fileSnippets.push(block);
   }
 
-  const fileSnippets = filesToShow
-    .map(f => `### File: ${f.path}\n\`\`\`\n${f.content}\n\`\`\``)
-    .join("\n\n");
+  const focusNote = !lockToRemembered || mode === "debug"
+    ? ""
+    : `\n\nEdit ONLY "${rememberedTargetFile}".`;
 
-  const focusNote = (lockToRemembered && rememberedTargetFile)
-    ? `\n\nIMPORTANT: Edit ONLY "${rememberedTargetFile}". This is a follow-up to a previous edit on that file.`
+  const investigationNote = investigation
+    ? `\nInvestigation says likely root cause: ${investigation.likelyRootCause || "unknown"}`
     : "";
 
-  return `User request: "${cleanMsg}"${focusNote}
+  const instructions = {
+    lint: "Fix ONLY the exact lint violations. Use replace_text per violation. NEVER use rewrite_file. Keep all logic, components, and imports that are not directly causing the error.",
+    creative: "Be bold but controlled. Improve the design and clarity where it helps.",
+    debug: "Use the investigation evidence to fix the root cause. Do not edit blindly.",
+    surgical: "Make the smallest correct change. Do not alter unrelated code.",
+  };
 
-Produce minimal SEARCH/REPLACE edits that satisfy EXACTLY this request and nothing else.
+  return `User request: "${cleanMsg}"${focusNote}${investigationNote}
 
-${fileSnippets ? `Current project files:\n\n${fileSnippets}` : "No matching files found."}
+${instructions[mode] || instructions.surgical}
 
-Output ONLY JSON with small, unique search/replace blocks.`;
+CRITICAL: Use each file's EXACT path as shown in the "### File: <path>" header.
+If an error trace mentions "app/lib/api.ts" but the file header shows "chatbot/my-chatbot-ui/app/lib/api.ts", use the full path in your plan.
+
+Use the shortest unique anchor possible.
+Prefer rewrite_file if the file is small and the change is broad.
+If a file is not shown below, do not invent its contents — emit a read_only step instead.
+
+${fileSnippets.length ? `Project files:\n\n${fileSnippets.join("\n\n")}` : "No files found."}
+
+Return ONLY valid JSON.`;
 }
 
 function extractJSON(text) {
-  const stripped = text.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  const stripped = String(text || "")
+    .replace(/^```(?:json)?\s*/i, "")
+    .replace(/\s*```$/i, "")
+    .trim();
+
   const start = stripped.indexOf("{");
-  const end   = stripped.lastIndexOf("}");
+  const end = stripped.lastIndexOf("}");
   if (start === -1 || end === -1) return null;
-  try { return JSON.parse(stripped.slice(start, end + 1)); }
-  catch { return null; }
+
+  try {
+    return JSON.parse(stripped.slice(start, end + 1));
+  } catch {
+    return null;
+  }
 }
 
-export async function planChangesNode(state) {
-  const { userMessage, fileContext, modelRoute, emit, rememberedTargetFile = "" } = state;
+function stripLineNumbers(text) {
+  return String(text || "")
+    .split("\n")
+    .map((line) => line.replace(/^\s*\d+\s*\|\s?/, ""))
+    .join("\n");
+}
 
-  // Decide whether to LOCK editing to the remembered file:
-  // only when we HAVE a remembered file AND the user did NOT name a new file.
-  const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
-  const lockToRemembered = Boolean(rememberedTargetFile) && !mentionsExplicitFile(cleanMsg);
+function normalizePatchList(item) {
+  const out = [];
 
-  if (lockToRemembered) {
-    console.log(`[PlanChanges] 🔒 Locked to remembered file: ${rememberedTargetFile}`);
-  }
+  const patches = Array.isArray(item?.patches) ? item.patches : [];
+  for (const p of patches) {
+    if (!p || typeof p !== "object") continue;
+    const kind = String(p.kind || "").trim();
+    if (!kind) continue;
 
-  emit?.({ type: "progress", stage: "planning", message: lockToRemembered
-    ? `🧠 Planning edits to ${rememberedTargetFile.split("/").pop()}...`
-    : "🧠 Planning precise edits..." });
-
-  const system  = buildSystemPrompt(rememberedTargetFile, lockToRemembered);
-  const content = buildUserPrompt(userMessage, fileContext || [], rememberedTargetFile, lockToRemembered);
-
-  let parsed = null, rawResponse = "";
-  try {
-    const result = await callLLM({
-      system,
-      messages: [{ role: "user", content }],
-      modelRoute,
-      maxTokens: 4000,
-      temperature: 0,
+    out.push({
+      kind,
+      search: stripLineNumbers(p.search || p.anchor || p.before || ""),
+      replace: stripLineNumbers(p.replace || p.content || p.after || ""),
+      content: stripLineNumbers(p.content || ""),
+      anchor: stripLineNumbers(p.anchor || ""),
+      before: stripLineNumbers(p.before || ""),
+      after: stripLineNumbers(p.after || ""),
     });
-    rawResponse = result?.content || "";
-    parsed = extractJSON(rawResponse);
-  } catch (err) {
-    console.error("[PlanChanges] LLM error:", err.message);
   }
 
-  if (!parsed?.plan) {
-    console.warn("[PlanChanges] Could not parse plan — read_only fallback");
-    parsed = {
-      reasoning: "Could not generate a plan.",
-      plan: [{ action: "read_only", path: "", description: rawResponse || "No plan generated.", edits: [], content: "" }],
+  if (Array.isArray(item?.edits)) {
+    for (const e of item.edits) {
+      if (!e || typeof e !== "object") continue;
+      if (typeof e.search !== "string" || typeof e.replace !== "string") continue;
+      out.push({
+        kind: "replace_text",
+        search: stripLineNumbers(e.search),
+        replace: stripLineNumbers(e.replace),
+        content: "",
+        anchor: "",
+        before: "",
+        after: "",
+      });
+    }
+  }
+
+  return out;
+}
+
+function canonicalizePlanPath(plannedPath, fileContext, rememberedTargetFile) {
+  const raw = String(plannedPath || "").trim().replace(/\\/g, "/").replace(/^\.\//, "");
+  if (!raw) return raw;
+
+  const files = Array.isArray(fileContext) ? fileContext : [];
+
+  const exact = files.find((f) => f?.path === raw);
+  if (exact) return exact.path;
+
+  const remembered = String(rememberedTargetFile || "").trim().replace(/\\/g, "/");
+  if (remembered) {
+    const byRemembered = files.find(
+      (f) => f?.path === remembered || f?.path.endsWith(remembered) || remembered.endsWith(f?.path || "")
+    );
+    if (byRemembered && (raw === pathBase(byRemembered.path) || byRemembered.path.endsWith(raw) || raw.endsWith(pathBase(byRemembered.path)))) {
+      return byRemembered.path;
+    }
+  }
+
+  const base = pathBase(raw);
+  const byBase = files.find((f) => pathBase(f?.path) === base);
+  if (byBase) return byBase.path;
+
+  const byEnd = files.find((f) => {
+    const fp = String(f?.path || "");
+    return fp.endsWith(raw) || raw.endsWith(fp);
+  });
+  if (byEnd) return byEnd.path;
+
+  return raw;
+}
+
+function applyPathCanonicalization(plan, fileContext, rememberedTargetFile) {
+  return (plan || []).map((item) => {
+    if (!item?.path) return item;
+    return {
+      ...item,
+      path: canonicalizePlanPath(item.path, fileContext, rememberedTargetFile),
+    };
+  });
+}
+
+
+
+async function generatePlanWithRetry({ system, content, modelRoute }) {
+  let lastError = null;
+  let rawResponse = "";
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const result = await callLLM({
+        system,
+        messages: [{ role: "user", content }],
+        modelRoute,
+        maxTokens: attempt === 0 ? 4500 : 2800,
+        temperature: 0,
+      });
+
+      rawResponse = result?.content || "";
+      return { rawResponse, parsed: extractJSON(rawResponse), error: null };
+    } catch (err) {
+      lastError = err;
+      const msg = String(err?.message || err || "");
+      const isTransient = /504|502|503|gateway timeout|timeout|ETIMEDOUT|ECONNRESET|network|rate limit/i.test(msg);
+
+      if (attempt === 0 && isTransient) {
+        await delay(800);
+        continue;
+      }
+      break;
+    }
+  }
+
+  return { rawResponse, parsed: null, error: lastError };
+}
+
+function buildFallbackPlan({ cleanMsg, fileContext, rememberedTargetFile, investigation, mode }) {
+  const files = Array.isArray(fileContext) ? fileContext.filter((f) => f?.path) : [];
+  const target =
+    files.find((f) => f.path === rememberedTargetFile) ||
+    files.find((f) => rememberedTargetFile && (f.path.endsWith(rememberedTargetFile) || rememberedTargetFile.endsWith(f.path))) ||
+    files[0] ||
+    null;
+
+  const lower = String(cleanMsg || "").toLowerCase();
+
+  if (!target) {
+    return {
+      reasoning: "Could not generate a plan because no usable file context was available.",
+      dependencyNotes: "Need file context for the target file to produce a safe edit plan.",
+      plan: [
+        {
+          action: "read_only",
+          path: "",
+          description: "No usable file context was available for planning.",
+          patches: [],
+        },
+      ],
     };
   }
 
-  let plan = (parsed.plan || []).map(item => ({
-    action:      String(item.action || "read_only"),
-    path:        String(item.path   || ""),
+  if (mode === "debug") {
+    return {
+      reasoning: "The planner timed out, so the safest fallback is to inspect the target file and the files directly related to the request.",
+      dependencyNotes:
+        "The remembered target file is the primary edit candidate; related files should be inspected only if they appear in the prompt context.",
+      plan: [
+        {
+          action: "read_only",
+          path: target.path,
+          description: `Planner fallback: inspect ${target.path} because the model call timed out before producing JSON.`,
+          patches: [],
+        },
+      ],
+    };
+  }
+
+  if (/sidebar|collapse|hover|icon/.test(lower) && /ChatSidebar\.tsx$/i.test(target.path)) {
+    const content = String(target.content || "");
+    const hasToggleButton = content.includes("onClick={onToggleSidebar}") && content.includes("KeyboardDoubleArrowLeftRoundedIcon");
+    if (hasToggleButton) {
+      const search = [
+        '        <motion.button',
+        '          whileTap={{ scale: 0.96 }}',
+        '          onClick={onToggleSidebar}',
+      ].join("\n");
+
+      const replace = [
+        '        <motion.button',
+        '          whileTap={{ scale: 0.96 }}',
+        '          onClick={onToggleSidebar}',
+        '          onMouseEnter={() => setIconHover(true)}',
+        '          onMouseLeave={() => setIconHover(false)}',
+        '          className={`flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 text-white/72 transition-colors duration-200 hover:border-white/14 hover:text-white ${',
+        '            isSidebarCollapsed ? "mx-auto" : ""',
+        '          }`}',
+        '          title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}',
+        '          aria-label={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}',
+        '        >',
+        '          {isSidebarCollapsed ? (',
+        '            iconHover ? (',
+        '              <KeyboardDoubleArrowRightRoundedIcon className="h-5 w-5" />',
+        '            ) : (',
+        '              <Image src="/icon.png" alt="Open sidebar" width={24} height={24} quality={100} />',
+        '            )',
+        '          ) : (',
+        '            <KeyboardDoubleArrowLeftRoundedIcon className="h-5 w-5" />',
+        '          )}',
+        '        </motion.button>',
+      ].join("\n");
+
+      return {
+        reasoning: "Planner fallback: the request is a sidebar icon swap, so the target button block should be updated directly.",
+        dependencyNotes: "This is a single-file UI change in ChatSidebar.tsx. No backend files are required.",
+        plan: [
+          {
+            action: "edit",
+            path: target.path,
+            description: "Show the logo when collapsed and swap to the right-arrow icon on hover.",
+            patches: [
+              {
+                kind: "replace_block",
+                search,
+                replace,
+              },
+            ],
+          },
+        ],
+      };
+    }
+  }
+
+  if (target.content && target.content.length > 0) {
+    return {
+      reasoning: "The planner timed out, so the safest fallback is to return the target file for a focused re-run.",
+      dependencyNotes: "The target file is the most likely edit location, but the model did not produce a safe patch plan.",
+      plan: [
+        {
+          action: "read_only",
+          path: target.path,
+          description: `Inspect ${target.path} and retry planning with a smaller prompt.`,
+          patches: [],
+        },
+      ],
+    };
+  }
+
+  return {
+    reasoning: "Could not generate a plan because the model timed out and the fallback could not confidently identify a safe patch.",
+    dependencyNotes: "Need a smaller prompt or a more specific file anchor.",
+    plan: [
+      {
+        action: "read_only",
+        path: "",
+        description: "Planner fallback failed.",
+        patches: [],
+      },
+    ],
+  };
+}
+
+export async function planChangesNode(state) {
+  const { userMessage, fileContext, modelRoute, emit, rememberedTargetFile = "", investigation = null } = state;
+
+  const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
+  const lockToRemembered = Boolean(rememberedTargetFile) && !mentionsExplicitFile(cleanMsg);
+
+  let mode = "surgical";
+  if (isLintFixRequest(cleanMsg)) mode = "lint";
+  else if (isBugFixRequest(cleanMsg)) mode = "debug";
+  else if (isCreativeRequest(cleanMsg)) mode = "creative";
+
+  if (lockToRemembered) console.log(`[PlanChanges] Locked to: ${rememberedTargetFile}`);
+  console.log(`[PlanChanges] Mode: ${mode}`);
+
+  const modeEmoji = { debug: "🐛", creative: "🎨", surgical: "🧠", lint: "🔧" };
+  const modeMsg = { debug: "Debugging...", creative: "Designing...", surgical: "Planning...", lint: "Fixing lint..." };
+
+  emit?.({
+    type: "progress",
+    stage: "planning",
+    message: `${modeEmoji[mode]} ${modeMsg[mode]}`,
+  });
+
+  const system = buildSystemPrompt({
+    rememberedTargetFile,
+    lockToRemembered: lockToRemembered && mode !== "debug",
+    mode,
+    investigation,
+  });
+
+  const content = buildUserPrompt(
+    userMessage,
+    fileContext || [],
+    rememberedTargetFile,
+    lockToRemembered,
+    mode,
+    investigation
+  );
+
+  let parsed = null;
+  let rawResponse = "";
+  let plannerError = null;
+
+  try {
+    const result = await generatePlanWithRetry({
+      system,
+      content,
+      modelRoute,
+    });
+
+    rawResponse = result.rawResponse || "";
+    parsed = result.parsed;
+    plannerError = result.error;
+  } catch (err) {
+    plannerError = err;
+  }
+
+  if (!parsed?.plan) {
+    const fallback = buildFallbackPlan({
+      cleanMsg,
+      fileContext,
+      rememberedTargetFile,
+      investigation,
+      mode,
+    });
+
+    if (fallback?.plan?.length) {
+      console.warn("[PlanChanges] Falling back to deterministic plan.");
+      parsed = fallback;
+    } else {
+      console.warn("[PlanChanges] Could not parse plan — using read_only fallback");
+      parsed = {
+        reasoning: "Could not generate a valid plan.",
+        dependencyNotes: plannerError ? String(plannerError.message || plannerError) : "Planner returned no valid JSON.",
+        plan: [
+          {
+            action: "read_only",
+            path: "",
+            description: rawResponse || "No plan generated.",
+            patches: [],
+            edits: [],
+          },
+        ],
+      };
+    }
+  }
+
+  let plan = (parsed.plan || []).map((item) => ({
+    action: String(item.action || "read_only"),
+    path: String(item.path || ""),
     description: String(item.description || ""),
-    edits:       Array.isArray(item.edits) ? item.edits
-                   .filter(e => e && typeof e.search === "string" && typeof e.replace === "string")
-                   .map(e => ({ search: e.search, replace: e.replace })) : [],
-    content:     typeof item.content === "string" ? item.content : "",
+    patches: normalizePatchList(item),
+    edits: Array.isArray(item.edits)
+      ? item.edits
+          .filter((e) => e && typeof e.search === "string" && typeof e.replace === "string")
+          .map((e) => ({ search: stripLineNumbers(e.search), replace: stripLineNumbers(e.replace) }))
+      : [],
+    content: typeof item.content === "string" ? stripLineNumbers(item.content) : "",
   }));
 
-  // ★ Safety net: if locked, drop any edits to files OTHER than the remembered one
-  if (lockToRemembered && rememberedTargetFile) {
+  plan = applyPathCanonicalization(plan, fileContext || [], rememberedTargetFile);
+
+  if (mode === "lint") {
+    plan = plan.map((item) => {
+      const droppedCount = item.patches.filter((p) => p.kind === "rewrite_file").length;
+      const safePatches = item.patches.filter((p) => p.kind !== "rewrite_file");
+
+      if (droppedCount === 0) return item;
+
+      console.warn(`[PlanChanges] Blocked ${droppedCount} rewrite_file patch(es) for "${item.path}" in lint mode`);
+
+      if (safePatches.length > 0) {
+        return { ...item, patches: safePatches };
+      }
+
+      return {
+        ...item,
+        action: "read_only",
+        patches: [],
+        edits: [],
+        content: "",
+        description: `Skipped: the model tried to rewrite the whole file to fix a lint error, which is not allowed. Re-run with a more targeted instruction (e.g. name the exact line/rule).`,
+      };
+    });
+  }
+
+  if (lockToRemembered && mode !== "debug" && rememberedTargetFile) {
     const before = plan.length;
-    plan = plan.filter(p =>
-      p.action === "read_only" ||
-      p.path === rememberedTargetFile ||
-      p.path.endsWith(rememberedTargetFile) ||
-      rememberedTargetFile.endsWith(p.path)
+    plan = plan.filter(
+      (p) =>
+        p.action === "read_only" ||
+        p.path === rememberedTargetFile ||
+        p.path.endsWith(rememberedTargetFile) ||
+        rememberedTargetFile.endsWith(p.path)
     );
+
     if (plan.length < before) {
-      console.log(`[PlanChanges] 🔒 Dropped ${before - plan.length} edit(s) to non-remembered files`);
+      console.log(`[PlanChanges] Dropped ${before - plan.length} edits to other files`);
     }
+
     if (plan.length === 0) {
-      plan = [{ action: "read_only", path: rememberedTargetFile, description: `No applicable change found in ${rememberedTargetFile}.`, edits: [], content: "" }];
+      plan = [
+        {
+          action: "read_only",
+          path: rememberedTargetFile,
+          description: "No applicable change found.",
+          patches: [],
+          edits: [],
+          content: "",
+        },
+      ];
     }
   }
 
   emit?.({
-    type:      "plan",
+    type: "plan",
     reasoning: parsed.reasoning,
-    steps:     plan.map(p => ({ action: p.action, path: p.path, description: p.description, editCount: p.edits.length })),
-    message:   `📋 Plan ready: ${plan.length} step(s)`,
+    dependencyNotes: parsed.dependencyNotes || "",
+    steps: plan.map((p) => ({
+      action: p.action,
+      path: p.path,
+      description: p.description,
+      patchCount: p.patches.length || p.edits.length,
+    })),
+    message: `📋 Plan: ${plan.length} step(s)`,
   });
 
-  console.log(`[PlanChanges] ${plan.length} steps, ${plan.reduce((n, p) => n + p.edits.length, 0)} edits planned`);
+  console.log(`[PlanChanges] ${plan.length} steps`);
 
   return {
     plan,
     messages: [
       new AIMessage(
-        `Plan (${plan.length} step${plan.length !== 1 ? "s" : ""}):\n` +
-        plan.map((p, i) => `  ${i + 1}. [${p.action.toUpperCase()}] ${p.path}${p.edits.length ? ` (${p.edits.length} edits)` : ""} – ${p.description}`).join("\n")
+        `Plan (${plan.length}):\n` +
+          plan.map((p, i) => `  ${i + 1}. [${p.action.toUpperCase()}] ${p.path} – ${p.description}`).join("\n")
       ),
     ],
   };

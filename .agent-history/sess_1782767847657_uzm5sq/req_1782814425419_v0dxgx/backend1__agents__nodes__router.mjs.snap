@@ -1,0 +1,127 @@
+/**
+ * router.mjs — NO LLM, pure heuristics.
+ * "explore"  → read / edit / create / delete project files
+ * "pipeline" → build a full new app from scratch
+ * "answer"   → everything else: greetings, Q&A, explanations, chat
+ *
+ * Philosophy: be conservative. When in doubt → answer, NOT explore.
+ */
+
+const GREETING_PATTERNS = [
+  /^(hi|hello|hey|سلام|مرحبا|hola|bonjour|ciao|yo|sup|howdy|greetings|salut|hiya|heya)[!.,\s]*$/i,
+  /^(how are you|how's it going|what's up|whats up|good morning|good evening|good afternoon|good night)/i,
+  /^(thanks|thank you|thx|ty|ممنون|مرسی|cheers|appreciate it|great job|nice work|well done)[!.,\s]*$/i,
+  /^(ok|okay|got it|understood|sure|alright|sounds good|perfect|great|cool|nice|awesome|👍)[!.,\s]*$/i,
+  /^(bye|goodbye|see you|later|cya|take care)[!.,\s]*$/i,
+  /^(who are you|what are you|what('s| is) your name|tell me about yourself)[?!.,\s]*$/i,
+  /^(what (model|ai|llm) (are you|is this)|your model name)[?!.,\s]*/i,
+];
+
+const QUESTION_PATTERNS = [
+  /^(what|how|why|when|where|who|which|can you|could you|would you|do you|is it|are you|should i|explain|describe|tell me)/i,
+  /\b(what is|what are|how do|how does|how can|why does|why is|explain|describe|difference between|pros and cons|best practice|recommend)\b/i,
+];
+
+const PIPELINE_PATTERNS = [
+  /\b(build|scaffold|develop)\s+(a\s+)?(full|complete|entire|whole)\s+(app|project|system|platform|website|application)\b/i,
+  /\b(create|make|generate)\s+(a\s+)?(full.?stack|end.?to.?end)\b/i,
+];
+
+const FILE_EXTENSION = /\.(tsx?|jsx?|mjs|cjs|css|scss|sass|less|json|md|ya?ml|html|xml|env|sh|py|rs|go|png|jpe?g|gif|svg|webp|ico)\b/i;
+const FILE_PATH      = /\b(src\/|app\/|components?\/|pages?\/|routes?\/|lib\/|utils?\/|hooks?\/|api\/|services?\/|public\/|styles?\/)\S+/i;
+const COMPONENT_NAME = /\b(chatsidebar|chatheader|chatcomposer|agentpipeline|thinkingtrace|authguard|emptystatecard|typingindicator|assistantmessage|useagenthook|usethinkingsteps|planchanges|kodo_graph|graph_runner|workingset|modelrouter)\b/i;
+const CODE_EDIT_VERB = /\b(refactor|rewrite|implement|scaffold|migrate|transpile|lint|typecheck|import|export|instantiate|destructure|annotate)\b/i;
+
+// Edit verbs broad enough to catch follow-up commands
+const EDIT_VERB = /\b(remove|delete|add|change|make|update|fix|rename|move|edit|modify|replace|adjust|tweak|set|put|insert|clear|hide|show|toggle|disable|enable|style|color|colour|animate|resize|rotate|translate|scale)\b/i;
+
+// Code-specific targets that distinguish "remove the button" from "remove kodo text"
+const CODE_TARGET = /\b(file|component|function|class|hook|style|page|route|module|test|spec|button|icon|image|text|label|border|background|padding|margin|width|height|font|shadow|gradient|animation|transition)\b/i;
+
+const ACTION_PLUS_TARGET = [
+  [/\b(edit|update|modify|change|fix|refactor|rename|rewrite|replace|patch)\b/i,
+   /\b(file|component|function|class|hook|style|page|route|module|test|spec)\b/i],
+  [/\b(add|create|remove|delete|insert)\b/i,
+   /\b(function|component|route|endpoint|hook|method|class|interface|type|style|button|field|prop)\b/i],
+  [/\b(make|set|change|adjust|tweak)\b/i,
+   /\b(color|colour|background|padding|margin|width|height|font|border|shadow|radius|opacity|flex|grid|position|size|bigger|smaller|larger|visible|hidden|transparent)\b/i],
+];
+
+function classifyByHeuristic(message) {
+  const msg = String(message || "").trim();
+  if (!msg) return "answer";
+
+  const cleanMsg = msg.split(/conversation memory:/i)[0].trim();
+  if (!cleanMsg) return "answer";
+
+  const wordCount = cleanMsg.split(/\s+/).filter(Boolean).length;
+
+  // ── 1. Greetings → answer ─────────────────────────────────
+  for (const p of GREETING_PATTERNS) {
+    if (p.test(cleanMsg)) return "answer";
+  }
+
+  // ── 2. Bug reports / error traces → always explore ──────────
+  // If user pastes an error or says "fix this bug", go straight to explore
+  const isBugReport = /\b(fix|bug|error|crash|broken|failed|exception|stack trace|TypeError|ReferenceError|SyntaxError|Bad Request|not working|doesn't work|doesn.t work)\b/i.test(cleanMsg)
+    && (cleanMsg.length > 30 || /\b(fix|bug|error)\b/i.test(cleanMsg));
+  if (isBugReport) return "explore";
+
+  // ── 3. Pure questions → answer ────────────────────────────
+  const isQuestion = QUESTION_PATTERNS.some(p => p.test(cleanMsg));
+
+  // ── 4. Pipeline check ─────────────────────────────────────
+  for (const p of PIPELINE_PATTERNS) {
+    if (p.test(cleanMsg)) return "pipeline";
+  }
+
+  // ── 4. Explicit file signals → explore ────────────────────
+  const hasFileExtension = FILE_EXTENSION.test(cleanMsg);
+  const hasFilePath      = FILE_PATH.test(cleanMsg);
+  const hasComponentName = COMPONENT_NAME.test(cleanMsg);
+  const hasCodeEditVerb  = CODE_EDIT_VERB.test(cleanMsg);
+
+  if (hasFileExtension)  return "explore";
+  if (hasFilePath)       return "explore";
+  if (hasComponentName)  return "explore";
+  if (hasCodeEditVerb)   return "explore";
+
+  // ── 5. Action + specific code target → explore ────────────
+  for (const [verbPattern, targetPattern] of ACTION_PLUS_TARGET) {
+    if (verbPattern.test(cleanMsg) && targetPattern.test(cleanMsg)) {
+      if (!isQuestion) return "explore";
+    }
+  }
+
+  // ── 6. Short edit command (≤15 words) → explore ─────────────
+  // Catches follow-ups: "remove kodo text", "use another icon for collapse",
+  // "make it bigger", "add some padding", "change the color to blue"
+  if (wordCount <= 15 && EDIT_VERB.test(cleanMsg) && !isQuestion) {
+    return "explore";
+  }
+
+  // ── 7. Default → answer ───────────────────────────────────
+  if (wordCount <= 8 && !hasFileExtension && !hasFilePath) return "answer";
+  if (isQuestion) return "answer";
+
+  return "answer";
+}
+
+export async function routerNode(state) {
+  const { userMessage, emit } = state;
+
+  const intent = classifyByHeuristic(userMessage);
+
+  console.log(`[Router] intent="${intent}" for: "${String(userMessage).slice(0, 80)}"`);
+
+  emit?.({
+    type:    "progress",
+    stage:   "routed",
+    message:
+      intent === "explore"  ? "📂 Entering workspace mode..." :
+      intent === "pipeline" ? "🚀 Starting full pipeline..." :
+                              "💬 Preparing response...",
+  });
+
+  return { intent };
+}

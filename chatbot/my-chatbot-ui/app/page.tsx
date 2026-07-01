@@ -5,6 +5,7 @@ import { AnimatePresence, motion } from "framer-motion";
 import { v4 as uuidv4 } from "uuid";
 import { useRouter, useSearchParams } from "next/navigation";
 import { Sparkles, Bot, Copy, Check, UserIcon } from "lucide-react";
+import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import { useAgentPipeline } from "./hooks/useAgentPipeline";
 import { useThinkingSteps } from "./hooks/useThinkingSteps";
 
@@ -730,6 +731,15 @@ export default function MinimalChatComponent() {
               Copy
             </>
           )}
+        </motion.button>
+        <motion.button
+          whileTap={{ scale: 0.96 }}
+          onClick={scrollToBottomSoon}
+          title="Scroll to latest"
+          className="inline-flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs text-white/60 transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-[#ff8a3d]/8 hover:text-white"
+        >
+          <KeyboardArrowDownRoundedIcon style={{ fontSize: 14 }} />
+          Latest
         </motion.button>
       </div>
     )}

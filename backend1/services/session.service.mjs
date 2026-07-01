@@ -43,6 +43,7 @@ export function listSessions(userId, limit = 50) {
 }
 
 export function deleteSession(sessionId, userId) {
+  if (!sessionId || !userId) throw new Error('Invalid session ID or user ID');
   return dbDeleteSession(sessionId, userId);
 }
 

@@ -1,107 +1,135 @@
 /**
  * answer.mjs
- * ──────────────────────────────────────────────────────────────
- * Handles the "answer" intent branch:
- *   – Casual conversation
- *   – Code questions / explanations
- *   – Architecture advice
- *   – Anything that doesn't require file I/O
- *
- * Streams the response token-by-token via emit() when possible,
- * otherwise returns the full content at once.
+ * Handles non-editing intent: greetings, questions, explanations,
+ * code advice, debugging help, and casual conversation.
  */
 
 import { callLLM, streamLLM } from "../../services/llm.mjs";
-import { AIMessage }          from "@langchain/core/messages";
+import { AIMessage } from "@langchain/core/messages";
 
-const SYSTEM_PROMPT = `You are Kodo, an expert AI software engineer and coding assistant.
-You are embedded directly inside a developer's VS Code workspace.
+const SYSTEM_PROMPT = `You are Kodo, an AI coding assistant embedded inside a developer's VS Code workspace.
 
-You help with:
-- Explaining code, architecture decisions, and best practices
-- Writing code snippets, functions, and components
-- Debugging and troubleshooting
-- Answering software development questions
-- Reviewing approaches and suggesting improvements
+PERSONALITY
+- Direct and concise.
+- Warm but professional.
+- Honest. If something is uncertain, say so briefly.
 
-Be precise, practical, and concise. Use markdown formatting for code blocks.
-When showing code examples, always include the language identifier after the triple backticks.
-Do not add unnecessary disclaimers or filler text.`;
+CAPABILITIES
+- Answer coding questions.
+- Explain concepts.
+- Suggest architecture and best practices.
+- Help debug and troubleshoot.
+- Discuss developer workflows.
+
+RULES
+- Never start with "I".
+- Do not use filler phrases like "Certainly", "Of course", "Great question", "Absolutely".
+- Keep greetings short.
+- For technical questions, be structured and useful.
+- Do not mention inability to edit files here; file editing is handled by the workspace pipeline.
+- Do not write code blocks unless the user explicitly asks for code.`;
+
+function cleanMessage(input) {
+  return String(input || "").split(/conversation memory:/i)[0].trim();
+}
+
+function buildFileContextSnippet(fileContext = []) {
+  const top = (fileContext || []).slice(0, 3);
+  if (!top.length) return "";
+
+  return top
+    .map((f) => {
+      const preview = String(f.content || "").slice(0, 1200);
+      const summary = f.summary ? `Summary: ${f.summary}\n` : "";
+      return `File: ${f.path}\n${summary}\`\`\`\n${preview}\n\`\`\``;
+    })
+    .join("\n\n");
+}
+
+function buildHistoryMessages(messages = []) {
+  return (messages || [])
+    .filter((m) => m && (m instanceof AIMessage || m.role === "assistant"))
+    .slice(-8)
+    .map((m) => ({
+      role: "assistant",
+      content: typeof m.content === "string" ? m.content : String(m.content || ""),
+    }));
+}
 
 export async function answerNode(state) {
   const { userMessage, messages, modelRoute, emit, fileContext } = state;
 
-  emit?.({ type: "progress", stage: "answering", message: "💬 Generating response..." });
+  emit?.({
+    type: "progress",
+    stage: "answering",
+    message: "💬 Generating response...",
+  });
 
-  // Build context from fileContext if any files were loaded
-  const fileSnippet = (fileContext || [])
-    .slice(0, 4) // limit context size
-    .map(f => `File: ${f.path}\n\`\`\`\n${f.content?.slice(0, 2000) || ""}\n\`\`\``)
-    .join("\n\n");
+  const cleanUserMessage = cleanMessage(userMessage);
+  const fileSnippet = buildFileContextSnippet(fileContext);
 
   const userContent = [
     fileSnippet ? `Relevant project files:\n\n${fileSnippet}` : "",
-    userMessage,
-  ].filter(Boolean).join("\n\n");
+    cleanUserMessage,
+  ]
+    .filter(Boolean)
+    .join("\n\n");
 
-  // Build conversation history (last 10 messages max)
-  const historyMessages = (messages || [])
-    .filter(m => m instanceof AIMessage || (m.role === "assistant"))
-    .slice(-10)
-    .map(m => ({
-      role:    "assistant",
-      content: typeof m.content === "string" ? m.content : String(m.content || ""),
-    }));
-
-  let finalAnswer = "";
+  const historyMessages = buildHistoryMessages(messages);
 
   try {
-    // Try streaming first
     const canStream = typeof streamLLM === "function";
 
     if (canStream) {
       let buffer = "";
+
       await streamLLM({
-        system:   SYSTEM_PROMPT,
+        system: SYSTEM_PROMPT,
         messages: [
           ...historyMessages,
           { role: "user", content: userContent },
         ],
         modelRoute,
-        maxTokens:   4000,
-        temperature: 0.3,
+        maxTokens: 1400,
+        temperature: 0.35,
         onChunk: (chunk) => {
           buffer += chunk;
           emit?.({ type: "content", content: chunk });
         },
       });
-      finalAnswer = buffer;
-    } else {
-      // Non-streaming fallback
-      const result = await callLLM({
-        system:   SYSTEM_PROMPT,
-        messages: [
-          ...historyMessages,
-          { role: "user", content: userContent },
-        ],
-        modelRoute,
-        maxTokens:   4000,
-        temperature: 0.3,
-      });
 
-      finalAnswer = result?.content?.trim() || "I couldn't generate a response.";
-      emit?.({ type: "content", content: finalAnswer });
+      return {
+        finalAnswer: buffer,
+        messages: [new AIMessage(buffer)],
+      };
     }
-  } catch (err) {
-    console.error("[Answer] LLM error:", err.message);
-    finalAnswer = `Sorry, I encountered an error: ${err.message}`;
+
+    const result = await callLLM({
+      system: SYSTEM_PROMPT,
+      messages: [
+        ...historyMessages,
+        { role: "user", content: userContent },
+      ],
+      modelRoute,
+      maxTokens: 1400,
+      temperature: 0.35,
+    });
+
+    const finalAnswer = result?.content?.trim() || "I couldn't generate a response.";
     emit?.({ type: "content", content: finalAnswer });
+
+    return {
+      finalAnswer,
+      messages: [new AIMessage(finalAnswer)],
+    };
+  } catch (err) {
+    const finalAnswer = `Sorry, I ran into an error: ${err.message}`;
+    console.error("[Answer] LLM error:", err);
+    emit?.({ type: "content", content: finalAnswer });
+
+    return {
+      finalAnswer,
+      messages: [new AIMessage(finalAnswer)],
+    };
   }
-
-  emit?.({ type: "progress", stage: "answered", message: "✅ Response ready" });
-
-  return {
-    finalAnswer,
-    messages: [new AIMessage(finalAnswer)],
-  };
 }

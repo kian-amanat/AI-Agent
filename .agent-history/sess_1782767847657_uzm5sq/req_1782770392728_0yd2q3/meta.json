@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess_1782767847657_uzm5sq",
+  "requestId": "req_1782770392728_0yd2q3",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-06-29T22:00:17.523Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/components/AuthGuard.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/components/AuthGuard.tsx",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1782767847657_uzm5sq/req_1782770392728_0yd2q3/chatbot__my-chatbot-ui__app__components__AuthGuard.tsx.snap"
+    }
+  ]
+}
