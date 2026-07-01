@@ -3,6 +3,11 @@
  * Reads credentials from modelRoute OR data/settings.json directly.
  * Settings field names: textApiKey, textBaseUrl, textModel
  * modelRoute field names: apiKey, baseUrl, model  (from modelRouter.mjs)
+ *
+ * Added:
+ * - Retry logic for transient provider failures (504/502/503/429/timeouts)
+ * - Slightly longer default timeout
+ * - Shared helper for chat completion calls
  */
 
 import OpenAI from "openai";
@@ -10,6 +15,19 @@ import { readFile } from "fs/promises";
 import path from "path";
 
 const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isRetryableError(err) {
+  const status = Number(err?.status || err?.statusCode || err?.response?.status || 0);
+  const msg = String(err?.message || err || "");
+
+  if (status === 429 || status === 500 || status === 502 || status === 503 || status === 504) return true;
+  if (/rate limit|timeout|timed out|gateway timeout|network error|ECONNRESET|ETIMEDOUT|EAI_AGAIN/i.test(msg)) return true;
+  return false;
+}
 
 async function loadSettings() {
   try {
@@ -26,9 +44,9 @@ async function resolveCredentials(modelRoute) {
   if (modelRoute?.ok && modelRoute?.apiKey && modelRoute?.model) {
     console.log(`[LLM] using modelRoute: ${modelRoute.provider}/${modelRoute.model}`);
     return {
-      apiKey:  modelRoute.apiKey,
+      apiKey: modelRoute.apiKey,
       baseURL: modelRoute.baseUrl || "https://api.openai.com/v1",
-      model:   modelRoute.model,
+      model: modelRoute.model,
     };
   }
 
@@ -37,9 +55,9 @@ async function resolveCredentials(modelRoute) {
   if (s?.textApiKey && s?.textModel) {
     console.log(`[LLM] using settings.json: ${s.textProvider || ""}/${s.textModel}`);
     return {
-      apiKey:  s.textApiKey,
+      apiKey: s.textApiKey,
       baseURL: s.textBaseUrl || "https://api.openai.com/v1",
-      model:   s.textModel,
+      model: s.textModel,
     };
   }
 
@@ -47,16 +65,16 @@ async function resolveCredentials(modelRoute) {
   if (s?.apiKey && s?.model) {
     console.log(`[LLM] using settings.json top-level: ${s.model}`);
     return {
-      apiKey:  s.apiKey,
+      apiKey: s.apiKey,
       baseURL: s.baseUrl || "https://api.openai.com/v1",
-      model:   s.model,
+      model: s.model,
     };
   }
 
   // 4. env vars last resort
   const apiKey = process.env.OPENAI_API_KEY || process.env.USER_API_KEY || "";
   const baseURL = process.env.OPENAI_BASE_URL || process.env.USER_BASE_URL || "https://api.openai.com/v1";
-  const model   = process.env.DEFAULT_MODEL || process.env.USER_MODEL || "gpt-4o-mini";
+  const model = process.env.DEFAULT_MODEL || process.env.USER_MODEL || "gpt-4o-mini";
 
   if (!apiKey) {
     throw new Error("No API key found. Configure it in Kodo settings.");
@@ -70,10 +88,32 @@ function makeClient({ apiKey, baseURL }) {
   return new OpenAI({
     apiKey,
     baseURL,
-    defaultHeaders: { "Authorization": `Bearer ${apiKey}`, "X-API-Key": apiKey },
-    timeout: 150_000,
-    maxRetries: 0,  // don't retry — let the graph handle errors
+    defaultHeaders: {
+      Authorization: `Bearer ${apiKey}`,
+      "X-API-Key": apiKey,
+    },
+    timeout: 180_000,
+    maxRetries: 0, // let the graph handle retries
   });
+}
+
+async function chatCompletionWithRetry(client, params, retries = 1) {
+  let lastErr = null;
+
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await client.chat.completions.create(params);
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries && isRetryableError(err)) {
+        await sleep(700 * (attempt + 1));
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw lastErr;
 }
 
 // ── callLLM ───────────────────────────────────────────────────
@@ -81,10 +121,11 @@ export async function callLLM({
   system,
   messages = [],
   modelRoute,
-  maxTokens   = 4000,
+  maxTokens = 4000,
   temperature = 0.3,
+  retries = 1,
 }) {
-  const creds  = await resolveCredentials(modelRoute);
+  const creds = await resolveCredentials(modelRoute);
   const client = makeClient(creds);
 
   console.log(`[LLM] callLLM → model=${creds.model} baseURL=${creds.baseURL}`);
@@ -94,12 +135,16 @@ export async function callLLM({
     ...messages,
   ];
 
-  const response = await client.chat.completions.create({
-    model:       creds.model,
-    messages:    fullMessages,
-    max_tokens:  maxTokens,
-    temperature,
-  });
+  const response = await chatCompletionWithRetry(
+    client,
+    {
+      model: creds.model,
+      messages: fullMessages,
+      max_tokens: maxTokens,
+      temperature,
+    },
+    retries
+  );
 
   const content = response.choices?.[0]?.message?.content || "";
   return { content };
@@ -110,11 +155,12 @@ export async function streamLLM({
   system,
   messages = [],
   modelRoute,
-  maxTokens   = 4000,
+  maxTokens = 4000,
   temperature = 0.3,
   onChunk,
+  retries = 1,
 }) {
-  const creds  = await resolveCredentials(modelRoute);
+  const creds = await resolveCredentials(modelRoute);
   const client = makeClient(creds);
 
   console.log(`[LLM] streamLLM → model=${creds.model} baseURL=${creds.baseURL}`);
@@ -124,16 +170,33 @@ export async function streamLLM({
     ...messages,
   ];
 
-  const stream = await client.chat.completions.create({
-    model:       creds.model,
-    messages:    fullMessages,
-    max_tokens:  maxTokens,
-    temperature,
-    stream:      true,
-  });
+  let lastErr = null;
 
-  for await (const chunk of stream) {
-    const token = chunk.choices?.[0]?.delta?.content;
-    if (token) onChunk?.(token);
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      const stream = await client.chat.completions.create({
+        model: creds.model,
+        messages: fullMessages,
+        max_tokens: maxTokens,
+        temperature,
+        stream: true,
+      });
+
+      for await (const chunk of stream) {
+        const token = chunk.choices?.[0]?.delta?.content;
+        if (token) onChunk?.(token);
+      }
+
+      return;
+    } catch (err) {
+      lastErr = err;
+      if (attempt < retries && isRetryableError(err)) {
+        await sleep(700 * (attempt + 1));
+        continue;
+      }
+      throw err;
+    }
   }
+
+  throw lastErr;
 }
