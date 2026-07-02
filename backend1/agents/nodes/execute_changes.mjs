@@ -16,12 +16,54 @@
 import path from "path";
 import fs from "fs/promises";
 import { fileURLToPath } from "url";
+import { createRequire } from "module";
 import { AIMessage } from "@langchain/core/messages";
+
+const _require = createRequire(import.meta.url);
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..");
 const HISTORY_ROOT = path.resolve(PROJECT_ROOT, ".agent-history");
+
+let _tsCache = undefined; // undefined = not tried yet; null = not found; otherwise the module
+
+function loadTypeScript() {
+  if (_tsCache !== undefined) return _tsCache;
+  const candidates = [
+    path.join(PROJECT_ROOT, "chatbot/my-chatbot-ui/node_modules/typescript"),
+    path.join(PROJECT_ROOT, "node_modules/typescript"),
+    path.join(PROJECT_ROOT, "../node_modules/typescript"),
+  ];
+  for (const p of candidates) {
+    try { _tsCache = _require(p); return _tsCache; } catch {}
+  }
+  _tsCache = null;
+  return null;
+}
+
+function validateSyntax(content, absPath) {
+  const ext = path.extname(absPath).toLowerCase();
+  if (![".tsx", ".jsx", ".ts", ".js"].includes(ext)) return null;
+  const ts = loadTypeScript();
+  if (!ts) return null;
+  const scriptKind = ext === ".tsx" ? ts.ScriptKind.TSX
+                   : ext === ".jsx" ? ts.ScriptKind.JSX
+                   : ext === ".ts"  ? ts.ScriptKind.TS
+                   : ts.ScriptKind.JS;
+  try {
+    const srcFile = ts.createSourceFile("validate" + ext, content, ts.ScriptTarget.ESNext, true, scriptKind);
+    const diags = srcFile.parseDiagnostics;
+    if (!Array.isArray(diags) || diags.length === 0) return null;
+    return diags.slice(0, 3).map(d => {
+      try {
+        const lc = srcFile.getLineAndCharacterOfPosition(d.start || 0);
+        const msg = typeof d.messageText === "string" ? d.messageText : d.messageText?.messageText || "parse error";
+        return `L${lc.line + 1}: ${msg}`;
+      } catch { return "parse error"; }
+    }).join("; ");
+  } catch { return null; }
+}
 
 function normalizeId(prefix, id) {
   if (!id) return id;
@@ -403,6 +445,8 @@ export async function executeChangesNode(state) {
 
   const actionable = plan.filter((p) => p.action !== "read_only" && p.path);
   if (actionable.length === 0) {
+    const descriptions = plan.map(p => p.description || p.path || "no description").join("; ");
+    console.warn(`[Execute] ⚠️ Plan has no actionable steps (all read_only). Descriptions: ${descriptions.slice(0, 300)}`);
     emit?.({ type: "progress", stage: "execute_skip", message: "ℹ️ Read-only — no file changes." });
     return { executionResults: [] };
   }
@@ -467,8 +511,15 @@ export async function executeChangesNode(state) {
 
     try {
       if (step.action === "create") {
-        await writeFileAtomic(absPath, String(step.content || ""));
-        result = { success: true };
+        const createContent = String(step.content || "");
+        const createSyntaxErr = validateSyntax(createContent, absPath);
+        if (createSyntaxErr) {
+          console.warn(`[Execute] 🚫 Syntax error in created file ${step.path} — write aborted: ${createSyntaxErr}`);
+          result = { success: false, error: `Syntax error: ${createSyntaxErr}` };
+        } else {
+          await writeFileAtomic(absPath, createContent);
+          result = { success: true };
+        }
       } else if (step.action === "delete") {
         try {
           await fs.unlink(absPath);
@@ -515,12 +566,18 @@ export async function executeChangesNode(state) {
             const appliedCount = patchResults.filter(Boolean).length;
 
             if (appliedCount > 0) {
-              await writeFileAtomic(absPath, working);
-              result = {
-                success: true,
-                note: `${appliedCount}/${patches.length} patch(es) applied`,
-                partial: appliedCount < patches.length,
-              };
+              const syntaxErr = validateSyntax(working, absPath);
+              if (syntaxErr) {
+                console.warn(`[Execute] 🚫 Syntax error in ${step.path} after patching — write aborted: ${syntaxErr}`);
+                result = { success: false, error: `Syntax error after patch: ${syntaxErr}` };
+              } else {
+                await writeFileAtomic(absPath, working);
+                result = {
+                  success: true,
+                  note: `${appliedCount}/${patches.length} patch(es) applied`,
+                  partial: appliedCount < patches.length,
+                };
+              }
             } else {
               result = {
                 success: false,

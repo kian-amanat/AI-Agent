@@ -84,7 +84,7 @@ async function resolveCredentials(modelRoute) {
   return { apiKey, baseURL, model };
 }
 
-function makeClient({ apiKey, baseURL }) {
+function makeClient({ apiKey, baseURL }, timeout = 180_000) {
   return new OpenAI({
     apiKey,
     baseURL,
@@ -92,7 +92,7 @@ function makeClient({ apiKey, baseURL }) {
       Authorization: `Bearer ${apiKey}`,
       "X-API-Key": apiKey,
     },
-    timeout: 180_000,
+    timeout,
     maxRetries: 0, // let the graph handle retries
   });
 }
@@ -126,28 +126,107 @@ export async function callLLM({
   retries = 1,
 }) {
   const creds = await resolveCredentials(modelRoute);
-  const client = makeClient(creds);
 
-  console.log(`[LLM] callLLM → model=${creds.model} baseURL=${creds.baseURL}`);
+  // Thinking models (qwen-*-thinking, *-r1, deepseek-reasoner) can reason for
+  // minutes. Non-streaming requests get killed by gateway timeouts (504) before
+  // the model finishes. Streaming keeps the connection alive token-by-token so
+  // the gateway never sees an idle connection, no matter how long reasoning takes.
+  const isThinkingModel = /thinking|r1\b|reasoner/i.test(creds.model);
+
+  // Give thinking models a longer socket timeout (10 min) so streaming doesn't drop.
+  const client = makeClient(creds, isThinkingModel ? 600_000 : 180_000);
+
+  console.log(`[LLM] callLLM → model=${creds.model} baseURL=${creds.baseURL}${isThinkingModel ? " [streaming + reasoning]" : ""}`);
 
   const fullMessages = [
     ...(system ? [{ role: "system", content: system }] : []),
     ...messages,
   ];
 
+  // ── Thinking model path: stream to avoid gateway timeout ──────────────────
+  if (isThinkingModel) {
+    let contentBuf = "";
+    let reasoningBuf = "";
+    let lastErr = null;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        contentBuf = "";
+        reasoningBuf = "";
+
+        const stream = await client.chat.completions.create({
+          model: creds.model,
+          messages: fullMessages,
+          max_tokens: maxTokens,
+          temperature,
+          stream: true,
+          extra_body: { enable_thinking: true },
+        });
+
+        for await (const chunk of stream) {
+          const delta = chunk.choices?.[0]?.delta || {};
+          if (delta.content) contentBuf += delta.content;
+          if (delta.reasoning_content) reasoningBuf += delta.reasoning_content;
+        }
+
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < retries && isRetryableError(err)) {
+          await sleep(700 * (attempt + 1));
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (lastErr) throw lastErr;
+
+    const content = extractMessageContent({ content: contentBuf, reasoning_content: reasoningBuf });
+    if (!content.trim()) {
+      console.warn(`[LLM] Empty after streaming. content=${contentBuf.length}c reasoning=${reasoningBuf.length}c`);
+    } else {
+      console.log(`[LLM] Streamed ${contentBuf.length + reasoningBuf.length} chars (${reasoningBuf.length} reasoning + ${contentBuf.length} response)`);
+    }
+    return { content };
+  }
+
+  // ── Normal model path: single request ─────────────────────────────────────
   const response = await chatCompletionWithRetry(
     client,
-    {
-      model: creds.model,
-      messages: fullMessages,
-      max_tokens: maxTokens,
-      temperature,
-    },
+    { model: creds.model, messages: fullMessages, max_tokens: maxTokens, temperature },
     retries
   );
 
-  const content = response.choices?.[0]?.message?.content || "";
+  const msg = response.choices?.[0]?.message || {};
+  const content = extractMessageContent(msg);
+  if (!content.trim()) {
+    console.warn("[LLM] Empty content. Raw message keys:", Object.keys(msg).join(", "));
+  }
   return { content };
+}
+
+function extractMessageContent(msg) {
+  let text = String(msg?.content || "").trim();
+
+  // Thinking models (Qwen-thinking, DeepSeek-R1) may use reasoning_content
+  if (!text && msg?.reasoning_content) {
+    text = String(msg.reasoning_content).trim();
+    console.log("[LLM] content empty — using reasoning_content");
+  }
+
+  if (!text) return "";
+
+  // If content is wrapped in <think>…</think>, prefer what follows it
+  const thinkEnd = text.lastIndexOf("</think>");
+  if (thinkEnd !== -1) {
+    const afterThink = text.slice(thinkEnd + 8).trim();
+    if (afterThink) return afterThink;
+    // fallback: pass the whole thing (extractJSON will find the JSON block inside)
+  }
+
+  return text;
 }
 
 // ── streamLLM ─────────────────────────────────────────────────

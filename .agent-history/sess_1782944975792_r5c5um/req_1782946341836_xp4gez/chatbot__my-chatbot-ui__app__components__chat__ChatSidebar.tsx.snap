@@ -16,7 +16,6 @@ import {
 import type { Conversation } from "./chat-types";
 import Image from 'next/image';
 import KeyboardDoubleArrowLeftRoundedIcon from '@mui/icons-material/KeyboardDoubleArrowLeftRounded';
-import KeyboardDoubleArrowRightRoundedIcon from '@mui/icons-material/KeyboardDoubleArrowRightRounded';
 function GlowingPlusIcon({ compact = false }: { compact?: boolean }) {
   if (compact) {
     return (
@@ -81,7 +80,6 @@ export default function ChatSidebar({
   loadingSessions: boolean;
 }) {
   const [menuForId, setMenuForId] = useState<string | null>(null);
-  const [isSidebarHovered, setIsSidebarHovered] = useState(false);
 
   const openSidebarIfCollapsed = () => {
     if (isSidebarCollapsed) onToggleSidebar();
@@ -91,8 +89,6 @@ export default function ChatSidebar({
     <motion.aside
       animate={{ width: isSidebarCollapsed ? 76 : 318 }}
       transition={{ type: "spring", stiffness: 260, damping: 30 }}
-      onMouseEnter={() => setIsSidebarHovered(true)}
-      onMouseLeave={() => setIsSidebarHovered(false)}
       className="relative flex h-full shrink-0 flex-col border-r border-white/8 bg-[#151515]"
     >
       {/* ── Header ── */}
@@ -106,30 +102,21 @@ export default function ChatSidebar({
         )}
 
         {/* Collapse / expand toggle */}
-        <motion.div
-          animate={{
-            opacity: isSidebarCollapsed && !isSidebarHovered ? 0 : 1,
-            x: isSidebarCollapsed && !isSidebarHovered ? -8 : 0,
-          }}
-          transition={{ duration: 0.18, ease: "easeOut" }}
-          style={{ pointerEvents: isSidebarCollapsed && !isSidebarHovered ? "none" : "auto" }}
+        <motion.button
+          whileTap={{ scale: 0.96 }}
+          onClick={onToggleSidebar}
+          className={`flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 text-white/72 transition-colors duration-200 hover:border-white/14 hover:text-white ${
+            isSidebarCollapsed ? "mx-auto" : ""
+          }`}
+          title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+          aria-label={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
         >
-          <motion.button
-            whileTap={{ scale: 0.96 }}
-            onClick={onToggleSidebar}
-            className={`flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 text-white/72 transition-colors duration-200 hover:border-white/14 hover:text-white ${
-              isSidebarCollapsed ? "mx-auto" : ""
-            }`}
-            title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
-            aria-label={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
-          >
-            {isSidebarCollapsed ? (
-              <KeyboardDoubleArrowRightRoundedIcon className="h-5 w-5" />
-            ) : (
-              <KeyboardDoubleArrowLeftRoundedIcon className="h-5 w-5" />
-            )}
-          </motion.button>
-        </motion.div>
+          {isSidebarCollapsed ? (
+            <KeyboardDoubleArrowLeftRoundedIcon className="h-5 w-5" />
+          ) : (
+            <KeyboardDoubleArrowLeftRoundedIcon className="h-5 w-5" />
+          )}
+        </motion.button>
       </div>
 
       {/* ── Collapsed icon buttons ── */}
