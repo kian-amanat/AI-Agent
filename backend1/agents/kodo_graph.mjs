@@ -1,197 +1,115 @@
 /**
  * kodo_graph.mjs
  *
- * START
- *   ↓
- * router
- *   ├── answer
- *   ├── pipeline
- *   ├── run_tests
- *   ├── install_packages
- *   └── investigate / explore
- *             ↓
- *      investigate_workspace
- *             ↓
- *        workspace_index
- *             ↓
- *       stacktrace_parser
- *             ↓
- *        symbol_search
- *             ↓
- *         grep_workspace
- *             ↓
- *      dependency_context
- *             ↓
- *        plan_changes
- *             ↓
- *      execute_changes
- *             ↓
- *          verify
- *             │
- *      retry plan if needed
- *             │
- *            END
+ * Graph topology (post-agentic-loop refactor):
+ *
+ *   START
+ *     ↓
+ *   router
+ *     ├── answer          (questions / greetings)
+ *     ├── pipeline        (full project scaffolding)
+ *     ├── run_tests       ("run tests")
+ *     ├── install_packages ("install X")
+ *     └── agentic_explore (all code edits and bug fixes)
+ *               ↓
+ *         plan_changes     (LLM plans patches from gathered context)
+ *               ↓
+ *        execute_changes   (applies patches to disk)
+ *               ↓
+ *            verify        (file existence, lint, typecheck, tests)
+ *               │
+ *     re-plan if issues (≤ 2 retries, feeding fresh file context)
+ *               │
+ *              END
+ *
+ * The key change: the former rigid chain
+ *   investigate_workspace → workspace_index → stacktrace_parser →
+ *   symbol_search → grep_workspace → dependency_context
+ * is replaced by a single agenticExploreNode where the model calls
+ * tools (read_file, grep_code, list_files) iteratively until it has
+ * gathered enough context to plan with confidence.
  */
 
 import { StateGraph, END, START } from "@langchain/langgraph";
 
-import { routerNode } from "./nodes/router.mjs";
-import {
-  investigateWorkspaceNode,
-  exploreWorkspaceNode,
-} from "./nodes/investigate_workspace.mjs";
-import { workspaceIndexNode } from "./nodes/workspace_index.mjs";
-import { stacktraceParserNode } from "./nodes/stacktrace_parser.mjs";
-import { symbolSearchNode } from "./nodes/symbol_search.mjs";
-import { grepWorkspaceNode } from "./nodes/grep_workspace.mjs";
-import { dependencyContextNode } from "./nodes/dependency_context.mjs";
-import { planChangesNode } from "./nodes/plan_changes.mjs";
+import { routerNode }         from "./nodes/router.mjs";
+import { agenticExploreNode } from "./nodes/agentic_explore.mjs";
+import { planChangesNode }    from "./nodes/plan_changes.mjs";
 import { executeChangesNode } from "./nodes/execute_changes.mjs";
-import { verifyNode } from "./nodes/verify.mjs";
-import { answerNode } from "./nodes/answer.mjs";
-import { pipelineNode } from "./nodes/pipeline_node.mjs";
-import { runTestsNode } from "./nodes/run_tests.mjs";
-import { installPackagesNode } from "./nodes/install_packages.mjs";
+import { verifyNode }         from "./nodes/verify.mjs";
+import { answerNode }         from "./nodes/answer.mjs";
+import { pipelineNode }       from "./nodes/pipeline_node.mjs";
+import { runTestsNode }       from "./nodes/run_tests.mjs";
+import { installPackagesNode} from "./nodes/install_packages.mjs";
+
+// ── State annotation ──────────────────────────────────────────────────────────
 
 export const KodoStateAnnotation = {
+  // Conversation history
   messages: {
     default: () => [],
-    reducer: (prev, next) => (Array.isArray(next) ? [...prev, ...next] : [...prev, next]),
+    reducer: (prev, next) =>
+      Array.isArray(next) ? [...prev, ...next] : [...prev, next],
   },
 
-  intent: {
-    default: () => "",
-  },
+  // Routing
+  intent: { default: () => "" },
 
-  workspacePath: {
-    default: () => "",
-  },
+  // Request context
+  workspacePath:   { default: () => "" },
+  userMessage:     { default: () => "" },
+  attachmentPaths: { default: () => [] },
+  modelRoute:      { default: () => ({}) },
+  sessionId:       { default: () => "" },
+  requestId:       { default: () => "" },
+  userId:          { default: () => "" },
 
-  userMessage: {
-    default: () => "",
-  },
-
-  attachmentPaths: {
-    default: () => [],
-  },
-
-  modelRoute: {
-    default: () => ({}),
-  },
-
-  sessionId: {
-    default: () => "",
-  },
-
-  requestId: {
-    default: () => "",
-  },
-
-  userId: {
-    default: () => "",
-  },
-
+  // Memory: the last file the user worked on (carried across turns)
   rememberedTargetFile: {
     default: () => "",
-    reducer: (prev, next) => (next !== undefined && next !== "" ? next : prev),
+    reducer: (prev, next) =>
+      next !== undefined && next !== "" ? next : prev,
   },
 
+  // Exploration output → consumed by plan_changes
   fileContext: {
     default: () => [],
-    reducer: (prev, next) => (Array.isArray(next) && next.length ? next : prev),
+    reducer: (prev, next) =>
+      Array.isArray(next) && next.length ? next : prev,
   },
-
   investigation: {
     default: () => null,
     reducer: (prev, next) => next ?? prev,
   },
 
-  workspaceIndex: {
-    default: () => [],
-    reducer: (prev, next) => (Array.isArray(next) && next.length ? next : prev),
-  },
+  // Plan + execution
+  plan:             { default: () => [] },
+  executionResults: { default: () => [] },
 
-  stackTraceFiles: {
-    default: () => [],
-    reducer: (prev, next) => (Array.isArray(next) && next.length ? next : prev),
-  },
+  // Verification
+  verifyResult: { default: () => null },
+  retryCount:   { default: () => 0 },
 
-  stackTraceSymbols: {
-    default: () => [],
-    reducer: (prev, next) => (Array.isArray(next) && next.length ? next : prev),
-  },
-
-  symbolMatches: {
-    default: () => [],
-    reducer: (prev, next) => (Array.isArray(next) && next.length ? next : prev),
-  },
-
-  locatedFiles: {
-    default: () => [],
-    reducer: (prev, next) => (Array.isArray(next) && next.length ? next : prev),
-  },
-
-  dependencyFiles: {
-    default: () => [],
-    reducer: (prev, next) => (Array.isArray(next) && next.length ? next : prev),
-  },
-
-  dependencyHints: {
-    default: () => [],
-    reducer: (prev, next) => (Array.isArray(next) && next.length ? next : prev),
-  },
-
-  grepResults: {
-    default: () => [],
-    reducer: (prev, next) => (Array.isArray(next) && next.length ? next : prev),
-  },
-
-  rootCause: {
-    default: () => null,
-    reducer: (prev, next) => next ?? prev,
-  },
-
-  repairReason: {
-    default: () => null,
-    reducer: (prev, next) => next ?? prev,
-  },
-
-  plan: {
-    default: () => [],
-  },
-
+  // Test runner output
   testReport: {
     default: () => null,
     reducer: (prev, next) => next ?? prev,
   },
 
-  executionResults: {
-    default: () => [],
-  },
+  // Final streamed answer
+  finalAnswer: { default: () => "" },
 
-  verifyResult: {
-    default: () => null,
-  },
-
-  retryCount: {
-    default: () => 0,
-  },
-
-  finalAnswer: {
-    default: () => "",
-  },
-
-  emit: {
-    default: () => null,
-  },
+  // SSE emitter — injected by graph_runner, never serialised
+  emit: { default: () => null },
 };
+
+// ── Edge functions ────────────────────────────────────────────────────────────
 
 function routerEdge(state) {
   switch (state.intent) {
     case "investigate":
-      return "investigate_workspace";
     case "explore":
-      return "explore_workspace";
+      return "agentic_explore";
     case "pipeline":
       return "pipeline";
     case "test":
@@ -206,64 +124,55 @@ function routerEdge(state) {
 function verifyEdge(state) {
   const MAX_RETRIES = 2;
   if (!state.verifyResult?.ok && (state.retryCount || 0) < MAX_RETRIES) {
-    console.log(`[Graph] Retry ${state.retryCount + 1}/${MAX_RETRIES}`);
+    console.log(`[Graph] Verify failed — retry ${state.retryCount}/${MAX_RETRIES}`);
     return "plan_changes";
   }
   return END;
 }
 
+// ── Graph factory ─────────────────────────────────────────────────────────────
+
 export function buildKodoGraph() {
   const graph = new StateGraph({ channels: KodoStateAnnotation });
 
   graph
-    .addNode("router", routerNode)
-    .addNode("investigate_workspace", investigateWorkspaceNode)
-    .addNode("explore_workspace", exploreWorkspaceNode)
-    .addNode("workspace_index", workspaceIndexNode)
-    .addNode("stacktrace_parser", stacktraceParserNode)
-    .addNode("symbol_search", symbolSearchNode)
-    .addNode("grep_workspace", grepWorkspaceNode)
-    .addNode("dependency_context", dependencyContextNode)
-    .addNode("plan_changes", planChangesNode)
-    .addNode("execute_changes", executeChangesNode)
-    .addNode("verify", verifyNode)
-    .addNode("answer", answerNode)
-    .addNode("pipeline", pipelineNode)
-    .addNode("run_tests", runTestsNode)
+    .addNode("router",           routerNode)
+    .addNode("agentic_explore",  agenticExploreNode)
+    .addNode("plan_changes",     planChangesNode)
+    .addNode("execute_changes",  executeChangesNode)
+    .addNode("verify",           verifyNode)
+    .addNode("answer",           answerNode)
+    .addNode("pipeline",         pipelineNode)
+    .addNode("run_tests",        runTestsNode)
     .addNode("install_packages", installPackagesNode);
 
+  // Entry point
   graph.addEdge(START, "router");
 
+  // Router dispatches to one of five paths
   graph.addConditionalEdges("router", routerEdge, {
-    investigate_workspace: "investigate_workspace",
-    explore_workspace: "explore_workspace",
-    pipeline: "pipeline",
-    answer: "answer",
-    run_tests: "run_tests",
+    agentic_explore:  "agentic_explore",
+    pipeline:         "pipeline",
+    answer:           "answer",
+    run_tests:        "run_tests",
     install_packages: "install_packages",
   });
 
-  graph.addEdge("run_tests", END);
-  graph.addEdge("install_packages", END);
-
-  graph.addEdge("investigate_workspace", "workspace_index");
-  graph.addEdge("explore_workspace", "workspace_index");
-  graph.addEdge("workspace_index", "stacktrace_parser");
-  graph.addEdge("stacktrace_parser", "symbol_search");
-  graph.addEdge("symbol_search", "grep_workspace");
-  graph.addEdge("grep_workspace", "dependency_context");
-  graph.addEdge("dependency_context", "plan_changes");
-
-  graph.addEdge("plan_changes", "execute_changes");
+  // Code-edit pipeline: explore → plan → execute → verify → (retry | done)
+  graph.addEdge("agentic_explore", "plan_changes");
+  graph.addEdge("plan_changes",    "execute_changes");
   graph.addEdge("execute_changes", "verify");
 
   graph.addConditionalEdges("verify", verifyEdge, {
     plan_changes: "plan_changes",
-    [END]: END,
+    [END]:        END,
   });
 
-  graph.addEdge("answer", END);
-  graph.addEdge("pipeline", END);
+  // Terminal nodes
+  graph.addEdge("answer",           END);
+  graph.addEdge("pipeline",         END);
+  graph.addEdge("run_tests",        END);
+  graph.addEdge("install_packages", END);
 
   return graph.compile();
 }

@@ -13,8 +13,8 @@ import { AIMessage } from "@langchain/core/messages";
 import { callLLM } from "../../services/llm.mjs";
 
 const MAX_PROMPT_FILES = 5;
-const MAX_FILE_CHARS = 2200;
-const MAX_TOTAL_CONTEXT_CHARS = 11000;
+const MAX_FILE_CHARS = 14000;
+const MAX_TOTAL_CONTEXT_CHARS = 50000;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -36,6 +36,14 @@ function isLintFixRequest(msg) {
   return /\b(lint|linting|eslint|tslint|typecheck|type.check|no-explicit-any|no-unused|prefer-const|lint error|lint warning|lint fix|fix lint|fix.*lint|fix.*typescript|fix.*eslint)\b/i.test(
     String(msg || "")
   );
+}
+
+function isScopedChange(msg) {
+  const m = String(msg || "").toLowerCase();
+  // "change button X in sidebar", "update the collapse icon", "make the search button red"
+  // Detects references to a specific named element inside a larger container
+  return /\b(button|icon|toggle|link|input|badge|label|text|color|colour|style|class|className|title|placeholder)\b/.test(m)
+    && /\b(in|inside|within|of|on|for|the)\b/.test(m);
 }
 
 function mentionsExplicitFile(msg) {
@@ -209,7 +217,7 @@ function pickFilesForPrompt(fileContext, cleanMsg, rememberedTargetFile, investi
   return picked.slice(0, mode === "debug" ? Math.max(MAX_PROMPT_FILES, 6) : MAX_PROMPT_FILES);
 }
 
-function buildSystemPrompt({ rememberedTargetFile, lockToRemembered, mode, investigation }) {
+function buildSystemPrompt({ rememberedTargetFile, lockToRemembered, mode, investigation, retryErrors = [] }) {
   const focusRule = lockToRemembered && rememberedTargetFile
     ? `\nFOCUS: Edit ONLY "${rememberedTargetFile}". Do NOT touch unrelated files.\n`
     : "";
@@ -270,14 +278,45 @@ STRICT RULES:
 
     surgical: `
 ## SURGICAL MODE
-Do exactly what was asked. Nothing more.
-- Prefer one-file changes when possible.
-- Avoid unrelated refactors.
-- Keep behavior unchanged outside the requested scope.`,
+Do exactly what was asked — nothing more, nothing less.
+- Touch ONLY the code the user explicitly mentioned.
+- If the user says "change button X in sidebar", find button X's JSX block and change ONLY those lines. Leave every other button, icon, state variable, and handler byte-for-byte identical.
+- Do NOT add new state, hooks, imports, or helper functions unless the user asked for them.
+- Do NOT restructure, reformat, or reorder surrounding code.
+- One-file changes are strongly preferred. Never edit a second file unless the bug spans two layers.`,
+
+    scoped: `
+## SCOPED ELEMENT MODE
+The user asked to change a specific named element (button, icon, text, color, etc.) inside a larger component.
+
+RULES — read carefully:
+1. Identify the EXACT element the user named. Do not assume adjacent elements also need changes.
+2. Your patch must match ONLY that element's JSX block. Use the shortest unique anchor.
+3. Do NOT use rewrite_file — it would destroy all surrounding code. Use replace_block or replace_text.
+4. Do NOT touch any other element in the same file — other buttons, icons, state variables, handlers, imports must remain byte-for-byte identical.
+5. If you find you need to change two elements to satisfy the request, add TWO separate patches — not a rewrite.`,
   };
 
+  const retrySection = retryErrors.length > 0
+    ? `
+⚠️ RETRY — PREVIOUS ATTEMPT FAILED
+The last patch was rejected for the following reason(s):
+${retryErrors.map(e => `  • ${e}`).join("\n")}
+
+Do NOT repeat the same patch. Generate a DIFFERENT, CORRECT patch that avoids these errors.
+For JSX/TSX files: mentally trace the tag structure of your patch before outputting it.
+`
+    : "";
+
   return `You are Kodo, a surgical AI code editor.
-${focusRule}${investigationSection}${modeSection[mode] || modeSection.surgical}
+${focusRule}${retrySection}${investigationSection}${modeSection[mode] || modeSection.surgical}
+
+JSX/TSX VALIDITY RULES (always enforced)
+- Every JSX attribute MUST be inside its element's opening tag. Never leave props floating outside a tag.
+- All tags must be balanced: every <Foo> must have </Foo> or be self-closed <Foo />.
+- A JSX expression returns exactly one root element. Use a fragment (<> </>) if you need siblings.
+- After applying your patch, mentally re-read the resulting JSX to confirm it is valid.
+- If your patch adds new JSX elements, confirm existing closing tags are still present.
 
 DEPENDENCY RULES
 - ALWAYS use the EXACT file path shown in "### File: <path>" headers below. Never abbreviate.
@@ -309,20 +348,19 @@ Return ONLY valid JSON:
 
 PATCH RULES
 - Use the EXACT path from the "### File: <path>" header — never shorten it.
-- Prefer rewrite_file for small files or broad JSX restructuring.
-- Prefer replace_block for a small unique section change.
-- Prefer insert_before / insert_after for additive changes.
-- Use replace_text only when the anchor is unique in the file.
-- Use the SHORTEST unique anchor that safely locates the target.
-- Never include line numbers in search text.
+- DEFAULT: use replace_block for any targeted element change (a button, an icon, a className, a prop value).
+- Use replace_text for single-line changes (a string, a class, a prop on one line).
+- Use insert_before / insert_after for purely additive changes (adding an import, a new element).
+- Use rewrite_file ONLY when the change touches the MAJORITY of the file or the user explicitly says "rewrite" / "replace the whole file". NEVER use rewrite_file to change one element inside a multi-element component.
+- Use the SHORTEST unique anchor that safely locates the target — 2–5 lines is usually enough.
+- Never include line numbers in search/replace text.
 - Never include markdown fences.
-- For JSX, keep tags balanced.
-- Keep patches narrow when the user asked for a narrow change.
+- For JSX, keep all tags balanced — every opened tag must be closed.
 
 If you cannot confidently fix the issue, return a read_only step explaining the exact blocker.`;
 }
 
-function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToRemembered, mode, investigation) {
+function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToRemembered, mode, investigation, retryErrors = []) {
   const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
 
   const filesToShow = pickFilesForPrompt(fileContext, cleanMsg, rememberedTargetFile, investigation, mode);
@@ -351,20 +389,24 @@ function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToR
 
   const instructions = {
     lint: "Fix ONLY the exact lint violations. Use replace_text per violation. NEVER use rewrite_file. Keep all logic, components, and imports that are not directly causing the error.",
-    creative: "Be bold but controlled. Improve the design and clarity where it helps.",
+    creative: "Be bold but controlled. Improve the design and clarity where it helps. Prefer replace_block over rewrite_file unless the change is truly file-wide.",
     debug: "Use the investigation evidence to fix the root cause. Do not edit blindly.",
-    surgical: "Make the smallest correct change. Do not alter unrelated code.",
+    scoped: "The user referenced a specific element. Use replace_block or replace_text targeting ONLY that element. NEVER use rewrite_file. Leave all surrounding code untouched.",
+    surgical: "Make the MINIMUM change. Touch ONLY the code the user explicitly mentioned. Every line not mentioned in the request must remain identical.",
   };
 
-  return `User request: "${cleanMsg}"${focusNote}${investigationNote}
+  const retryNote = retryErrors.length > 0
+    ? `\n\n⚠️ RETRY: Previous patch failed — ${retryErrors.slice(0, 2).join(" | ")}. Generate a DIFFERENT correct patch.`
+    : "";
+
+  return `User request: "${cleanMsg}"${focusNote}${investigationNote}${retryNote}
 
 ${instructions[mode] || instructions.surgical}
 
 CRITICAL: Use each file's EXACT path as shown in the "### File: <path>" header.
 If an error trace mentions "app/lib/api.ts" but the file header shows "chatbot/my-chatbot-ui/app/lib/api.ts", use the full path in your plan.
 
-Use the shortest unique anchor possible.
-Prefer rewrite_file if the file is small and the change is broad.
+Use the shortest unique anchor possible. Do NOT use rewrite_file unless the change is genuinely file-wide.
 If a file is not shown below, do not invent its contents — emit a read_only step instead.
 
 ${fileSnippets.length ? `Project files:\n\n${fileSnippets.join("\n\n")}` : "No files found."}
@@ -372,21 +414,82 @@ ${fileSnippets.length ? `Project files:\n\n${fileSnippets.join("\n\n")}` : "No f
 Return ONLY valid JSON.`;
 }
 
+function repairJSON(text) {
+  // LLMs sometimes embed literal newlines/tabs inside JSON string values instead of \n/\t.
+  // Walk char-by-char and escape bare control characters that appear inside strings.
+  let result = "";
+  let inString = false;
+  let escape = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) {
+      result += ch;
+      escape = false;
+    } else if (ch === "\\" && inString) {
+      result += ch;
+      escape = true;
+    } else if (ch === '"') {
+      result += ch;
+      inString = !inString;
+    } else if (inString && ch === "\n") {
+      result += "\\n";
+    } else if (inString && ch === "\r") {
+      result += "\\r";
+    } else if (inString && ch === "\t") {
+      result += "\\t";
+    } else {
+      result += ch;
+    }
+  }
+  return result;
+}
+
 function extractJSON(text) {
-  const stripped = String(text || "")
+  const raw = String(text || "").trim();
+  if (!raw) return null;
+
+  // Candidates to try in order: strip fences, try raw, try each embedded block
+  const candidates = [];
+
+  // 1. Strip outermost code fence if present
+  const stripped = raw
     .replace(/^```(?:json)?\s*/i, "")
     .replace(/\s*```$/i, "")
     .trim();
+  candidates.push(stripped);
 
-  const start = stripped.indexOf("{");
-  const end = stripped.lastIndexOf("}");
-  if (start === -1 || end === -1) return null;
+  // 2. Extract any ```json ... ``` block embedded in prose
+  const fenceMatch = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenceMatch) candidates.push(fenceMatch[1].trim());
 
-  try {
-    return JSON.parse(stripped.slice(start, end + 1));
-  } catch {
-    return null;
+  // 3. Fall back to the raw text as-is
+  candidates.push(raw);
+
+  for (const candidate of candidates) {
+    const start = candidate.indexOf("{");
+    const end = candidate.lastIndexOf("}");
+    if (start === -1 || end === -1 || end <= start) continue;
+    const slice = candidate.slice(start, end + 1);
+
+    // First try direct parse
+    try {
+      const parsed = JSON.parse(slice);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // try with repaired text
+    }
+
+    // Repair literal control characters inside strings and retry
+    try {
+      const parsed = JSON.parse(repairJSON(slice));
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // try next candidate
+    }
   }
+
+  return null;
 }
 
 function stripLineNumbers(text) {
@@ -396,13 +499,32 @@ function stripLineNumbers(text) {
     .join("\n");
 }
 
+const PATCH_KIND_ALIASES = {
+  replace:        "replace_text",
+  replace_string: "replace_text",
+  str_replace:    "replace_text",
+  block_replace:  "replace_block",
+  rewrite:        "rewrite_file",
+  overwrite:      "rewrite_file",
+  full_rewrite:   "rewrite_file",
+  insert:         "insert_after",
+  prepend:        "insert_before",
+  delete:         "delete_text",
+  remove:         "delete_text",
+};
+
+function normalizePatchKind(raw) {
+  const k = String(raw || "").trim().toLowerCase();
+  return PATCH_KIND_ALIASES[k] || k;
+}
+
 function normalizePatchList(item) {
   const out = [];
 
   const patches = Array.isArray(item?.patches) ? item.patches : [];
   for (const p of patches) {
     if (!p || typeof p !== "object") continue;
-    const kind = String(p.kind || "").trim();
+    const kind = normalizePatchKind(p.kind || p.type || "");
     if (!kind) continue;
 
     out.push({
@@ -489,11 +611,16 @@ async function generatePlanWithRetry({ system, content, modelRoute }) {
         system,
         messages: [{ role: "user", content }],
         modelRoute,
-        maxTokens: attempt === 0 ? 4500 : 2800,
+        maxTokens: attempt === 0 ? 8000 : 4000,
         temperature: 0,
       });
 
       rawResponse = result?.content || "";
+      if (!rawResponse.trim() && attempt === 0) {
+        // Empty response on first attempt — retry once
+        await delay(600);
+        continue;
+      }
       return { rawResponse, parsed: extractJSON(rawResponse), error: null };
     } catch (err) {
       lastError = err;
@@ -511,15 +638,13 @@ async function generatePlanWithRetry({ system, content, modelRoute }) {
   return { rawResponse, parsed: null, error: lastError };
 }
 
-function buildFallbackPlan({ cleanMsg, fileContext, rememberedTargetFile, investigation, mode }) {
+function buildFallbackPlan({ fileContext, rememberedTargetFile, mode }) {
   const files = Array.isArray(fileContext) ? fileContext.filter((f) => f?.path) : [];
   const target =
     files.find((f) => f.path === rememberedTargetFile) ||
     files.find((f) => rememberedTargetFile && (f.path.endsWith(rememberedTargetFile) || rememberedTargetFile.endsWith(f.path))) ||
     files[0] ||
     null;
-
-  const lower = String(cleanMsg || "").toLowerCase();
 
   if (!target) {
     return {
@@ -552,61 +677,6 @@ function buildFallbackPlan({ cleanMsg, fileContext, rememberedTargetFile, invest
     };
   }
 
-  if (/sidebar|collapse|hover|icon/.test(lower) && /ChatSidebar\.tsx$/i.test(target.path)) {
-    const content = String(target.content || "");
-    const hasToggleButton = content.includes("onClick={onToggleSidebar}") && content.includes("KeyboardDoubleArrowLeftRoundedIcon");
-    if (hasToggleButton) {
-      const search = [
-        '        <motion.button',
-        '          whileTap={{ scale: 0.96 }}',
-        '          onClick={onToggleSidebar}',
-      ].join("\n");
-
-      const replace = [
-        '        <motion.button',
-        '          whileTap={{ scale: 0.96 }}',
-        '          onClick={onToggleSidebar}',
-        '          onMouseEnter={() => setIconHover(true)}',
-        '          onMouseLeave={() => setIconHover(false)}',
-        '          className={`flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 text-white/72 transition-colors duration-200 hover:border-white/14 hover:text-white ${',
-        '            isSidebarCollapsed ? "mx-auto" : ""',
-        '          }`}',
-        '          title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}',
-        '          aria-label={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}',
-        '        >',
-        '          {isSidebarCollapsed ? (',
-        '            iconHover ? (',
-        '              <KeyboardDoubleArrowRightRoundedIcon className="h-5 w-5" />',
-        '            ) : (',
-        '              <Image src="/icon.png" alt="Open sidebar" width={24} height={24} quality={100} />',
-        '            )',
-        '          ) : (',
-        '            <KeyboardDoubleArrowLeftRoundedIcon className="h-5 w-5" />',
-        '          )}',
-        '        </motion.button>',
-      ].join("\n");
-
-      return {
-        reasoning: "Planner fallback: the request is a sidebar icon swap, so the target button block should be updated directly.",
-        dependencyNotes: "This is a single-file UI change in ChatSidebar.tsx. No backend files are required.",
-        plan: [
-          {
-            action: "edit",
-            path: target.path,
-            description: "Show the logo when collapsed and swap to the right-arrow icon on hover.",
-            patches: [
-              {
-                kind: "replace_block",
-                search,
-                replace,
-              },
-            ],
-          },
-        ],
-      };
-    }
-  }
-
   if (target.content && target.content.length > 0) {
     return {
       reasoning: "The planner timed out, so the safest fallback is to return the target file for a focused re-run.",
@@ -637,26 +707,44 @@ function buildFallbackPlan({ cleanMsg, fileContext, rememberedTargetFile, invest
 }
 
 export async function planChangesNode(state) {
-  const { userMessage, fileContext, modelRoute, emit, rememberedTargetFile = "", investigation = null } = state;
+  const { userMessage, fileContext, modelRoute, emit, rememberedTargetFile = "", investigation = null, retryCount = 0, verifyResult = null } = state;
 
   const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
   const lockToRemembered = Boolean(rememberedTargetFile) && !mentionsExplicitFile(cleanMsg);
+  const isRetry = retryCount > 0;
+
+  // On retry, extract error details from verifyResult or retryFileContext summaries
+  const retryErrors = [];
+  if (isRetry) {
+    if (verifyResult?.issues?.length) {
+      retryErrors.push(...verifyResult.issues);
+    }
+    for (const f of (fileContext || [])) {
+      if (f?.summary?.startsWith("RETRY:")) {
+        retryErrors.push(f.summary.replace(/^RETRY:\s*/, ""));
+      }
+    }
+  }
 
   let mode = "surgical";
   if (isLintFixRequest(cleanMsg)) mode = "lint";
   else if (isBugFixRequest(cleanMsg)) mode = "debug";
+  else if (isScopedChange(cleanMsg) && !isCreativeRequest(cleanMsg)) mode = "scoped";
   else if (isCreativeRequest(cleanMsg)) mode = "creative";
 
   if (lockToRemembered) console.log(`[PlanChanges] Locked to: ${rememberedTargetFile}`);
-  console.log(`[PlanChanges] Mode: ${mode}`);
+  console.log(`[PlanChanges] Mode: ${mode}${isRetry ? ` (retry ${retryCount})` : ""}`);
+  if (retryErrors.length) console.log(`[PlanChanges] Retry errors:`, retryErrors.slice(0, 3).join(" | "));
 
-  const modeEmoji = { debug: "🐛", creative: "🎨", surgical: "🧠", lint: "🔧" };
-  const modeMsg = { debug: "Debugging...", creative: "Designing...", surgical: "Planning...", lint: "Fixing lint..." };
+  const modeEmoji = { debug: "🐛", creative: "🎨", surgical: "🧠", lint: "🔧", scoped: "🎯" };
+  const modeMsg = { debug: "Debugging...", creative: "Designing...", surgical: "Planning...", lint: "Fixing lint...", scoped: "Targeting element..." };
 
   emit?.({
     type: "progress",
     stage: "planning",
-    message: `${modeEmoji[mode]} ${modeMsg[mode]}`,
+    message: isRetry
+      ? `🔄 Retry ${retryCount} — fixing previous error...`
+      : `${modeEmoji[mode]} ${modeMsg[mode]}`,
   });
 
   const system = buildSystemPrompt({
@@ -664,6 +752,7 @@ export async function planChangesNode(state) {
     lockToRemembered: lockToRemembered && mode !== "debug",
     mode,
     investigation,
+    retryErrors,
   });
 
   const content = buildUserPrompt(
@@ -672,7 +761,8 @@ export async function planChangesNode(state) {
     rememberedTargetFile,
     lockToRemembered,
     mode,
-    investigation
+    investigation,
+    retryErrors
   );
 
   let parsed = null;
@@ -694,11 +784,11 @@ export async function planChangesNode(state) {
   }
 
   if (!parsed?.plan) {
+    const preview = rawResponse.trim().slice(0, 600);
+    console.warn("[PlanChanges] JSON parse failed. Raw response chars:", rawResponse.length, preview ? `— preview: ${preview}` : "— EMPTY (model returned no content)");
     const fallback = buildFallbackPlan({
-      cleanMsg,
       fileContext,
       rememberedTargetFile,
-      investigation,
       mode,
     });
 
@@ -738,14 +828,14 @@ export async function planChangesNode(state) {
 
   plan = applyPathCanonicalization(plan, fileContext || [], rememberedTargetFile);
 
-  if (mode === "lint") {
+  if (mode === "lint" || mode === "scoped") {
     plan = plan.map((item) => {
       const droppedCount = item.patches.filter((p) => p.kind === "rewrite_file").length;
       const safePatches = item.patches.filter((p) => p.kind !== "rewrite_file");
 
       if (droppedCount === 0) return item;
 
-      console.warn(`[PlanChanges] Blocked ${droppedCount} rewrite_file patch(es) for "${item.path}" in lint mode`);
+      console.warn(`[PlanChanges] Blocked ${droppedCount} rewrite_file patch(es) for "${item.path}" in ${mode} mode`);
 
       if (safePatches.length > 0) {
         return { ...item, patches: safePatches };
@@ -757,7 +847,7 @@ export async function planChangesNode(state) {
         patches: [],
         edits: [],
         content: "",
-        description: `Skipped: the model tried to rewrite the whole file to fix a lint error, which is not allowed. Re-run with a more targeted instruction (e.g. name the exact line/rule).`,
+        description: `Skipped: the model tried to rewrite the whole file for a targeted element change, which is not allowed. Re-run with a more specific instruction naming the exact element.`,
       };
     });
   }
@@ -803,7 +893,10 @@ export async function planChangesNode(state) {
     message: `📋 Plan: ${plan.length} step(s)`,
   });
 
-  console.log(`[PlanChanges] ${plan.length} steps`);
+  console.log(`[PlanChanges] ${plan.length} steps:`);
+  for (const [i, p] of plan.entries()) {
+    console.log(`  [${i + 1}] action=${p.action} path=${p.path || "(none)"} patches=${p.patches.length}`);
+  }
 
   return {
     plan,
