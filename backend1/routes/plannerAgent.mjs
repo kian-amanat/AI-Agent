@@ -344,7 +344,8 @@ export default async function plannerAgentRoute(fastify) {
     // ★ Agent memory: fire-and-forget LLM-driven write to .kodo/memory/
     // Only run when the explore/edit pipeline actually did something — skip pure Q&A answers
     // to avoid a wasted LLM call on every chat message.
-    const shouldWriteMemory = finalAnswer && (editedFiles.length > 0 || String(effectiveMessage).length > 60);
+    const isRememberCommand = /^remember[:\s]/i.test(effectiveMessage);
+    const shouldWriteMemory = finalAnswer && (editedFiles.length > 0 || String(effectiveMessage).length > 60 || isRememberCommand);
     if (shouldWriteMemory) {
       writeAgentMemory({
         workspacePath,

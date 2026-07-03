@@ -598,6 +598,14 @@ export async function agenticExploreNode(state) {
 
     conversationMessages.push(...toolResults);
 
+    // Claude Code approach: keep conversation manageable with a sliding window.
+    // Always preserve the first user message; trim old tool call/result pairs from the middle.
+    const MAX_CONV_MSGS = 22;
+    if (conversationMessages.length > MAX_CONV_MSGS) {
+      const [firstMsg, ...rest] = conversationMessages;
+      conversationMessages.splice(0, conversationMessages.length, firstMsg, ...rest.slice(-(MAX_CONV_MSGS - 1)));
+    }
+
     if (hitReady) break;
   }
 

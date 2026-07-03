@@ -732,15 +732,6 @@ export default function MinimalChatComponent() {
             </>
           )}
         </motion.button>
-        <motion.button
-          whileTap={{ scale: 0.96 }}
-          onClick={scrollToBottomSoon}
-          title="Scroll to latest"
-          className="inline-flex items-center gap-1.5 rounded-xl border border-white/8 bg-white/[0.03] px-3 py-1.5 text-xs text-white/60 transition-colors duration-200 hover:border-[#ff8a3d]/20 hover:bg-[#ff8a3d]/8 hover:text-white"
-        >
-          <KeyboardArrowDownRoundedIcon style={{ fontSize: 14 }} />
-          Latest
-        </motion.button>
       </div>
     )}
 

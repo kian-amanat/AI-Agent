@@ -103,6 +103,8 @@ async function parseSSE(
   let buffer              = "";
   let returnedSessionId   = fallbackSessionId ?? "";
   let returnedRequestId: string | null = null;
+  let receivedContent     = "";
+  let streamCompleted     = false;
 
   try {
     while (true) {
@@ -144,6 +146,7 @@ async function parseSSE(
 
             case "content":
               if (typeof parsed.content === "string" && parsed.content) {
+                receivedContent += parsed.content;
                 onEvent({ type: "content", chunk: parsed.content });
               }
               break;
@@ -190,6 +193,7 @@ async function parseSSE(
                 returnedRequestId = String(parsed.metadata.request_id);
               }
               const finalSessionId = returnedSessionId || fallbackSessionId || "";
+              streamCompleted = true;
               onEvent({ type: "done", sessionId: finalSessionId, requestId: returnedRequestId });
               onDone(finalSessionId, returnedRequestId);
               break;
@@ -205,9 +209,14 @@ async function parseSSE(
       }
     }
 
-    if (returnedSessionId) onDone(returnedSessionId, returnedRequestId);
+    if (!streamCompleted && returnedSessionId) onDone(returnedSessionId, returnedRequestId);
   } catch (err) {
-    onError(err instanceof Error ? err.message : "SSE error");
+    if (!streamCompleted && receivedContent.length > 0) {
+      // Stream disconnected mid-response — surface partial content to the UI
+      onError(`Connection lost mid-response (${receivedContent.length} chars received). Send your message again to retry.`);
+    } else {
+      onError(err instanceof Error ? err.message : "SSE error");
+    }
   }
 }
 

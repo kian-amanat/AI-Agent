@@ -103,6 +103,21 @@ export const KodoStateAnnotation = {
   emit: { default: () => null },
 };
 
+// ── Error boundary ────────────────────────────────────────────────────────────
+
+function withErrorBoundary(nodeName, fn) {
+  return async (state) => {
+    try {
+      return await fn(state);
+    } catch (err) {
+      console.error(`[${nodeName}] ❌ Unhandled error:`, err.message);
+      const msg = `Something went wrong in the ${nodeName} step: ${err.message}`;
+      state.emit?.({ type: "content", content: msg });
+      return { finalAnswer: msg };
+    }
+  };
+}
+
 // ── Edge functions ────────────────────────────────────────────────────────────
 
 function routerEdge(state) {
@@ -136,15 +151,15 @@ export function buildKodoGraph() {
   const graph = new StateGraph({ channels: KodoStateAnnotation });
 
   graph
-    .addNode("router",           routerNode)
-    .addNode("agentic_explore",  agenticExploreNode)
-    .addNode("plan_changes",     planChangesNode)
-    .addNode("execute_changes",  executeChangesNode)
-    .addNode("verify",           verifyNode)
-    .addNode("answer",           answerNode)
-    .addNode("pipeline",         pipelineNode)
-    .addNode("run_tests",        runTestsNode)
-    .addNode("install_packages", installPackagesNode);
+    .addNode("router",           withErrorBoundary("router",          routerNode))
+    .addNode("agentic_explore",  withErrorBoundary("agentic_explore", agenticExploreNode))
+    .addNode("plan_changes",     withErrorBoundary("plan_changes",    planChangesNode))
+    .addNode("execute_changes",  withErrorBoundary("execute_changes", executeChangesNode))
+    .addNode("verify",           withErrorBoundary("verify",          verifyNode))
+    .addNode("answer",           withErrorBoundary("answer",          answerNode))
+    .addNode("pipeline",         withErrorBoundary("pipeline",        pipelineNode))
+    .addNode("run_tests",        withErrorBoundary("run_tests",       runTestsNode))
+    .addNode("install_packages", withErrorBoundary("install_packages",installPackagesNode));
 
   // Entry point
   graph.addEdge(START, "router");
