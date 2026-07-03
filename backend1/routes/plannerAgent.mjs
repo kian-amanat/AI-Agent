@@ -41,6 +41,7 @@ import {
   recordFilesTouched,
   buildWorkingSetContext,
 } from "../services/workingset.mjs";
+import { loadMemoryIndex, writeAgentMemory } from "../services/agentMemory.mjs";
 
 const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
 
@@ -215,6 +216,9 @@ export default async function plannerAgentRoute(fastify) {
     const workingSetContext = buildWorkingSetContext(sessionId);
     const memoryContext     = buildMemoryContext(memory, workingSetContext);
 
+    // ★ Agent memory: file-based cross-session knowledge (MEMORY.md index)
+    const agentMemoryIndex  = await loadMemoryIndex(workspacePath);
+
     // ★ The file the user most recently edited in this session.
     //   Validate: must look like a real path (slash or extension), else ignore.
     function isRealPath(p) {
@@ -229,7 +233,8 @@ export default async function plannerAgentRoute(fastify) {
 
     const plannerContextMessage = [
       effectiveMessage,
-      memoryContext ? `Conversation memory:\n${memoryContext}` : "",
+      memoryContext     ? `Conversation memory:\n${memoryContext}`      : "",
+      agentMemoryIndex  ? `Agent memory:\n${agentMemoryIndex}`          : "",
     ].filter(Boolean).join("\n\n");
 
     const sessionLabel = normalizeSessionLabel(message, []);
@@ -334,6 +339,20 @@ export default async function plannerAgentRoute(fastify) {
     if (editedFiles.length > 0) {
       recordFilesTouched(sessionId, editedFiles, effectiveMessage.slice(0, 80));
       console.log(`[Memory] 📝 Recorded ${editedFiles.length} edited file(s): ${editedFiles.join(", ")}`);
+    }
+
+    // ★ Agent memory: fire-and-forget LLM-driven write to .kodo/memory/
+    // Only run when the explore/edit pipeline actually did something — skip pure Q&A answers
+    // to avoid a wasted LLM call on every chat message.
+    const shouldWriteMemory = finalAnswer && (editedFiles.length > 0 || String(effectiveMessage).length > 60);
+    if (shouldWriteMemory) {
+      writeAgentMemory({
+        workspacePath,
+        userMessage:     effectiveMessage,
+        assistantAnswer: finalAnswer,
+        editedFiles,
+        modelRoute,
+      }).catch(err => console.warn("[AgentMemory] background write failed:", err.message));
     }
 
     syncSessionMemory(sessionId, userId, {
