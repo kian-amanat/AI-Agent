@@ -144,7 +144,7 @@ function syncSessionMemory(sessionId, userId, {
   if (attachmentPaths.length)       rememberFiles(sessionId, userId, attachmentPaths);
   if (assistantMessage.trim())      rememberAssistantMessage(sessionId, userId, assistantMessage.trim());
   if (task || taskType || projectScope) rememberTask(sessionId, userId, { task, taskType, projectScope });
-  if (targetFile.trim())            rememberTargetFile(sessionId, userId, targetFile.trim());
+  if (targetFile.trim())            rememberTargetFile(sessionId, targetFile.trim());
 }
 
 // ── Route ──────────────────────────────────────────────────────
