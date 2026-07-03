@@ -16,6 +16,7 @@ import {
   deleteMemoryTopic,
   clearAllMemory,
   listMemoryTopics,
+  writeFactDirectly,
 } from "../../services/agentMemory.mjs";
 
 const SYSTEM_PROMPT = `You are Kodo, an AI coding assistant embedded inside a developer's VS Code workspace.
@@ -117,6 +118,20 @@ export async function answerNode(state) {
   // Handle forget/clear memory commands before reaching the LLM
   if (isForgetCommand(cleanUserMessage)) {
     const reply = await handleForgetCommand(workspacePath, cleanUserMessage);
+    emit?.({ type: "content", content: reply });
+    return {
+      finalAnswer: reply,
+      messages: [new AIMessage(reply)],
+    };
+  }
+
+  // Handle explicit remember: commands — write to disk synchronously, then confirm
+  const rememberMatch = cleanUserMessage.match(/^remember[:\s]+(.+)/is);
+  if (rememberMatch) {
+    const fact = rememberMatch[1].trim();
+    await writeFactDirectly(workspacePath, fact);
+    const preview = fact.length > 120 ? `${fact.slice(0, 120)}…` : fact;
+    const reply = `Got it, I'll remember: "${preview}"`;
     emit?.({ type: "content", content: reply });
     return {
       finalAnswer: reply,
