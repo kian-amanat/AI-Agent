@@ -2,10 +2,21 @@
  * answer.mjs
  * Handles non-editing intent: greetings, questions, explanations,
  * code advice, debugging help, and casual conversation.
+ *
+ * Memory integration (Claude Code approach):
+ *  - MEMORY.md index is already in userMessage (injected by plannerAgent)
+ *  - Before answering: pre-load full content of relevant topic files
+ *  - "forget/clear memory" commands are handled here without hitting the LLM
  */
 
 import { callLLM, streamLLM } from "../../services/llm.mjs";
 import { AIMessage } from "@langchain/core/messages";
+import {
+  loadRelevantTopics,
+  deleteMemoryTopic,
+  clearAllMemory,
+  listMemoryTopics,
+} from "../../services/agentMemory.mjs";
 
 const SYSTEM_PROMPT = `You are Kodo, an AI coding assistant embedded inside a developer's VS Code workspace.
 
@@ -29,8 +40,50 @@ RULES
 - Do not mention inability to edit files here; file editing is handled by the workspace pipeline.
 - Do not write code blocks unless the user explicitly asks for code.`;
 
+// Detect explicit memory-management commands (not general questions about memory)
+function isForgetCommand(msg) {
+  return /\b(?:forget|clear|wipe)\s+(?:all\s+)?(?:memory|memories)\b|\bforget\s+(?:the\s+)?\w[\w-]*\s+memory\b|\bclear\s+memory\s+topic\b/i.test(msg);
+}
+
+const FORGET_ALL_RE = /\b(?:forget|clear|wipe|reset)\s+all\s+(?:memory|memories)\b/i;
+
+async function handleForgetCommand(workspacePath, cleanUserMessage) {
+  if (FORGET_ALL_RE.test(cleanUserMessage)) {
+    await clearAllMemory(workspacePath);
+    return "All memory cleared.";
+  }
+
+  const topics = await listMemoryTopics(workspacePath);
+  if (topics.length === 0) {
+    return "No memory topics exist yet.";
+  }
+
+  const msg = cleanUserMessage.toLowerCase();
+  const matched = topics.find(t => msg.includes(t.toLowerCase()));
+  if (matched) {
+    await deleteMemoryTopic(workspacePath, matched);
+    return `Forgot everything in the "${matched}" memory topic.`;
+  }
+
+  return `Which memory topic should I forget? Available:\n${topics.map(t => `- ${t}`).join("\n")}`;
+}
+
+// Strip appended memory/context sections to get the raw user message
 function cleanMessage(input) {
-  return String(input || "").split(/conversation memory:/i)[0].trim();
+  return String(input || "")
+    .split(/(?:conversation memory:|agent memory:)/i)[0]
+    .trim();
+}
+
+function buildMemorySection(topics) {
+  const entries = Object.entries(topics);
+  if (!entries.length) return "";
+  return entries
+    .map(([name, content]) => {
+      const stripped = String(content).replace(/^---[\s\S]*?---\n+/, "").trimStart();
+      return `=== Memory: ${name} ===\n${stripped.slice(0, 1000)}`;
+    })
+    .join("\n\n");
 }
 
 function buildFileContextSnippet(fileContext = []) {
@@ -57,18 +110,34 @@ function buildHistoryMessages(messages = []) {
 }
 
 export async function answerNode(state) {
-  const { userMessage, messages, modelRoute, emit, fileContext } = state;
-
-  emit?.({
-    type: "progress",
-    stage: "answering",
-    message: "💬 Generating response...",
-  });
+  const { userMessage, messages, modelRoute, emit, fileContext, workspacePath } = state;
 
   const cleanUserMessage = cleanMessage(userMessage);
+
+  // Handle forget/clear memory commands before reaching the LLM
+  if (isForgetCommand(cleanUserMessage)) {
+    const reply = await handleForgetCommand(workspacePath, cleanUserMessage);
+    emit?.({ type: "content", content: reply });
+    return {
+      finalAnswer: reply,
+      messages: [new AIMessage(reply)],
+    };
+  }
+
+  emit?.({ type: "progress", stage: "answering", message: "💬 Generating response..." });
+
+  // Pre-load memory topics relevant to this question (Claude Code approach)
+  const memoryTopics = await loadRelevantTopics(workspacePath, cleanUserMessage);
+  const memorySection = buildMemorySection(memoryTopics);
+  if (memorySection) {
+    const names = Object.keys(memoryTopics).join(", ");
+    emit?.({ type: "progress", stage: "memory", message: `🧠 recall: ${names}` });
+  }
+
   const fileSnippet = buildFileContextSnippet(fileContext);
 
   const userContent = [
+    memorySection ? `Relevant memory from past sessions:\n\n${memorySection}` : "",
     fileSnippet ? `Relevant project files:\n\n${fileSnippet}` : "",
     cleanUserMessage,
   ]
