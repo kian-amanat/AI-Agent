@@ -710,7 +710,16 @@ export async function planChangesNode(state) {
   const { userMessage, fileContext, modelRoute, emit, rememberedTargetFile = "", investigation = null, retryCount = 0, verifyResult = null } = state;
 
   const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
-  const lockToRemembered = Boolean(rememberedTargetFile) && !mentionsExplicitFile(cleanMsg);
+  // Exploration result overrides session memory: if the agent found a different target file,
+  // do not lock to the remembered file from a previous turn.
+  const explorationFoundDifferentTarget =
+    Array.isArray(investigation?.priorityFiles) &&
+    investigation.priorityFiles.length > 0 &&
+    !investigation.priorityFiles.some(
+      (f) => f === rememberedTargetFile || f.endsWith(rememberedTargetFile) || rememberedTargetFile.endsWith(f)
+    );
+  const lockToRemembered =
+    Boolean(rememberedTargetFile) && !mentionsExplicitFile(cleanMsg) && !explorationFoundDifferentTarget;
   const isRetry = retryCount > 0;
 
   // On retry, extract error details from verifyResult or retryFileContext summaries
