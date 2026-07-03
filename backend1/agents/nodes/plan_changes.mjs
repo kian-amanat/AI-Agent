@@ -48,7 +48,7 @@ function isScopedChange(msg) {
 
 function mentionsExplicitFile(msg) {
   const m = String(msg || "");
-  if (/\.(tsx?|jsx?|mjs|cjs|css|scss|json|md|html|ts|js|yml|yaml)\b/i.test(m)) return true;
+  if (/\.(tsx?|jsx?|mjs|cjs|css|scss|json|md|html|ts|js|yml|yaml|py|rb|go|rs|java|php|sh|bash|txt|env)\b/i.test(m)) return true;
   if (/\b(sidebar|navbar|header|footer|composer|chatsidebar|chatheader|login|signup|connection|dashboard|settings|page|route|layout)\b/i.test(m))
     return true;
   return false;
@@ -857,6 +857,7 @@ export async function planChangesNode(state) {
     plan = plan.filter(
       (p) =>
         p.action === "read_only" ||
+        p.action === "create" ||   // never block new file creation
         p.path === rememberedTargetFile ||
         p.path.endsWith(rememberedTargetFile) ||
         rememberedTargetFile.endsWith(p.path)

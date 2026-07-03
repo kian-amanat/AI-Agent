@@ -113,11 +113,11 @@ export async function loadRelevantTopics(workspacePath, cleanUserMessage) {
   const index = await loadMemoryIndex(workspacePath);
   if (!index) return {};
 
+  const msgLower = String(cleanUserMessage || "").toLowerCase();
   const words = new Set(
-    String(cleanUserMessage || "")
-      .toLowerCase()
+    msgLower
       .split(/[\s,;:!?.'"()\[\]{}]+/)
-      .filter(w => w.length > 3)
+      .filter(w => w.length >= 3)
   );
   if (words.size === 0) return {};
 
@@ -127,8 +127,11 @@ export async function loadRelevantTopics(workspacePath, cleanUserMessage) {
     if (!m) continue;
     const [, name, , description] = m;
     const topicText = `${name} ${description}`.toLowerCase();
+    // Direct topic-name match (e.g. "code patterns" hits "code-patterns")
+    const nameAsPhrase = name.replace(/-/g, " ");
+    const directMatch = msgLower.includes(nameAsPhrase) || msgLower.includes(name);
     const matchCount = [...words].filter(w => topicText.includes(w)).length;
-    if (matchCount > 0) {
+    if (directMatch || matchCount > 0) {
       const content = await readMemoryTopic(workspacePath, name);
       if (content) results[name] = content;
     }
@@ -273,6 +276,31 @@ function extractJSON(text) {
   const e = raw.lastIndexOf("}");
   if (s === -1 || e <= s) return null;
   try { return JSON.parse(raw.slice(s, e + 1)); } catch { return null; }
+}
+
+/**
+ * Write a single fact directly to user-preferences without an LLM round-trip.
+ * Used by the remember: command so the fact is on disk before the next request arrives.
+ */
+export async function writeFactDirectly(workspacePath, fact) {
+  try {
+    const dir = await ensureMemoryDir(workspacePath);
+    const topicName = "user-preferences";
+    const safe = toSafeName(topicName);
+    const filePath = path.join(dir, `${safe}.md`);
+
+    let existing = "";
+    try { existing = await fs.readFile(filePath, "utf-8"); } catch {}
+
+    const stripped = existing.replace(/^---[\s\S]*?---\n+/, "").trimStart();
+    const updated = stripped ? `${stripped.trimEnd()}\n- ${fact}\n` : `- ${fact}\n`;
+
+    await writeTopicFile(dir, topicName, updated);
+    await updateIndex(dir, [{ name: topicName, description: "User preferences, corrections, desired coding style" }]);
+    console.log(`[AgentMemory] ⚡ Direct write → ${topicName}: "${fact.slice(0, 60)}"`);
+  } catch (err) {
+    console.warn("[AgentMemory] writeFactDirectly failed:", err.message);
+  }
 }
 
 /**

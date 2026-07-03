@@ -44,6 +44,25 @@ function loadTypeScript() {
 
 function validateSyntax(content, absPath) {
   const ext = path.extname(absPath).toLowerCase();
+
+  // Python: spawn python3 and parse via ast module
+  if (ext === ".py") {
+    try {
+      const { spawnSync } = _require("child_process");
+      const res = spawnSync(
+        "python3",
+        ["-c", "import ast, sys; ast.parse(sys.stdin.read())"],
+        { input: content, encoding: "utf-8", timeout: 5000 }
+      );
+      if (res.status !== 0) {
+        const raw = String(res.stderr || res.stdout || "Python syntax error");
+        const errLine = raw.split("\n").filter(l => l.includes("SyntaxError") || l.includes("line")).slice(0, 2).join(" ").trim();
+        return errLine || "Python syntax error";
+      }
+    } catch { /* python3 not available — skip */ }
+    return null;
+  }
+
   if (![".tsx", ".jsx", ".ts", ".js"].includes(ext)) return null;
   const ts = loadTypeScript();
   if (!ts) return null;
@@ -436,7 +455,7 @@ const ACTION_ICON = { edit: "✏️", create: "➕", delete: "🗑️", read_onl
 
 export async function executeChangesNode(state) {
   const { plan, workspacePath, emit, retryCount, sessionId, requestId } = state;
-  const root = workspacePath || process.cwd();
+  const root = workspacePath || PROJECT_ROOT;
 
   if (!Array.isArray(plan) || plan.length === 0) {
     emit?.({ type: "progress", stage: "execute_skip", message: "⏩ No changes to execute." });
@@ -511,7 +530,12 @@ export async function executeChangesNode(state) {
 
     try {
       if (step.action === "create") {
-        const createContent = String(step.content || "");
+        // LLM may put file content in patches[0].content (rewrite_file) instead of step.content
+        let createContent = String(step.content || "");
+        if (!createContent) {
+          const rwPatch = (step.patches || []).find(p => p.kind === "rewrite_file" && p.content);
+          if (rwPatch) createContent = String(rwPatch.content || "");
+        }
         const createSyntaxErr = validateSyntax(createContent, absPath);
         if (createSyntaxErr) {
           console.warn(`[Execute] 🚫 Syntax error in created file ${step.path} — write aborted: ${createSyntaxErr}`);
