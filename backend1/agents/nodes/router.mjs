@@ -50,7 +50,7 @@ const PIPELINE_PATTERNS = [
 const FILE_EXTENSION = /\.(tsx?|jsx?|mjs|cjs|css|scss|sass|less|json|md|ya?ml|html|xml|env|sh|py|rs|go|png|jpe?g|gif|svg|webp|ico)\b/i;
 const FILE_PATH = /\b(src\/|app\/|components?\/|pages?\/|routes?\/|lib\/|utils?\/|hooks?\/|api\/|services?\/|public\/|styles?\/)\S+/i;
 const COMPONENT_NAME = /\b(chatsidebar|chatheader|chatcomposer|agentpipeline|thinkingtrace|authguard|emptystatecard|typingindicator|assistantmessage|useagenthook|usethinkingsteps|planchanges|kodo_graph|graph_runner|workingset|modelrouter)\b/i;
-const CODE_EDIT_VERB = /\b(refactor|rewrite|implement|scaffold|migrate|lint|typecheck|import|export|instantiate|destructure|annotate)\b/i;
+const CODE_EDIT_VERB = /\b(create|write|generate|build|refactor|rewrite|implement|scaffold|migrate|lint|typecheck|import|export|instantiate|destructure|annotate)\b/i;
 const EDIT_VERB = /\b(remove|delete|add|change|make|update|fix|rename|move|edit|modify|replace|adjust|tweak|set|put|insert|clear|hide|show|toggle|disable|enable|style|color|colour|animate|resize|rotate|translate|scale)\b/i;
 
 const DEBUG_HINTS = [
@@ -127,10 +127,21 @@ function classifyByHeuristic(message) {
   return "answer";
 }
 
-export async function routerNode(state) {
-  const { userMessage, emit } = state;
+const CONTEXTUAL_EDIT_RE = /\b(that\s+(page|file|function|component|module|class|script)|on\s+it|to\s+it|in\s+it)\b/i;
 
-  const intent = classifyByHeuristic(userMessage);
+export async function routerNode(state) {
+  const { userMessage, emit, rememberedTargetFile } = state;
+
+  let intent = classifyByHeuristic(userMessage);
+
+  // If heuristic says "answer" but there's a remembered file and the user
+  // refers to it contextually ("that page", "on it", etc.), treat as an edit.
+  if (intent === "answer" && rememberedTargetFile) {
+    const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
+    if (CONTEXTUAL_EDIT_RE.test(cleanMsg)) {
+      intent = "explore";
+    }
+  }
   console.log(`[Router] intent="${intent}" for: "${String(userMessage).slice(0, 80)}"`);
 
   emit?.({

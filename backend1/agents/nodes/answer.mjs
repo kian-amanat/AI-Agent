@@ -111,7 +111,7 @@ function buildHistoryMessages(messages = []) {
 }
 
 export async function answerNode(state) {
-  const { userMessage, messages, modelRoute, emit, fileContext, workspacePath } = state;
+  const { userMessage, messages, modelRoute, emit, fileContext, workspacePath, rememberedTargetFile } = state;
 
   const cleanUserMessage = cleanMessage(userMessage);
 
@@ -152,6 +152,7 @@ export async function answerNode(state) {
   const fileSnippet = buildFileContextSnippet(fileContext);
 
   const userContent = [
+    rememberedTargetFile ? `Last file worked on: ${rememberedTargetFile}` : "",
     memorySection ? `Relevant memory from past sessions:\n\n${memorySection}` : "",
     fileSnippet ? `Relevant project files:\n\n${fileSnippet}` : "",
     cleanUserMessage,
