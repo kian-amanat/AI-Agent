@@ -22,6 +22,7 @@ import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import OpenAI from "openai";
 import { AIMessage } from "@langchain/core/messages";
+import { readMemoryTopic, listMemoryTopics, loadMemoryIndex } from "../../services/agentMemory.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -118,6 +119,31 @@ const EXPLORATION_TOOLS = [
           },
         },
         required: ["summary", "priority_files"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "list_memory_topics",
+      description: "List all memory topics Kodo has learned in past sessions (project context, user preferences, code patterns, etc.). Call this at the start if you want to recall prior knowledge about this project.",
+      parameters: { type: "object", properties: {} },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "read_memory_topic",
+      description: "Read a specific memory topic file to recall learned patterns, user preferences, or project context from past sessions.",
+      parameters: {
+        type: "object",
+        properties: {
+          topic: {
+            type: "string",
+            description: "Topic name, e.g. 'code-patterns', 'user-preferences', 'project-context'",
+          },
+        },
+        required: ["topic"],
       },
     },
   },
@@ -292,6 +318,21 @@ async function executeTool(name, args, root) {
       case "ready_to_plan":
         return { success: true, ready: true };
 
+      case "list_memory_topics": {
+        const topics = await listMemoryTopics(root);
+        return topics.length
+          ? { success: true, topics }
+          : { success: true, topics: [], note: "No memory topics yet — this may be a new project." };
+      }
+
+      case "read_memory_topic": {
+        const topic = String(args.topic || "").trim();
+        if (!topic) return { success: false, error: "topic is required" };
+        const content = await readMemoryTopic(root, topic);
+        if (!content) return { success: false, error: `No memory found for topic: "${topic}". Use list_memory_topics to see available topics.` };
+        return { success: true, topic, content: content.slice(0, MAX_TOOL_OUTPUT_CHARS) };
+      }
+
       default:
         return { success: false, error: `Unknown tool: ${name}` };
     }
@@ -302,29 +343,39 @@ async function executeTool(name, args, root) {
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-function buildSystemPrompt(cleanMessage, workspaceTree) {
+function buildSystemPrompt(cleanMessage, workspaceTree, memoryIndex = "") {
   const snapshot = workspaceTree
     .filter(f => f.isDir ? f.path.split("/").length <= 2 : true)
     .slice(0, 120)
     .map(f => (f.isDir ? `📁 ${f.path}/` : `   ${f.path}`))
     .join("\n");
 
+  const memorySection = memoryIndex
+    ? `\nAGENT MEMORY (learned from past sessions — always up to date):
+${memoryIndex}
+
+Use read_memory_topic to load a full topic. Use list_memory_topics to see all topics.\n`
+    : "";
+
   return `You are Kodo, an autonomous code agent in EXPLORATION MODE.
 
 MISSION: Gather the precise context needed to implement the user's request, then signal ready.
 
 TOOLS:
-• read_file    — read any file (required before modifying it)
-• grep_code    — search all files for a string or symbol
-• list_files   — explore directory structure
-• ready_to_plan — call when you have enough context; ends exploration
-
+• read_file          — read any file (required before modifying it)
+• grep_code          — search all files for a string or symbol
+• list_files         — explore directory structure
+• ready_to_plan      — call when you have enough context; ends exploration
+• list_memory_topics — see what Kodo has learned about this project in past sessions
+• read_memory_topic  — load full details for a memory topic (patterns, preferences, context)
+${memorySection}
 STRATEGIES BY REQUEST TYPE:
 
 BUG FIX: grep for the error text → read the file with the bug → follow imports to root cause
 EDIT/REFACTOR: find the target file → read it → read its imports if relevant
 UI CHANGE: read the component AND its nearest layout/styles file
 FEATURE: grep for similar existing code → read it → identify all files to touch
+REPEAT TASK: if memory shows you've worked here before, load the relevant topic first
 
 RULES:
 1. Read every file you intend to modify — never guess contents
@@ -380,7 +431,10 @@ export async function agenticExploreNode(state) {
   const isThinkingModel = /thinking|r1\b|reasoner/i.test(model);
   // Thinking models stream to keep the connection alive past gateway timeouts.
   const client = new OpenAI({ apiKey, baseURL, timeout: isThinkingModel ? 600_000 : 120_000, maxRetries: 0 });
-  const systemPrompt = buildSystemPrompt(cleanMessage, workspaceTree);
+
+  // Load memory index (first 200 lines of MEMORY.md) and inject into system prompt
+  const memoryIndex = workspacePath ? await loadMemoryIndex(workspacePath) : "";
+  const systemPrompt = buildSystemPrompt(cleanMessage, workspaceTree, memoryIndex);
 
   // Seed the conversation — include remembered file as context if available
   const initialContent = rememberedTargetFile
@@ -527,6 +581,10 @@ export async function agenticExploreNode(state) {
         emit?.({ type: "progress", stage: "exploring", message: `📖 read ${args.path}` });
       } else if (toolName === "list_files") {
         emit?.({ type: "progress", stage: "exploring", message: `📂 ls ${args.dir || "."}` });
+      } else if (toolName === "list_memory_topics") {
+        emit?.({ type: "progress", stage: "exploring", message: `🧠 listing memory topics` });
+      } else if (toolName === "read_memory_topic") {
+        emit?.({ type: "progress", stage: "exploring", message: `🧠 recall: ${args.topic}` });
       }
 
       // Cap tool output so we don't blow up the context window

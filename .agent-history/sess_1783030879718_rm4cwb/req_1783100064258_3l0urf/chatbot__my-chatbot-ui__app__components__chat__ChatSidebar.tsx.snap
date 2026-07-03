@@ -167,21 +167,10 @@ export default function ChatSidebar({
         </div>
       )}
 
-            {/* ── Search + New chat (expanded only) ── */}
+      {/* ── Search + New chat (expanded only) ── */}
       {!isSidebarCollapsed && (
-        <motion.div
-          initial={{ opacity: 0, y: -8 }}
-          animate={{ opacity: 1, y: 0 }}
-          exit={{ opacity: 0, y: -8 }}
-          transition={{ duration: 0.25, ease: "easeOut" }}
-          className="px-3 pb-3"
-        >
-                    <motion.div
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.2, ease: "easeOut", delay: 0.05 }}
-            className="relative mb-3"
-          >
+        <div className="px-3 pb-3">
+          <div className="relative mb-3">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/30" />
             <input
               value={conversationSearch}
@@ -189,9 +178,9 @@ export default function ChatSidebar({
               placeholder="Search conversations"
               className="h-11 w-full rounded-2xl border border-white/8 bg-white/[0.02] pl-9 pr-3 text-sm text-white outline-none transition-all duration-200 placeholder:text-white/28 focus:border-white/18 focus:bg-white/[0.04]"
             />
-          </motion.div>
+          </div>
 
-          <motion.button
+                    <motion.button
             whileHover={{ y: -1 }}
             whileTap={{ scale: 0.98 }}
             onClick={onStartNewChat}
@@ -206,7 +195,7 @@ export default function ChatSidebar({
               <p className="truncate text-[11px] text-white/60">Start a fresh conversation</p>
             </div>
           </motion.button>
-        </motion.div>
+        </div>
       )}
 
       {/* ── Conversation list ── */}
