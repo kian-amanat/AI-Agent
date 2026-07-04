@@ -158,6 +158,39 @@ async function findFileByPartialPath(root, partialPath) {
   return walk(root);
 }
 
+const EXT_LANG = {
+  ts: "typescript", tsx: "tsx", js: "javascript", jsx: "jsx", mjs: "javascript",
+  cjs: "javascript", py: "python", css: "css", scss: "scss", json: "json",
+  md: "markdown", html: "html", yml: "yaml", yaml: "yaml", sh: "bash",
+  rs: "rust", go: "go", rb: "ruby", java: "java", php: "php", txt: "text",
+};
+
+function langFromPath(filePath) {
+  const ext = String(filePath || "").split(".").pop()?.toLowerCase() || "";
+  return EXT_LANG[ext] || ext;
+}
+
+const HUNK_MAX = 3000;
+
+function buildDiffHunk(patch, original, working) {
+  const { kind, search, replace, content, anchor, before, after } = patch;
+  switch (kind) {
+    case "rewrite_file":
+      return { kind: "rewrite", before: original.slice(0, HUNK_MAX), after: working.slice(0, HUNK_MAX) };
+    case "replace_text":
+    case "replace_block":
+      return { kind: "replace", before: search.slice(0, HUNK_MAX), after: replace.slice(0, HUNK_MAX) };
+    case "insert_before":
+      return { kind: "insert", after: (before || content).slice(0, HUNK_MAX), anchor: anchor.slice(0, 200) };
+    case "insert_after":
+      return { kind: "insert", after: (after || content).slice(0, HUNK_MAX), anchor: anchor.slice(0, 200) };
+    case "delete_text":
+      return { kind: "delete", before: search.slice(0, HUNK_MAX) };
+    default:
+      return null;
+  }
+}
+
 async function writeFileAtomic(absPath, content) {
   await ensureParentDir(absPath);
   const tmpPath = `${absPath}.${process.pid}.tmp`;
@@ -527,6 +560,7 @@ export async function executeChangesNode(state) {
     });
 
     let result = { success: false, error: "unknown" };
+    let diffPayload = null;
 
     try {
       if (step.action === "create") {
@@ -543,11 +577,20 @@ export async function executeChangesNode(state) {
         } else {
           await writeFileAtomic(absPath, createContent);
           result = { success: true };
+          diffPayload = {
+            action: "create", path: step.path, language: langFromPath(step.path),
+            hunks: [{ kind: "create", after: createContent.slice(0, HUNK_MAX) }],
+          };
         }
       } else if (step.action === "delete") {
+        const deletedContent = (await readFileSafe(absPath)) || "";
         try {
           await fs.unlink(absPath);
           result = { success: true };
+          diffPayload = {
+            action: "delete", path: step.path, language: langFromPath(step.path),
+            hunks: [{ kind: "delete", before: deletedContent.slice(0, HUNK_MAX) }],
+          };
         } catch (e) {
           result = { success: false, error: e.message };
         }
@@ -601,6 +644,12 @@ export async function executeChangesNode(state) {
                   note: `${appliedCount}/${patches.length} patch(es) applied`,
                   partial: appliedCount < patches.length,
                 };
+                diffPayload = {
+                  action: "edit", path: step.path, language: langFromPath(step.path),
+                  hunks: patches
+                    .map((p, idx) => patchResults[idx] ? buildDiffHunk(p, original, working) : null)
+                    .filter(Boolean),
+                };
               }
             } else {
               result = {
@@ -624,6 +673,10 @@ export async function executeChangesNode(state) {
       success: result.success,
       error: result.error || null,
     });
+
+    if (diffPayload) {
+      emit?.({ type: "file_diff", ...diffPayload });
+    }
 
     executionResults.push({
       action: step.action,

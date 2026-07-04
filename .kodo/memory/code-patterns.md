@@ -1,7 +1,25 @@
 ---
-updated: 2026-07-03T22:26:03.637Z
+updated: 2026-07-04T18:18:47.101Z
 ---
 
-- Backend utilities are organized under `backend1/utils/`
-- Example file: `backend1/utils/hello.py` contains a simple `greet` function and a `calculator` function
-- Python backend structure follows modular separation for utilities
+- `ThinkingTrace.tsx` located in `chatbot/my-chatbot-ui/app/components/chat/`
+- **Bullet Point Styling & Logic**:
+  - **Active/Thinking Step**: Orange color (`bg-orange-500` or similar).
+  - **Previous/Completed Step**: Green color (`bg-green-500` or similar).
+  - **Final State**: When thinking is complete, all bullet points turn green to indicate success/pass.
+  - **Z-Index**: Bullet point container div uses `z-10` to ensure it renders on top of the connecting line.
+- **Vertical Line Styling**:
+  - Positioned at `left-[30px]`.
+  - Gray color.
+  - Positioned behind bullets via z-index management.
+- **Layout Adjustments**:
+  - Outer container div includes `ml-1` class for a small left margin.
+- **Component Structure**: Supports modular updates for chat UI elements.
+- **ChatComposer Icon Usage**:
+  - Uses `NorthRoundedIcon` from `@mui/icons-material/NorthRounded` for the send button.
+  - File: `chatbot/my-chatbot-ui/app/components/chat/ChatComposer.tsx`
+- **ChatHeader Icon Styling**:
+  - Located in `chatbot/my-chatbot-ui/app/components/chat/ChatHeader.tsx`
+  - **Shadow**: Removed shadow effects from icons.
+  - **Hover State**: Colorful hover states using 70% orange, 30% red mix.
+  - **Design**: Minimal design. No rotation. Subtle color transition.

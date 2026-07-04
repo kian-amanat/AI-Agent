@@ -44,6 +44,20 @@ export interface WorkspaceFile {
   summary: string;
 }
 
+export interface DiffHunk {
+  kind: "replace" | "insert" | "delete" | "create" | "rewrite";
+  before?: string;
+  after?: string;
+  anchor?: string;
+}
+
+export interface FileDiff {
+  action: string;
+  path: string;
+  language: string;
+  hunks: DiffHunk[];
+}
+
 export type SSEEvent =
   | { type: "start";        sessionId: string; requestId?: string; intent?: string | null }
   | { type: "content";      chunk: string }
@@ -53,7 +67,8 @@ export type SSEEvent =
   // ★ NEW LangGraph events
   | { type: "plan";         reasoning: string; steps: PlanStep[]; message?: string }
   | { type: "file_context"; files: WorkspaceFile[] }
-  | { type: "file_change";  action: string; path: string; success: boolean; error?: string | null };
+  | { type: "file_change";  action: string; path: string; success: boolean; error?: string | null }
+  | { type: "file_diff";    action: string; path: string; language: string; hunks: DiffHunk[] };
 
 export type UndoStats = {
   total: number; restored: number; deleted: number; no_op: number; failed: number;
@@ -185,6 +200,16 @@ async function parseSSE(
                 path:    parsed.path    || "",
                 success: Boolean(parsed.success),
                 error:   parsed.error   || null,
+              });
+              break;
+
+            case "file_diff":
+              onEvent({
+                type:     "file_diff",
+                action:   parsed.action   || "",
+                path:     parsed.path     || "",
+                language: parsed.language || "",
+                hunks:    Array.isArray(parsed.hunks) ? parsed.hunks : [],
               });
               break;
 

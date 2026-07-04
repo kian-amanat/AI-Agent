@@ -1,0 +1,43 @@
+"use client";
+
+import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import { motion } from "framer-motion";
+import { PanelLeftClose, Settings } from "lucide-react";
+
+export default function ChatHeader({
+  onToggleSidebar,
+}: {
+  onToggleSidebar: () => void;
+}) {
+  const router = useRouter();
+
+  return (
+    <header className="fixed top-0 right-0 left-[sidebarWidth] z-20">
+      <div className="flex min-w-0 items-center gap-2.5">
+        <button
+          onClick={onToggleSidebar}
+          className="flex h-9 w-9 items-center justify-center rounded-full border border-white/[0.06] bg-white/[0.03] text-white/65 transition-colors duration-200 hover:bg-white/[0.06] hover:text-white md:hidden"
+          title="Toggle sidebar"
+          aria-label="Toggle sidebar"
+        >
+          <PanelLeftClose className="h-4 w-4" />
+        </button>
+
+                <div className="flex items-center justify-end ml-auto mr-4">
+                    <motion.button
+            whileHover={{ scale: 1.08 }}
+            whileTap={{ scale: 0.95 }}
+            transition={{ type: "spring", stiffness: 400, damping: 17 }}
+            onClick={() => router.push("/settings")}
+            className="group flex h-[38px] w-[38px] items-center justify-center rounded-2xl border border-white/[0.07] bg-white/[0.03] text-white/50 transition-colors duration-300 hover:bg-white/[0.06] hover:text-[#ff4d4d] hover:border-[#ff3333]/30 mr-2 mt-3.5"
+            aria-label="Settings"
+            title="Settings"
+          >
+            <Settings className="h-4 w-4 transition-colors duration-300 group-hover:text-[#ff4d4d]" />
+          </motion.button>
+        </div>
+      </div>
+    </header>
+  );
+}

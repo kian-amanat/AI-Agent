@@ -39,6 +39,12 @@ const nowIso = () => new Date().toISOString();
 type MessageUndoResult = UndoResult | { error: string };
 
 function toUiMessage(message: ApiMessage): Message {
+  let fileDiffs: import("./lib/api").FileDiff[] | undefined;
+  try {
+    const raw = (message as any).file_diffs;
+    if (raw) fileDiffs = typeof raw === "string" ? JSON.parse(raw) : raw;
+  } catch { fileDiffs = undefined; }
+
   return {
     id: message.id != null ? String(message.id) : crypto.randomUUID(),
     role: message.role,
@@ -49,7 +55,8 @@ function toUiMessage(message: ApiMessage): Message {
     createdAt: message.created_at,
     metadata: {
       intent: message.intent ?? undefined,
-      requestId: (message as any).requestId ?? undefined,
+      requestId: (message as any).request_id ?? (message as any).requestId ?? undefined,
+      fileDiffs,
       undoResult:
         ((message as any).undoResult as MessageUndoResult | undefined) ?? undefined,
       planMetadata: (message as any).planMetadata ?? undefined,
@@ -110,6 +117,8 @@ export default function MinimalChatComponent() {
 
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [undoingMessageId, setUndoingMessageId] = useState<string | null>(null);
+  // requestId of the last agent message that changed files — drives the Undo button
+  const [undoableRequestId, setUndoableRequestId] = useState<string | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -178,6 +187,11 @@ export default function MinimalChatComponent() {
       const uiMessages = apiMessages.map(toUiMessage);
       setSessionMessagesCache((prev) => ({ ...prev, [sessionId]: uiMessages }));
       setMessages(uiMessages);
+      // Restore undo button for the last assistant message that changed files
+      const lastChanges = [...uiMessages].reverse().find(
+        (m) => m.role === "assistant" && m.metadata?.requestId && m.metadata?.fileDiffs?.length,
+      );
+      setUndoableRequestId(lastChanges?.metadata?.requestId ?? null);
     } catch (error) {
       console.error("Failed to load session messages:", error);
       if (!cached?.length) setMessages([]);
@@ -341,6 +355,7 @@ export default function MinimalChatComponent() {
     if ((!text && selectedFiles.length === 0) || isSending) return;
 
     setIsSending(true);
+    setUndoableRequestId(null); // hide undo on the previous message while new one runs
     pipeline.start();
 
     const fileNames = selectedFiles.map((file) => file.name).join(", ");
@@ -391,6 +406,9 @@ export default function MinimalChatComponent() {
     setMessageInput("");
     setSelectedFiles([]);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
+
+    // Track whether this request received any file_diff events (used in onDone)
+    let fileDiffsReceived = false;
 
     const cleanup = sendMessage(
       text,
@@ -472,6 +490,32 @@ export default function MinimalChatComponent() {
           );
           return;
         }
+
+        if (event.type === "file_diff") {
+          fileDiffsReceived = true;
+          setMessages((prev) =>
+            prev.map((msg) =>
+              msg.id === assistantMessageId
+                ? {
+                    ...msg,
+                    metadata: {
+                      ...(msg.metadata || {}),
+                      fileDiffs: [
+                        ...(msg.metadata?.fileDiffs || []),
+                        {
+                          action:   event.action,
+                          path:     event.path,
+                          language: event.language,
+                          hunks:    event.hunks,
+                        },
+                      ],
+                    },
+                  }
+                : msg
+            )
+          );
+          return;
+        }
       },
       (returnedSessionId, requestId) => {
         const finalSessionId = returnedSessionId || selectedSessionIdRef.current;
@@ -502,6 +546,11 @@ export default function MinimalChatComponent() {
                 : m
             )
           );
+        }
+
+        // If this response changed files, make it the active undo target
+        if (requestId && fileDiffsReceived) {
+          setUndoableRequestId(requestId);
         }
 
         // Close the thinking trace for this message
@@ -698,7 +747,7 @@ export default function MinimalChatComponent() {
             content={m.content}
             metadata={m.metadata}
             onUndoClick={
-              m.metadata?.requestId
+              undoableRequestId && m.metadata?.requestId === undoableRequestId
                 ? () => handleUndoClick(m.id)
                 : undefined
             }

@@ -2,7 +2,8 @@
 
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { Loader2, Mic, Paperclip, Send, StopCircle, X } from "lucide-react";
+import { Loader2, Mic, Paperclip, StopCircle, X } from "lucide-react";
+import NorthRoundedIcon from "@mui/icons-material/NorthRounded";
 import { transcribeAudio } from "../../lib/api";
 
 type ChatComposerProps = {
@@ -332,7 +333,7 @@ export default function ChatComposer({
                     animate={{ opacity: 1, scale: 1, y: 0 }}
                     exit={{ opacity: 0, scale: 0.9 }}
                   >
-                    <Send className="h-4 w-4" />
+                    <NorthRoundedIcon className="h-4 w-4" />
                   </motion.span>
                 )}
               </AnimatePresence>

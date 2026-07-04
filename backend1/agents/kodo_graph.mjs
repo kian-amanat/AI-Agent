@@ -38,7 +38,6 @@ import { planChangesNode }    from "./nodes/plan_changes.mjs";
 import { executeChangesNode } from "./nodes/execute_changes.mjs";
 import { verifyNode }         from "./nodes/verify.mjs";
 import { answerNode }         from "./nodes/answer.mjs";
-import { pipelineNode }       from "./nodes/pipeline_node.mjs";
 import { runTestsNode }       from "./nodes/run_tests.mjs";
 import { installPackagesNode} from "./nodes/install_packages.mjs";
 
@@ -124,9 +123,8 @@ function routerEdge(state) {
   switch (state.intent) {
     case "investigate":
     case "explore":
-      return "agentic_explore";
     case "pipeline":
-      return "pipeline";
+      return "agentic_explore";
     case "test":
       return "run_tests";
     case "install":
@@ -157,7 +155,6 @@ export function buildKodoGraph() {
     .addNode("execute_changes",  withErrorBoundary("execute_changes", executeChangesNode))
     .addNode("verify",           withErrorBoundary("verify",          verifyNode))
     .addNode("answer",           withErrorBoundary("answer",          answerNode))
-    .addNode("pipeline",         withErrorBoundary("pipeline",        pipelineNode))
     .addNode("run_tests",        withErrorBoundary("run_tests",       runTestsNode))
     .addNode("install_packages", withErrorBoundary("install_packages",installPackagesNode));
 
@@ -167,7 +164,6 @@ export function buildKodoGraph() {
   // Router dispatches to one of five paths
   graph.addConditionalEdges("router", routerEdge, {
     agentic_explore:  "agentic_explore",
-    pipeline:         "pipeline",
     answer:           "answer",
     run_tests:        "run_tests",
     install_packages: "install_packages",
@@ -185,7 +181,6 @@ export function buildKodoGraph() {
 
   // Terminal nodes
   graph.addEdge("answer",           END);
-  graph.addEdge("pipeline",         END);
   graph.addEdge("run_tests",        END);
   graph.addEdge("install_packages", END);
 
