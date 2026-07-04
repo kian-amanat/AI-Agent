@@ -1,5 +1,7 @@
 import React from "react";
 import { RotateCcw, Loader2, Check } from "lucide-react";
+import FileDiffView from "./FileDiffView";
+import type { FileDiff } from "../../lib/api";
 
 type ParsedSection = {
   type: "text" | "bullet" | "numbered" | "code" | "header" | "divider";
@@ -28,7 +30,7 @@ export interface AssistantMessageMetadata {
   intent?: string;
   requestId?: string;
   undoResult?: UndoResult;
-  // هر فیلد دیگری که قبلاً داشتی هم می‌تواند اینجا اضافه شود
+  fileDiffs?: FileDiff[];
 }
 
 function parseAssistantContent(content: string) {
@@ -258,7 +260,16 @@ export default function AssistantMessage({
         return null;
       })}
 
-      {/* دکمه Undo برای پیام‌های technical با requestId */}
+      {/* File diffs — shown after content, before undo button */}
+      {metadata?.fileDiffs && metadata.fileDiffs.length > 0 && (
+        <div className="mt-1 space-y-0.5">
+          {metadata.fileDiffs.map((diff, i) => (
+            <FileDiffView key={i} diff={diff} />
+          ))}
+        </div>
+      )}
+
+      {/* Undo button */}
       {canShowUndo && (
         <div className="mt-3">
           <button

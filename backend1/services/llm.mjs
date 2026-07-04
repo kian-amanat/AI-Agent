@@ -124,6 +124,7 @@ export async function callLLM({
   maxTokens = 4000,
   temperature = 0.3,
   retries = 1,
+  stream: useStream = false,
 }) {
   const creds = await resolveCredentials(modelRoute);
 
@@ -190,6 +191,44 @@ export async function callLLM({
       console.log(`[LLM] Streamed ${contentBuf.length + reasoningBuf.length} chars (${reasoningBuf.length} reasoning + ${contentBuf.length} response)`);
     }
     return { content };
+  }
+
+  // ── Streaming accumulation path (avoids gateway timeouts on large prompts) ──
+  if (useStream) {
+    let contentBuf = "";
+    let lastErr = null;
+
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        contentBuf = "";
+        const stream = await client.chat.completions.create({
+          model: creds.model,
+          messages: fullMessages,
+          max_tokens: maxTokens,
+          temperature,
+          stream: true,
+        });
+
+        for await (const chunk of stream) {
+          const token = chunk.choices?.[0]?.delta?.content;
+          if (token) contentBuf += token;
+        }
+
+        lastErr = null;
+        break;
+      } catch (err) {
+        lastErr = err;
+        if (attempt < retries && isRetryableError(err)) {
+          await sleep(700 * (attempt + 1));
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    if (lastErr) throw lastErr;
+    if (!contentBuf.trim()) console.warn("[LLM] Empty after streaming accumulation.");
+    return { content: contentBuf };
   }
 
   // ── Normal model path: single request ─────────────────────────────────────

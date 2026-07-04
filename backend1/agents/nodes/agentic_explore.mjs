@@ -456,7 +456,7 @@ export async function agenticExploreNode(state) {
     let assistantMsg;
     try {
       if (isThinkingModel) {
-        // Stream tool calls to avoid gateway timeout
+        // Stream tool calls to avoid gateway timeout on reasoning models
         let contentBuf = "";
         const toolCallBufs = {}; // index → { id, name, argsBuf }
 

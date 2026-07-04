@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess_1783030879718_rm4cwb",
+  "requestId": "req_1783119721416_2g2a7o",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-03T23:02:38.793Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/components/chat/ThinkingTrace.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/components/chat/ThinkingTrace.tsx",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783030879718_rm4cwb/req_1783119721416_2g2a7o/chatbot__my-chatbot-ui__app__components__chat__ThinkingTrace.tsx.snap"
+    }
+  ]
+}

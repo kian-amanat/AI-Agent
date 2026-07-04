@@ -1,5 +1,6 @@
 import { Bot, CheckCircle, Layers, Search, Sparkles } from "lucide-react";
 import React from "react";
+import type { FileDiff } from "../../lib/api";
 
 export type Role = "user" | "assistant";
 
@@ -39,8 +40,10 @@ export interface Message {
       files_count?: number;
     };
     plan?: any;
+    planMetadata?: any;
     stage?: "analyzing" | "planning" | "validating" | "complete";
-    undoResult?: UndoResult; // نتیجه Undo روی این پیام
+    undoResult?: any;
+    fileDiffs?: FileDiff[];
   };
 }
 

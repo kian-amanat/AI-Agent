@@ -13,8 +13,8 @@ import { AIMessage } from "@langchain/core/messages";
 import { callLLM } from "../../services/llm.mjs";
 
 const MAX_PROMPT_FILES = 5;
-const MAX_FILE_CHARS = 14000;
-const MAX_TOTAL_CONTEXT_CHARS = 50000;
+const MAX_FILE_CHARS = 10000;
+const MAX_TOTAL_CONTEXT_CHARS = 20000;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -91,12 +91,61 @@ function shortenContent(content, maxChars = MAX_FILE_CHARS) {
   const text = normalizeSnippet(content);
   if (text.length <= maxChars) return text;
 
-  const headLen = Math.floor(maxChars * 0.72);
-  const tailLen = Math.floor(maxChars * 0.28);
+  const headLen = Math.floor(maxChars * 0.55);
+  const tailLen = maxChars - headLen;
   const head = text.slice(0, headLen);
   const tail = text.slice(-tailLen);
 
   return `${head}\n... [truncated ${text.length - headLen - tailLen} chars]\n${tail}`;
+}
+
+function shortenContentSmart(content, maxChars, userMsg) {
+  const text = normalizeSnippet(content);
+  if (text.length <= maxChars) return text;
+
+  const stopWords = new Set(["that", "this", "with", "from", "more", "have", "will", "just", "what", "your", "into", "over", "then", "them", "they", "make", "also", "each", "left", "right"]);
+  const keywords = String(userMsg || "")
+    .toLowerCase()
+    .replace(/[^\w\s[\]-]/g, " ")
+    .split(/\s+/)
+    .filter(w => w.length >= 3 && !stopWords.has(w));
+
+  const lines = text.split("\n");
+  const charsPerLine = Math.max(20, text.length / lines.length);
+
+  if (keywords.length > 0) {
+    const scores = lines.map(line => {
+      const lower = line.toLowerCase();
+      return keywords.reduce((s, kw) => s + (lower.includes(kw) ? 1 : 0), 0);
+    });
+
+    const maxScore = Math.max(...scores);
+    if (maxScore > 0) {
+      const bestLine = scores.indexOf(maxScore);
+      const windowLines = Math.floor(maxChars / charsPerLine);
+      const halfWindow = Math.floor(windowLines / 2);
+
+      const headLines = Math.min(25, bestLine);
+      const windowStart = Math.max(headLines, bestLine - halfWindow);
+      const windowEnd = Math.min(lines.length, windowStart + windowLines);
+
+      const parts = [];
+      if (headLines > 0) {
+        parts.push(lines.slice(0, headLines).join("\n"));
+      }
+      if (windowStart > headLines) {
+        parts.push(`... [lines ${headLines + 1}–${windowStart} not shown]`);
+      }
+      parts.push(lines.slice(windowStart, windowEnd).join("\n"));
+      if (windowEnd < lines.length) {
+        parts.push(`... [lines ${windowEnd + 1}–${lines.length} not shown]`);
+      }
+
+      return parts.join("\n");
+    }
+  }
+
+  return shortenContent(content, maxChars);
 }
 
 function scoreFileForPrompt(file, cleanMsg, rememberedTargetFile, investigation) {
@@ -370,7 +419,7 @@ function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToR
 
   for (const f of filesToShow) {
     const outline = buildJsxOutline(f.content, f.path);
-    const numbered = addLineNumbers(shortenContent(f.content));
+    const numbered = addLineNumbers(shortenContentSmart(f.content, MAX_FILE_CHARS, cleanMsg));
     const summary = f.summary ? `\nSummary: ${f.summary}` : "";
     const block = `### File: ${f.path}${summary}${outline}\n\`\`\`\n${numbered}\n\`\`\``;
 
@@ -611,8 +660,9 @@ async function generatePlanWithRetry({ system, content, modelRoute }) {
         system,
         messages: [{ role: "user", content }],
         modelRoute,
-        maxTokens: attempt === 0 ? 8000 : 4000,
+        maxTokens: attempt === 0 ? 6000 : 3000,
         temperature: 0,
+        stream: true,
       });
 
       rawResponse = result?.content || "";

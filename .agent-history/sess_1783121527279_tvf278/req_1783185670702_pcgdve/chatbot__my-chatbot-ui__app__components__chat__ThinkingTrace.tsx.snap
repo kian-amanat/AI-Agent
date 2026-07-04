@@ -1,0 +1,278 @@
+"use client";
+
+import React, { useEffect, useMemo, useRef, useState } from "react";
+import { AnimatePresence, motion } from "framer-motion";
+import {
+  ChevronDown,
+  Search,
+  FileText,
+  ListChecks,
+  Pencil,
+  Plus,
+  Trash2,
+  CheckCircle2,
+  Loader2,
+  Sparkles,
+} from "lucide-react";
+
+export type ThinkingStepKind =
+  | "route"
+  | "explore"
+  | "file_loaded"
+  | "plan"
+  | "edit"
+  | "create"
+  | "delete"
+  | "verify"
+  | "info";
+
+export interface ThinkingStep {
+  id: string;
+  kind: ThinkingStepKind;
+  text: string;
+  detail?: string;
+  status?: "running" | "done" | "error";
+  at: number;
+}
+
+const KIND_ICON: Record<ThinkingStepKind, React.ElementType> = {
+  route: Search,
+  explore: FileText,
+  file_loaded: FileText,
+  plan: ListChecks,
+  edit: Pencil,
+  create: Plus,
+  delete: Trash2,
+  verify: CheckCircle2,
+  info: Sparkles,
+};
+
+const KIND_ACCENT: Record<ThinkingStepKind, string> = {
+  route: "#ff9b5f",
+  explore: "#7dd3fc",
+  file_loaded: "#94a3b8",
+  plan: "#c084fc",
+  edit: "#60a5fa",
+  create: "#34d399",
+  delete: "#fb7185",
+  verify: "#4ade80",
+  info: "#94a3b8",
+};
+
+const KIND_TINT: Record<ThinkingStepKind, string> = {
+  route: "rgba(255,155,95,0.12)",
+  explore: "rgba(125,211,252,0.10)",
+  file_loaded: "rgba(148,163,184,0.08)",
+  plan: "rgba(192,132,252,0.10)",
+  edit: "rgba(96,165,250,0.10)",
+  create: "rgba(52,211,153,0.10)",
+  delete: "rgba(251,113,133,0.10)",
+  verify: "rgba(74,222,128,0.10)",
+  info: "rgba(148,163,184,0.08)",
+};
+
+function formatDuration(ms: number): string {
+  const s = Math.max(1, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${s % 60}s`;
+}
+
+export default function ThinkingTrace({
+  steps,
+  isActive,
+  startedAt,
+}: {
+  steps: ThinkingStep[];
+  isActive: boolean;
+  startedAt: number | null;
+}) {
+  const [expanded, setExpanded] = useState(true);
+  const [elapsed, setElapsed] = useState(0);
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!isActive || !startedAt) return;
+    const id = setInterval(() => setElapsed(Date.now() - startedAt), 200);
+    return () => clearInterval(id);
+  }, [isActive, startedAt]);
+
+  useEffect(() => {
+    if (!isActive && startedAt) {
+      const t = setTimeout(() => setExpanded(false), 650);
+      return () => clearTimeout(t);
+    }
+  }, [isActive, startedAt]);
+
+  useEffect(() => {
+    if (expanded && scrollRef.current) {
+      scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }
+  }, [steps, expanded]);
+
+  const totalDuration = useMemo(() => {
+    if (!startedAt) return 0;
+    if (isActive) return elapsed;
+    const last = steps[steps.length - 1]?.at ?? startedAt;
+    return Math.max(elapsed, last - startedAt);
+  }, [steps, isActive, elapsed, startedAt]);
+
+  if (steps.length === 0 && !isActive) return null;
+
+  const lastIndex = steps.length - 1;
+
+  return (
+    <div className="mb-2 ml-1">
+      <motion.button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        whileTap={{ scale: 0.985 }}
+        className="group inline-flex items-center gap-2 rounded-full px-0 py-0 text-left"
+        style={{
+          background: "transparent",
+          border: "none",
+          boxShadow: "none",
+        }}
+      >
+        <span className="relative flex h-2.5 w-2.5 flex-shrink-0 items-center justify-center">
+          {isActive && (
+            <motion.span
+              className="absolute inset-0 rounded-full"
+              animate={{ scale: [1, 2.1, 1], opacity: [0.55, 0, 0.55] }}
+              transition={{ repeat: Infinity, duration: 1.55, ease: "easeOut" }}
+              style={{
+                background: "radial-gradient(circle, rgba(255,140,84,0.95), rgba(255,140,84,0))",
+              }}
+            />
+          )}
+          <span
+            className="relative h-2 w-2 rounded-full"
+            style={{
+              background: isActive
+                ? "linear-gradient(135deg, #ff9b5f, #ff5a45)"
+                : "rgba(255,255,255,0.24)",
+              boxShadow: isActive ? "0 0 10px rgba(255,122,61,0.65)" : "none",
+            }}
+          />
+        </span>
+
+        <span className="relative text-[12.5px] font-medium tracking-[-0.01em]">
+          {isActive ? (
+            <span
+              className="bg-clip-text text-transparent"
+              style={{
+                backgroundImage:
+                  "linear-gradient(90deg, rgba(255,189,140,1), rgba(255,104,80,1))",
+              }}
+            >
+              Thinking…
+            </span>
+          ) : (
+            <span className="text-white/50">
+              Thought for {formatDuration(totalDuration)}
+            </span>
+          )}
+        </span>
+
+        {steps.length > 0 && (
+          <span className="rounded-full bg-white/[0.04] px-1.5 py-0.5 text-[10px] font-medium tabular-nums text-white/30">
+            {steps.length}
+          </span>
+        )}
+
+        <motion.div
+          animate={{ rotate: expanded ? 0 : -90 }}
+          transition={{ duration: 0.22, ease: "easeOut" }}
+          className="flex-shrink-0"
+        >
+          <ChevronDown className="h-3.5 w-3.5 text-white/25 transition-colors group-hover:text-white/45" strokeWidth={2} />
+        </motion.div>
+      </motion.button>
+
+            <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0, y: -4 }}
+            animate={{ height: "auto", opacity: 1, y: 0 }}
+            exit={{ height: 0, opacity: 0, y: -4 }}
+            transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+            className="overflow-hidden"
+          >
+                        <div ref={scrollRef} className="relative mt-1.5 max-h-[320px] overflow-y-auto pl-4 pr-1">
+              {/* Gray vertical connecting line — centered on the bullet dot */}
+                                                        <div className="absolute left-[29.5px] top-2.5 bottom-3 w-px bg-white/[0.15]" />
+
+              <div className="space-y-0 py-0.5">
+                <AnimatePresence initial={false}>
+                  {steps.map((step, idx) => {
+                    const Icon = KIND_ICON[step.kind] || Sparkles;
+                    const accent = KIND_ACCENT[step.kind] || "#94a3b8";
+                    const isLive = isActive && idx === lastIndex;
+                    const isError = step.status === "error";
+
+                    return (
+                      <motion.div
+                        key={step.id}
+                        layout
+                        initial={{ opacity: 0, x: -6 }}
+                        animate={{ opacity: 1, x: 0 }}
+                        exit={{ opacity: 0, x: -4 }}
+                        transition={{ duration: 0.22, ease: "easeOut" }}
+                        className="relative flex items-start gap-3 py-1.5 pl-1"
+                      >
+                        {/* Bright Orange Circular Bullet Point */}
+                        <div className="relative z-10 flex h-5 w-5 flex-shrink-0 items-center justify-center pt-1">
+                          {isLive && (
+                            <motion.span
+                              className="absolute inset-0 rounded-full"
+                              animate={{ opacity: [0.2, 0.6, 0.2], scale: [0.9, 1.3, 0.9] }}
+                              transition={{ repeat: Infinity, duration: 1.5, ease: "easeInOut" }}
+                              style={{
+                                background: "rgba(249, 115, 22, 0.4)",
+                              }}
+                            />
+                          )}
+                          <div
+                            className="relative h-2.5 w-2.5 rounded-full"
+                            style={{
+                              background: isLive
+                                ? "linear-gradient(135deg, #ff9b5f, #ff5a45)"
+                                : "rgba(255,255,255,0.22)",
+                              boxShadow: isLive ? "0 0 8px rgba(255,122,61,0.6)" : "none",
+                            }}
+                          />
+                        </div>
+
+                        <div className="min-w-0 flex-1">
+                          <span
+                            className="text-[12.5px] leading-5 tracking-[-0.01em]"
+                            style={{
+                              color: isLive
+                                ? "rgba(255,255,255,0.92)"
+                                : isError
+                                ? "rgba(255,170,170,0.88)"
+                                : "rgba(255,255,255,0.56)",
+                              fontWeight: isLive ? 500 : 400,
+                            }}
+                          >
+                            {step.text}
+                          </span>
+
+                          {step.detail && (
+                            <span className="ml-1.5 rounded-md bg-white/[0.04] px-1.5 py-px font-mono text-[10.5px] text-white/35">
+                              {step.detail.split("/").pop()}
+                            </span>
+                          )}
+                        </div>
+                      </motion.div>
+                    );
+                  })}
+                </AnimatePresence>
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
