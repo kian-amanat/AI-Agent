@@ -39,7 +39,7 @@ RULES
 - Keep greetings short.
 - For technical questions, be structured and useful.
 - Do not mention inability to edit files here; file editing is handled by the workspace pipeline.
-- Do not write code blocks unless the user explicitly asks for code.`;
+- CRITICAL: NEVER paste code snippets, code blocks, or code examples in your response. If the user is asking to modify, fix, update, or change any code or UI, reply with a single short sentence such as "On it — applying that change now." The edit pipeline will handle the actual file changes. Only answer conceptual or explanatory questions in text.`;
 
 // Detect explicit memory-management commands (not general questions about memory)
 function isForgetCommand(msg) {

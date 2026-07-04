@@ -106,6 +106,8 @@ db.exec(`
 
 ensureColumn("sessions", "user_id", "INTEGER");
 ensureColumn("messages", "user_id", "INTEGER");
+ensureColumn("messages", "request_id", "TEXT");
+ensureColumn("messages", "file_diffs", "TEXT");
 ensureColumn("session_memory", "user_id", "INTEGER");
 
 db.exec(`
@@ -253,7 +255,7 @@ export function createSession(id, userId, title = null) {
   ensureMemoryRow(id, userId);
 }
 
-export function saveMessage(sessionId, userId, role, content, intent = null) {
+export function saveMessage(sessionId, userId, role, content, intent = null, requestId = null, fileDiffs = null) {
   const now = nowIso();
 
   ensureSessionOwnership(sessionId, userId);
@@ -265,9 +267,9 @@ export function saveMessage(sessionId, userId, role, content, intent = null) {
   `).run(now, sessionId, userId);
 
   db.prepare(`
-    INSERT INTO messages (session_id, user_id, role, content, intent, created_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `).run(sessionId, userId, role, content, intent, now);
+    INSERT INTO messages (session_id, user_id, role, content, intent, created_at, request_id, file_diffs)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(sessionId, userId, role, content, intent, now, requestId ?? null, fileDiffs ? JSON.stringify(fileDiffs) : null);
 
   ensureMemoryRow(sessionId, userId);
 
@@ -285,7 +287,7 @@ export function saveMessage(sessionId, userId, role, content, intent = null) {
 export function getSessionMessages(sessionId, userId, limit = 20) {
   return db
     .prepare(`
-      SELECT role, content, intent, created_at
+      SELECT id, role, content, intent, created_at, request_id, file_diffs
       FROM messages
       WHERE session_id = ? AND user_id = ?
       ORDER BY id DESC

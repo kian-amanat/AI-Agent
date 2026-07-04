@@ -49,9 +49,9 @@ const PIPELINE_PATTERNS = [
 
 const FILE_EXTENSION = /\.(tsx?|jsx?|mjs|cjs|css|scss|sass|less|json|md|ya?ml|html|xml|env|sh|py|rs|go|png|jpe?g|gif|svg|webp|ico)\b/i;
 const FILE_PATH = /\b(src\/|app\/|components?\/|pages?\/|routes?\/|lib\/|utils?\/|hooks?\/|api\/|services?\/|public\/|styles?\/)\S+/i;
-const COMPONENT_NAME = /\b(chatsidebar|chatheader|chatcomposer|agentpipeline|thinkingtrace|authguard|emptystatecard|typingindicator|assistantmessage|useagenthook|usethinkingsteps|planchanges|kodo_graph|graph_runner|workingset|modelrouter)\b/i;
-const CODE_EDIT_VERB = /\b(create|write|generate|build|refactor|rewrite|implement|scaffold|migrate|lint|typecheck|import|export|instantiate|destructure|annotate)\b/i;
-const EDIT_VERB = /\b(remove|delete|add|change|make|update|fix|rename|move|edit|modify|replace|adjust|tweak|set|put|insert|clear|hide|show|toggle|disable|enable|style|color|colour|animate|resize|rotate|translate|scale)\b/i;
+const COMPONENT_NAME = /\b(chatsidebar|chatheader|chatcomposer|agentpipeline|thinkingtrace|authguard|emptystatecard|typingindicator|assistantmessage|useagenthook|usethinkingsteps|planchanges|kodo_graph|graph_runner|workingset|modelrouter|settings?|settingbutton|settingspanel|settingsmodal|chatinput|inputarea|sendbutton|composer)\b/i;
+const CODE_EDIT_VERB = /\b(create|write|generate|build|refactor|rewrite|implement|scaffold|migrate|lint|typecheck|import|export|instantiate|destructure|annotate|center|align|position|margin|padding|spacing|layout|flex|grid|border|shadow|opacity|transition|animations?|hover|design|minimal|rounded|cursor|icon|button|badge|pill|chip|card|modal|dropdown|tooltip|sidebar|navbar|header|footer|theme|dark|light|gradient|blur|backdrop|ring|outline|underline|bold|italic|font|text|size|width|height|gap|wrap|overflow|scroll|sticky|fixed|absolute|relative|z-index|radius|rotate|scale|translate|skew|clip|mask|filter|brightness|contrast|saturate|invert)\b/i;
+const EDIT_VERB = /\b(remove|delete|add|change|make|update|fix|rename|move|edit|modify|replace|adjust|tweak|set|put|insert|clear|hide|show|toggle|disable|enable|style|color|colour|animate|resize|rotate|translate|scale|improve|enhance|beautify|polish|refine|simplify|clean|smooth|soften|sharpen|brighten|darken|lighten)\b/i;
 
 const DEBUG_HINTS = [
   /bad request/i,
@@ -117,7 +117,7 @@ function classifyByHeuristic(message) {
   if (hasComponentName) return "explore";
   if (hasCodeEditVerb) return "explore";
 
-  if (wordCount <= 15 && EDIT_VERB.test(cleanMsg) && !isQuestion) {
+  if (wordCount <= 40 && EDIT_VERB.test(cleanMsg) && !isQuestion) {
     return "explore";
   }
 
@@ -150,7 +150,7 @@ export async function routerNode(state) {
     message:
       intent === "investigate" ? "🧠 Starting investigation mode..." :
       intent === "explore" ? "📂 Entering workspace mode..." :
-      intent === "pipeline" ? "🚀 Starting full pipeline..." :
+      intent === "pipeline" ? "📂 Entering workspace mode..." :
       intent === "test" ? "🧪 Running tests..." :
       intent === "install" ? "📦 Installing packages..." :
       "💬 Preparing response...",

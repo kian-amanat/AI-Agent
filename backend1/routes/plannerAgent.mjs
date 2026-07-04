@@ -269,9 +269,18 @@ export default async function plannerAgentRoute(fastify) {
       metadata:   { intent: "graph", ...modelMeta },
     })}\n\n`);
 
+    let contentEmitted = false;
+    const collectedFileDiffs = [];
     function emit(event) {
       try {
         if (!reply.raw.writableEnded) {
+          if (event.type === "content") contentEmitted = true;
+          if (event.type === "file_diff") {
+            collectedFileDiffs.push({
+              action: event.action, path: event.path,
+              language: event.language, hunks: event.hunks,
+            });
+          }
           reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
         }
       } catch (e) {
@@ -279,43 +288,59 @@ export default async function plannerAgentRoute(fastify) {
       }
     }
 
-    // ── Run the LangGraph ─────────────────────────────────────
+    // ── Run the LangGraph (with hard timeout so SSE always closes) ───────────
+    const GRAPH_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes max
+
     let finalAnswer = "";
     let editedFiles = [];
 
-    try {
-      const result = await runKodoGraph({
-        userMessage:          plannerContextMessage,
-        rememberedTargetFile: rememberedFile,   // ★ memory in
-        sessionId,
-        requestId,
-        userId,
-        workspacePath,
-        modelRoute,
-        attachmentPaths: attachment_paths,
-        emit,
-      });
+    const graphPromise = runKodoGraph({
+      userMessage:          plannerContextMessage,
+      rememberedTargetFile: rememberedFile,
+      sessionId,
+      requestId,
+      userId,
+      workspacePath,
+      modelRoute,
+      attachmentPaths: attachment_paths,
+      emit,
+    }).then(r => ({ ok: true, result: r })).catch(e => ({ ok: false, error: e }));
 
-      finalAnswer = result.finalAnswer || "";
-      editedFiles = result.editedFiles || [];   // ★ files out
-    } catch (graphError) {
+    const timeoutPromise = new Promise(resolve =>
+      setTimeout(() => resolve({ ok: false, timedOut: true }), GRAPH_TIMEOUT_MS)
+    );
+
+    const raceResult = await Promise.race([graphPromise, timeoutPromise]);
+
+    if (raceResult.timedOut) {
+      console.warn("[Agent] ⏱️ Graph timeout — closing SSE stream");
+      // Emit content so the message is non-empty (prevents UI from showing "Running agent…")
+      emit({ type: "content", content: "The task is taking longer than expected. Please try again." });
+      emit({ type: "done", request_id: requestId, summary: "",
+             metadata: { type: "graph", request_id: requestId, ...modelMeta } });
+      reply.raw.end();
+      return reply;
+    }
+
+    if (!raceResult.ok) {
+      const graphError = raceResult.error;
       console.error("❌ LangGraph error:", graphError);
-
       emit({ type: "error", error: "Graph execution failed", details: graphError.message });
       reply.raw.end();
-
       saveMessage(sessionId, userId, "assistant", `Error: ${graphError.message}`, "error");
       touchSession(sessionId, userId);
       syncSessionMemory(sessionId, userId, { assistantMessage: `Error: ${graphError.message}` });
       return reply;
     }
 
+    finalAnswer = raceResult.result.finalAnswer || "";
+    editedFiles  = raceResult.result.editedFiles  || [];
+
     // ── Done ──────────────────────────────────────────────────
-    // NOTE: the answer node already streamed the content via emit().
-    // The explore/plan path doesn't stream, so we emit content here
-    // only for non-streaming (edit) responses.
-    const isEditResponse = (editedFiles || []).length > 0;
-    if (finalAnswer && isEditResponse) {
+    // The answer node streams content chunks during execution (contentEmitted=true).
+    // Explore/plan paths never emit content events — emit finalAnswer now so the
+    // UI message is never left empty (which causes "Running agent…" to persist).
+    if (finalAnswer && !contentEmitted) {
       emit({ type: "content", content: finalAnswer });
     }
 
@@ -332,7 +357,11 @@ export default async function plannerAgentRoute(fastify) {
 
     reply.raw.end();
 
-    saveMessage(sessionId, userId, "assistant", finalAnswer || "(no output)", "graph");
+    saveMessage(
+      sessionId, userId, "assistant", finalAnswer || "(no output)", "graph",
+      requestId,
+      collectedFileDiffs.length > 0 ? collectedFileDiffs : null,
+    );
     touchSession(sessionId, userId);
 
     // ★ Memory: record which files were edited this turn

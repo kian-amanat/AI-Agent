@@ -122,7 +122,7 @@ export default function ThinkingTrace({
   const lastIndex = steps.length - 1;
 
   return (
-    <div className="mb-2">
+    <div className="mb-2 ml-1">
       <motion.button
         type="button"
         onClick={() => setExpanded((v) => !v)}
@@ -189,7 +189,7 @@ export default function ThinkingTrace({
         </motion.div>
       </motion.button>
 
-      <AnimatePresence initial={false}>
+            <AnimatePresence initial={false}>
         {expanded && (
           <motion.div
             initial={{ height: 0, opacity: 0, y: -4 }}
@@ -198,28 +198,39 @@ export default function ThinkingTrace({
             transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
             className="overflow-hidden"
           >
-            <div ref={scrollRef} className="relative mt-1.5 max-h-[320px] overflow-y-auto pr-1">
-              <div className="absolute bottom-3 left-[6px] top-2.5 w-px bg-white/[0.06]" />
-              <motion.div
-                className="absolute left-[6px] top-2.5 w-px"
-                initial={{ height: 0 }}
-                animate={{ height: isActive ? "calc(100% - 30px)" : "calc(100% - 22px)" }}
-                transition={{ duration: 0.45, ease: "easeOut" }}
-                style={{
-                  background:
-                    "linear-gradient(180deg, rgba(255,155,95,0.95), rgba(255,90,69,0.45) 75%, transparent)",
-                  opacity: 0.45,
-                }}
-              />
+                        <div ref={scrollRef} className="relative mt-1.5 max-h-[320px] overflow-y-auto pl-4 pr-1">
+              {/* Gray vertical connecting line — centered on the bullet dot */}
+                                                        <div className="absolute left-[29.5px] top-2.5 bottom-3 w-px bg-white/[0.15]" />
 
-              <div className="space-y-0.5 py-0.5">
+              <div className="space-y-0 py-0.5">
                 <AnimatePresence initial={false}>
                   {steps.map((step, idx) => {
-                    const Icon = KIND_ICON[step.kind] || Sparkles;
+                                        const Icon = KIND_ICON[step.kind] || Sparkles;
                     const accent = KIND_ACCENT[step.kind] || "#94a3b8";
-                    const tint = KIND_TINT[step.kind] || "rgba(148,163,184,0.08)";
                     const isLive = isActive && idx === lastIndex;
+                    const isPrevious = isActive && idx === lastIndex - 1;
+                    const isDone = !isActive;
                     const isError = step.status === "error";
+
+                    // Determine bullet color based on state
+                    let bulletBackground = "rgba(255,255,255,0.22)";
+                    let bulletShadow = "none";
+                    let bulletPulse = false;
+
+                    if (isLive) {
+                      // Last step while thinking: orange
+                      bulletBackground = "linear-gradient(135deg, #ff9b5f, #ff5a45)";
+                      bulletShadow = "0 0 8px rgba(255,122,61,0.6)";
+                      bulletPulse = true;
+                    } else if (isPrevious) {
+                      // Previous step while thinking: green
+                      bulletBackground = "linear-gradient(135deg, #34d399, #059669)";
+                      bulletShadow = "0 0 6px rgba(52,211,153,0.5)";
+                    } else if (isDone) {
+                      // Thinking done: all green for success
+                      bulletBackground = "linear-gradient(135deg, #34d399, #059669)";
+                      bulletShadow = "0 0 6px rgba(52,211,153,0.5)";
+                    }
 
                     return (
                       <motion.div
@@ -229,55 +240,28 @@ export default function ThinkingTrace({
                         animate={{ opacity: 1, x: 0 }}
                         exit={{ opacity: 0, x: -4 }}
                         transition={{ duration: 0.22, ease: "easeOut" }}
-                        className="relative flex items-center gap-2.5 rounded-2xl py-1.25 pl-[38px] pr-2.5"
+                        className="relative flex items-start gap-3 py-1.5 pl-1"
                       >
-                        <div className="absolute left-[10px] top-1/2 z-10 -translate-y-1/2">
-                          {isLive && (
+                        {/* Circular Bullet Point */}
+                        <div className="relative z-10 flex h-5 w-5 flex-shrink-0 items-center justify-center pt-1">
+                          {bulletPulse && (
                             <motion.span
-                              className="absolute -inset-2 rounded-full"
-                              animate={{ opacity: [0.3, 0.85, 0.3], scale: [0.82, 1.25, 0.82] }}
+                              className="absolute inset-0 rounded-full"
+                              animate={{ opacity: [0.2, 0.6, 0.2], scale: [0.9, 1.3, 0.9] }}
                               transition={{ repeat: Infinity, duration: 1.5, ease: "easeInOut" }}
                               style={{
-                                background:
-                                  "radial-gradient(circle, rgba(255,125,68,0.55), transparent 68%)",
+                                background: "rgba(249, 115, 22, 0.4)",
                               }}
                             />
                           )}
-
                           <div
-                            className="relative flex h-6 w-6 items-center justify-center rounded-full"
+                            className="relative h-2.5 w-2.5 rounded-full"
                             style={{
-                              background: isLive
-                                ? "linear-gradient(135deg, rgba(255,155,95,1), rgba(255,90,69,1))"
-                                : isError
-                                ? "rgba(251,113,133,0.08)"
-                                : "rgba(255,255,255,0.025)",
-                              border: "none",
-                              boxShadow: isLive
-                                ? "0 0 18px rgba(255,122,61,0.55)"
-                                : "none",
+                              background: bulletBackground,
+                              boxShadow: bulletShadow,
                             }}
-                          >
-                            {isLive ? (
-                              <Loader2 className="h-3 w-3 animate-spin text-white" strokeWidth={2.7} />
-                            ) : (
-                              <Icon
-                                className="h-[13px] w-[13px]"
-                                strokeWidth={2.2}
-                                style={{ color: isError ? "#fb7185" : accent }}
-                              />
-                            )}
-                          </div>
+                          />
                         </div>
-
-                        <div
-                          className="absolute left-[24px] top-1/2 h-px w-4 -translate-y-1/2 opacity-50"
-                          style={{
-                            background: isLive
-                              ? "linear-gradient(90deg, rgba(255,155,95,0.95), rgba(255,155,95,0.15))"
-                              : "linear-gradient(90deg, rgba(255,255,255,0.08), rgba(255,255,255,0.02))",
-                          }}
-                        />
 
                         <div className="min-w-0 flex-1">
                           <span
@@ -300,18 +284,6 @@ export default function ThinkingTrace({
                             </span>
                           )}
                         </div>
-
-                        {isLive && (
-                          <motion.div
-                            className="h-1.5 w-1.5 rounded-full"
-                            animate={{ opacity: [0.35, 1, 0.35] }}
-                            transition={{ repeat: Infinity, duration: 1.2, ease: "easeInOut" }}
-                            style={{
-                              background:
-                                "linear-gradient(135deg, rgba(255,155,95,1), rgba(255,90,69,1))",
-                            }}
-                          />
-                        )}
                       </motion.div>
                     );
                   })}
