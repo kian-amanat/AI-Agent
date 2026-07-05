@@ -24,6 +24,7 @@ export async function runKodoGraph({
   modelRoute,
   attachmentPaths = [],
   emit,
+  abortSignal = null,
 }) {
   const graph = getGraph();
 
@@ -43,8 +44,9 @@ export async function runKodoGraph({
     requestId,
     userId,
     modelRoute,
-    attachmentPaths,
+        attachmentPaths,
     emit,
+    abortSignal,
   };
 
   console.log(`[KodoGraph] 🚀 session=${sessionId} request=${requestId}`);
@@ -52,10 +54,21 @@ export async function runKodoGraph({
   console.log(`[KodoGraph]    remembered file=${rememberedTargetFile || "(none)"}`);
   console.log(`[KodoGraph]    message="${String(userMessage).slice(0, 80)}"`);
 
-  let finalState;
+    let finalState;
   try {
+    // Check if already aborted before starting
+    if (abortSignal?.aborted) {
+      throw new Error("Aborted");
+    }
+
     finalState = await graph.invoke(initialState);
   } catch (err) {
+    // Handle abort specifically
+    if (err.message === "Aborted" || (abortSignal?.aborted)) {
+      console.log("[KodoGraph] ⛔ Graph execution aborted");
+      emit?.({ type: "content", content: "Operation cancelled." });
+      return { finalAnswer: "Operation cancelled.", editedFiles: [] };
+    }
     console.error("[KodoGraph] ❌ Graph error:", err);
     emit?.({ type: "error", error: err.message });
     return { finalAnswer: `Graph error: ${err.message}`, editedFiles: [] };
@@ -68,6 +81,7 @@ export async function runKodoGraph({
     .filter(r => r.success && (r.action === "edit" || r.action === "create") && r.path)
     .map(r => r.path);
 
+    // Note: abortSignal cleanup is handled in plannerAgent.mjs after runKodoGraph resolves
   console.log(`[KodoGraph] ✅ Done. Answer=${finalAnswer.length} chars, editedFiles=${editedFiles.length}`);
 
   return { finalAnswer, editedFiles };

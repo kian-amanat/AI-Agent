@@ -288,8 +288,13 @@ export default async function plannerAgentRoute(fastify) {
       }
     }
 
-    // ── Run the LangGraph (with hard timeout so SSE always closes) ───────────
+        // ── Run the LangGraph (with hard timeout so SSE always closes) ───────────
     const GRAPH_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes max
+
+    // Client disconnect handling
+    const controller = new AbortController();
+    const abortListener = () => controller.abort();
+    request.raw.on("close", abortListener);
 
     let finalAnswer = "";
     let editedFiles = [];
@@ -304,6 +309,7 @@ export default async function plannerAgentRoute(fastify) {
       modelRoute,
       attachmentPaths: attachment_paths,
       emit,
+      abortSignal: controller.signal,
     }).then(r => ({ ok: true, result: r })).catch(e => ({ ok: false, error: e }));
 
     const timeoutPromise = new Promise(resolve =>
@@ -385,12 +391,15 @@ export default async function plannerAgentRoute(fastify) {
       }).catch(err => console.warn("[AgentMemory] background write failed:", err.message));
     }
 
-    syncSessionMemory(sessionId, userId, {
+        syncSessionMemory(sessionId, userId, {
       assistantMessage: finalAnswer,
       task:             effectiveMessage,
       taskType:         "graph",
       targetFile:       editedFiles[0] || "",
     });
+
+    // Cleanup abort listener to prevent memory leaks
+    request.raw.removeListener("close", abortListener);
 
     return reply;
   });

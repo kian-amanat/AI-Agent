@@ -28,7 +28,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..");
 
-const MAX_LOOP_ITERATIONS = 12;
+const MAX_LOOP_ITERATIONS = 6;
 const MAX_FILE_BYTES = 80_000;
 const MAX_GREP_RESULTS = 30;
 const MAX_TOOL_OUTPUT_CHARS = 8_000;
@@ -380,9 +380,9 @@ REPEAT TASK: if memory shows you've worked here before, load the relevant topic 
 RULES:
 1. Read every file you intend to modify — never guess contents
 2. Follow imports only when they directly affect your change
-3. Stop as soon as you have read all files you intend to edit
-4. 4–8 tool calls is usually enough; do not over-explore
-5. When you call ready_to_plan, list only the files you will actually change
+3. Stop as soon as you have read ALL files you intend to edit
+4. For single-change requests: 4–6 tool calls is enough. For requests with MULTIPLE distinct tasks: read ALL relevant files before calling ready_to_plan — one file per task minimum.
+5. When you call ready_to_plan, list ALL files you will actually change (one per task)
 
 WORKSPACE SNAPSHOT:
 ${snapshot}
@@ -396,6 +396,7 @@ Call tools now. Start with what is most directly relevant.`;
 
 export async function agenticExploreNode(state) {
   const {
+    intent = "",
     workspacePath,
     userMessage,
     modelRoute,
@@ -447,9 +448,80 @@ export async function agenticExploreNode(state) {
   let readySignal = null;
   let iteration = 0;
 
+  // ── Fast-path: skip LLM loop when explicit file names are in the message ──
+  // For pure feature/edit requests ("explore" intent) the user often names the
+  // exact files they want changed. Pre-loading them avoids 12 LLM round-trips.
+  if (intent === "explore") {
+    const EXPLICIT_FILE_RE = /\b([\w\-.]+\.(tsx?|jsx?|mjs|cjs|css|scss|json))\b/gi;
+    const mentionedBases = [
+      ...new Set([...cleanMessage.matchAll(EXPLICIT_FILE_RE)].map(m => m[1].toLowerCase())),
+    ];
+
+    if (mentionedBases.length > 0) {
+      const allFiles = await walkWorkspace(root, 10);
+      const codeFiles = allFiles.filter(f => !f.isDir);
+
+      for (const base of mentionedBases) {
+        const match = codeFiles.find(f => path.basename(f.path).toLowerCase() === base);
+        if (match) {
+          const absPath = path.resolve(root, match.path);
+          const content = await readFileSafe(absPath);
+          if (content) loadedFiles.set(match.path, { path: match.path, content, size: content.length, score: 200 });
+        }
+      }
+
+      // Activate fast-path as long as at least one named file was loaded.
+      // Missing files will appear as read_only steps in plan_changes, which is
+      // far better than a 5-minute LLM loop timeout.
+      if (loadedFiles.size > 0) {
+        const missing = mentionedBases.filter(b => ![...loadedFiles.keys()].some(p => path.basename(p).toLowerCase() === b));
+        console.log(`[AgenticExplore] Fast-path: loaded ${loadedFiles.size}/${mentionedBases.length} named file(s), skipping LLM loop${missing.length ? ` (not found: ${missing.join(', ')})` : ''}`);
+        readySignal = {
+          summary: `Fast-path load of explicitly named file(s): ${[...loadedFiles.keys()].join(', ')}`,
+          priorityFiles: [...loadedFiles.keys()],
+          rootCause: null,
+        };
+        iteration = MAX_LOOP_ITERATIONS; // skip while loop
+      }
+    }
+  }
+
+  // ── Backend directory fast-path ───────────────────────────────────────────
+  // When the user asks to create/add something in "backend1" without naming a
+  // specific file, pre-load the key backbone files (route, runner, graph) so
+  // planning has the patterns it needs without any LLM iterations.
+  if (intent === "explore" && loadedFiles.size === 0) {
+    const backendRef = /\bbackend1?\b/i.test(cleanMessage);
+    const createAction = /\b(create|add|implement|build|write|generate|abort|controller|cancel|stop|feature|function)\b/i.test(cleanMessage);
+    if (backendRef && createAction) {
+      const BACKEND_KEY_FILES = [
+        "backend1/routes/plannerAgent.mjs",
+        "backend1/services/graph_runner.mjs",
+        "backend1/agents/kodo_graph.mjs",
+      ];
+      for (const relPath of BACKEND_KEY_FILES) {
+        const absPath = path.resolve(root, relPath);
+        const content = await readFileSafe(absPath);
+        if (content) {
+          loadedFiles.set(relPath, { path: relPath, content, size: content.length, score: 200 });
+        }
+      }
+      if (loadedFiles.size > 0) {
+        console.log(`[AgenticExplore] Backend fast-path: pre-loaded ${loadedFiles.size} files, skipping LLM loop`);
+        readySignal = {
+          summary: `Backend fast-path: loaded key backend files — plannerAgent, graph_runner, kodo_graph`,
+          priorityFiles: [...loadedFiles.keys()],
+          rootCause: null,
+        };
+        iteration = MAX_LOOP_ITERATIONS; // skip while loop
+      }
+    }
+  }
+
   // ── Agentic loop ──────────────────────────────────────────────────────────
 
-  while (iteration < MAX_LOOP_ITERATIONS) {
+    while (iteration < MAX_LOOP_ITERATIONS) {
+    if (state?.abortSignal?.aborted) break;
     iteration++;
     console.log(`[AgenticExplore] Iteration ${iteration}/${MAX_LOOP_ITERATIONS}`);
 
@@ -504,7 +576,7 @@ export async function agenticExploreNode(state) {
           tools: EXPLORATION_TOOLS,
           tool_choice: "auto",
           temperature: 0,
-          max_tokens: 1500,
+          max_tokens: 700,
         });
         assistantMsg = response.choices?.[0]?.message;
       }

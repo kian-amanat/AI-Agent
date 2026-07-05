@@ -1,5 +1,5 @@
 import React from "react";
-import { RotateCcw, Loader2, Check } from "lucide-react";
+import { RotateCcw, Loader2, Check, Copy } from "lucide-react";
 import FileDiffView from "./FileDiffView";
 import type { FileDiff } from "../../lib/api";
 

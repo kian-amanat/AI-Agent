@@ -1,0 +1,20 @@
+{
+  "sessionId": "sess_1783013164444_k4ab1m",
+  "requestId": "req_1783269033681_pas8wv",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-05T16:32:36.970Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/hooks/useAgentPipeline.ts",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/hooks/useAgentPipeline.ts",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783013164444_k4ab1m/req_1783269033681_pas8wv/chatbot__my-chatbot-ui__app__hooks__useAgentPipeline.ts.snap"
+    },
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/lib/api.ts",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/lib/api.ts",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783013164444_k4ab1m/req_1783269033681_pas8wv/chatbot__my-chatbot-ui__app__lib__api.ts.snap"
+    }
+  ]
+}

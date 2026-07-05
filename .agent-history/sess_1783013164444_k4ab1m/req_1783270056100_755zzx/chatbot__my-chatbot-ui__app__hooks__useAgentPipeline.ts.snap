@@ -1,0 +1,180 @@
+"use client";
+
+import { useState, useRef, useCallback } from "react";
+import type { SSEEvent } from "../lib/api";
+
+export type AgentStage =
+  | "idle"
+  | "planner"
+  | "reading"
+  | "mutate_files"
+  | "validate"
+  | "complete";
+
+export type PipelineAgentEvent =
+  | { type: "stage"; stageKey: AgentStage; at: number }
+  | { type: "plan"; text: string; at: number }
+  | { type: "log"; stageKey?: AgentStage; message: string; at: number }
+  | { type: "file_update"; path: string; operation: "create" | "update"; at: number }
+  | { type: "complete"; summary: string; at: number };
+
+// Maps backend progress.stage strings → our AgentStage keys
+const STAGE_MAP: Record<string, AgentStage> = {
+  pipeline_start:  "planner",
+  planning:        "planner",
+  planner:         "planner",
+  scaffold:        "reading",
+  reading:         "reading",
+  codegen:         "mutate_files",
+  mutate_files:    "mutate_files",
+  testing:         "validate",
+  validate:        "validate",
+  fixing:          "validate",
+  completed:       "complete",
+  complete:        "complete",
+};
+
+// Maps AgentStage → stageIndex (for the panel)
+const STAGE_INDEX: Record<AgentStage, number> = {
+  idle:         0,
+  planner:      0,
+  reading:      1,
+  mutate_files: 2,
+  validate:     3,
+  complete:     4,
+};
+
+// Progress % per stage
+const STAGE_PROGRESS: Record<AgentStage, number> = {
+  idle:         0,
+  planner:      15,
+  reading:      35,
+  mutate_files: 60,
+  validate:     85,
+  complete:     100,
+};
+
+export function useAgentPipeline() {
+  const [stage, setStage]       = useState<AgentStage>("idle");
+  const [active, setActive]     = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [stageIndex, setStageIndex] = useState(0);
+  const [events, setEvents]     = useState<PipelineAgentEvent[]>([]);
+    const [liveLog, setLiveLog]   = useState<string>("");
+  const abortControllerRef = useRef<AbortController | null>(null);
+
+  const pushEvent = useCallback((e: PipelineAgentEvent) => {
+    setEvents(prev => [...prev.slice(-40), e]); // keep last 40
+  }, []);
+
+  const advanceTo = useCallback((s: AgentStage) => {
+    setStage(s);
+    setStageIndex(STAGE_INDEX[s]);
+    setProgress(STAGE_PROGRESS[s]);
+    pushEvent({ type: "stage", stageKey: s, at: Date.now() });
+  }, [pushEvent]);
+
+  const start = useCallback(() => {
+    setActive(true);
+    setEvents([]);
+    setLiveLog("");
+    advanceTo("planner");
+  }, [advanceTo]);
+
+    const stop = useCallback(() => {
+    advanceTo("complete");
+    setProgress(100);
+    setTimeout(() => {
+      setActive(false);
+      setStage("idle");
+    }, 2000);
+  }, [advanceTo]);
+
+  const abort = useCallback(() => {
+    abortControllerRef.current?.abort();
+  }, []);
+
+  // Called for every SSEEvent from sendMessage
+  const onSSEEvent = useCallback((event: SSEEvent) => {
+    const now = Date.now();
+
+    if (event.type === "start") {
+      start();
+      return;
+    }
+
+    if (event.type === "progress") {
+      const rawStage  = event.stage || "";
+      const message   = event.message || "";
+
+      // Map to our stage key
+      const mapped = STAGE_MAP[rawStage];
+      if (mapped && mapped !== stage) {
+        advanceTo(mapped);
+      }
+
+      // Show live message
+      if (message) {
+        setLiveLog(message);
+        pushEvent({ type: "log", stageKey: mapped || stage, message, at: now });
+      }
+
+      // Nudge progress forward within the stage band
+      setProgress(prev => {
+        const base = STAGE_PROGRESS[mapped || stage] ?? prev;
+        const next = STAGE_PROGRESS["complete"];
+        // Creep up to 90% of the way to next stage
+        return Math.min(prev + 3, base + Math.round((next - base) * 0.9));
+      });
+
+      return;
+    }
+
+    if (event.type === "plan_metadata") {
+      const raw = (event as any).raw;
+      const fileCount  = raw?.files_count  ?? 0;
+      const phaseCount = raw?.phases_count ?? 0;
+      const text = `${phaseCount} phase${phaseCount !== 1 ? "s" : ""}, ${fileCount} file${fileCount !== 1 ? "s" : ""}`;
+      pushEvent({ type: "plan", text, at: now });
+      setLiveLog(`Plan ready — ${text}`);
+      advanceTo("mutate_files");
+      return;
+    }
+
+    if (event.type === "content") {
+      // Streaming summary text — show first 120 chars as live log
+      const chunk = event.chunk || "";
+      setLiveLog(prev => {
+        const combined = prev + chunk;
+        return combined.length > 120 ? combined.slice(-120) : combined;
+      });
+      return;
+    }
+
+    if (event.type === "done") {
+      stop();
+      return;
+    }
+  }, [stage, start, stop, advanceTo, pushEvent]);
+
+  return {
+    // State
+    stage,
+    stageIndex,
+    active,
+    progress,
+    events,
+    liveLog,
+
+    // Actions
+    start,
+    stop,
+    onSSEEvent,
+
+        // Actions
+    abort,
+
+    // Legacy compat
+    setStage,
+  };
+}
