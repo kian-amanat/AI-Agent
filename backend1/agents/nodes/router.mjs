@@ -23,7 +23,10 @@ const QUESTION_PATTERNS = [
 ];
 
 const INSTALL_PATTERNS = [
-  /\b(install|add)\s+(@[\w][\w\-./@]*|[\w][\w]*[-./][\w][\w\-./@]*)/i,
+  // Generic: scoped packages (@scope/name) OR hyphenated names (react-dom, framer-motion).
+  // Dot-separated names like "ref.current.signal" are excluded — dots mean property access, not packages.
+  /\b(install|add)\s+@[\w][\w\-./@]*/i,
+  /\b(install|add)\s+[a-z][\w]*-[a-z][\w\-/]*/i,
   /\bnpm\s+(install|i)\b/i,
   /\byarn\s+add\b/i,
   /\bpnpm\s+add\b/i,
@@ -77,10 +80,23 @@ const DEBUG_HINTS = [
   /sessions\//i,
 ];
 
+function isMultiTaskRequest(msg) {
+  // Optional markdown bold (**) before digit: "**1." or "1." both match
+  const numberedItem = /(?:^|[\n\r])\s*(?:\*{1,2})?[1-5][.\-\)]\s*\S/;
+  const secondItem   = /(?:^|[\n\r])\s*(?:\*{1,2})?[2-5][.\-\)]\s*\S/;
+  if (numberedItem.test(msg) && secondItem.test(msg)) return true;
+  if (/\b1[.\-\)]\s*.{3,80}[,\n]?\s*2[.\-\)]\s*\S/s.test(msg)) return true;
+  // "Edit these 2 files", "update 3 files", "change these 2 files"
+  if (/\b(edit|update|change|modify|fix)\s+(?:these\s+)?([2-9]|two|three|four|five)\s+files?\b/i.test(msg)) return true;
+  return false;
+}
+
 function isDebugReport(msg) {
+  // "fix" alone is not a debug signal — feature requests say "fix the layout" all the time.
+  // Only treat as debug when there are actual error indicators.
   return (
     DEBUG_HINTS.some((p) => p.test(msg)) ||
-    /\b(fix|bug|error|crash|broken|failed|exception)\b/i.test(msg)
+    /\b(bug|error|crash|broken|failed|exception)\b/i.test(msg)
   );
 }
 
@@ -103,8 +119,15 @@ function classifyByHeuristic(message) {
 
   const isQuestion = QUESTION_PATTERNS.some((p) => p.test(cleanMsg));
 
+  // Multi-task feature requests with named files must win over install/debug checks —
+  // phrases like "add abortControllerRef.current" look like npm packages to the install regex.
+  const hasFileExtensionEarly = FILE_EXTENSION.test(cleanMsg);
+  const hasComponentNameEarly = COMPONENT_NAME.test(cleanMsg);
+  if (isMultiTaskRequest(cleanMsg) && (hasFileExtensionEarly || hasComponentNameEarly)) return "explore";
+
   if (INSTALL_PATTERNS.some((p) => p.test(cleanMsg))) return "install";
   if (TEST_PATTERNS.some((p) => p.test(cleanMsg))) return "test";
+
   if (isDebugReport(cleanMsg)) return "investigate";
 
   const hasFileExtension = FILE_EXTENSION.test(cleanMsg);

@@ -1,0 +1,26 @@
+{
+  "sessionId": "sess_1783013164444_k4ab1m",
+  "requestId": "req_1783268439832_ria3mv",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-05T16:23:06.698Z",
+  "files": [
+    {
+      "relativePath": "backend1/routes/plannerAgent.mjs",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/routes/plannerAgent.mjs",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783013164444_k4ab1m/req_1783268439832_ria3mv/backend1__routes__plannerAgent.mjs.snap"
+    },
+    {
+      "relativePath": "backend1/agents/nodes/agentic_explore.mjs",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/agents/nodes/agentic_explore.mjs",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783013164444_k4ab1m/req_1783268439832_ria3mv/backend1__agents__nodes__agentic_explore.mjs.snap"
+    },
+    {
+      "relativePath": "backend1/services/graph_runner.mjs",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/services/graph_runner.mjs",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783013164444_k4ab1m/req_1783268439832_ria3mv/backend1__services__graph_runner.mjs.snap"
+    }
+  ]
+}

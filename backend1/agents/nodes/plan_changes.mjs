@@ -13,11 +13,32 @@ import { AIMessage } from "@langchain/core/messages";
 import { callLLM } from "../../services/llm.mjs";
 
 const MAX_PROMPT_FILES = 5;
-const MAX_FILE_CHARS = 10000;
+const MAX_FILE_CHARS = 15000; // raised from 10000 so 12-15KB files aren't truncated
 const MAX_TOTAL_CONTEXT_CHARS = 20000;
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isMultiTaskRequest(msg) {
+  const m = String(msg || "");
+  // Numbered list: "1. ...", "**1. ...", "1- ...", "1) ..." — optional markdown bold before digit
+  const numberedItem = /(?:^|[\n\r])\s*(?:\*{1,2})?[1-5][.\-\)]\s*\S/;
+  const secondItem   = /(?:^|[\n\r])\s*(?:\*{1,2})?[2-5][.\-\)]\s*\S/;
+  if (numberedItem.test(m) && secondItem.test(m)) return true;
+  // Inline "1- ... 2- ..." or "1. ... 2. ..." on the same line
+  if (/\b1[.\-\)]\s*.{3,80}[,\n]?\s*2[.\-\)]\s*\S/s.test(m)) return true;
+  // Explicit count words
+  if (/\b(two|three|four|five|2|3|4|5)\s+(things?|changes?|tasks?|items?|fixes?|improvements?|updates?)\b/i.test(m)) return true;
+  // Multiple conjunctions connecting distinct actions
+  if (/\b(also|additionally|furthermore|moreover|plus|as well as|on top of that)\b/i.test(m)) return true;
+  // Comma-separated actions with verbs ("make X, add Y, fix Z")
+  if (/\b(make|add|fix|change|update|remove|improve)\b.{3,50},\s+(?:and\s+)?\b(make|add|fix|change|update|remove|improve)\b/i.test(m)) return true;
+  // "I want X things"
+  if (/\bi\s+(?:want|need|would like)\s+(?:to\s+(?:have\s+)?)?\d+\b/i.test(m)) return true;
+  // "Edit these 2 files", "update 3 files"
+  if (/\b(edit|update|change|modify|fix)\s+(?:these\s+)?([2-9]|two|three|four|five)\s+files?\b/i.test(m)) return true;
+  return false;
 }
 
 function isCreativeRequest(msg) {
@@ -331,8 +352,18 @@ Do exactly what was asked — nothing more, nothing less.
 - Touch ONLY the code the user explicitly mentioned.
 - If the user says "change button X in sidebar", find button X's JSX block and change ONLY those lines. Leave every other button, icon, state variable, and handler byte-for-byte identical.
 - Do NOT add new state, hooks, imports, or helper functions unless the user asked for them.
-- Do NOT restructure, reformat, or reorder surrounding code.
-- One-file changes are strongly preferred. Never edit a second file unless the bug spans two layers.`,
+- Do NOT restructure, reformat, or reorder surrounding code.`,
+
+    multi: `
+## MULTI-TASK MODE
+The user requested several distinct changes. Apply EVERY one of them — do not skip any.
+
+RULES:
+1. Identify each individual task from the user's request.
+2. Produce one plan step per task (or per file if tasks span multiple files).
+3. ALL tasks must appear as steps in the "plan" array — never collapse them into one step.
+4. Each patch must be surgical: use replace_block or replace_text, never rewrite_file unless a task is truly file-wide.
+5. Do NOT add unrequested changes alongside the requested ones.`,
 
     scoped: `
 ## SCOPED ELEMENT MODE
@@ -346,14 +377,16 @@ RULES — read carefully:
 5. If you find you need to change two elements to satisfy the request, add TWO separate patches — not a rewrite.`,
   };
 
+  const hasMultipleRetries = retryErrors.length >= 2;
   const retrySection = retryErrors.length > 0
     ? `
 ⚠️ RETRY — PREVIOUS ATTEMPT FAILED
 The last patch was rejected for the following reason(s):
 ${retryErrors.map(e => `  • ${e}`).join("\n")}
 
-Do NOT repeat the same patch. Generate a DIFFERENT, CORRECT patch that avoids these errors.
-For JSX/TSX files: mentally trace the tag structure of your patch before outputting it.
+${hasMultipleRetries
+  ? `ESCALATE TO REWRITE: Two surgical patches already failed. For this retry, use rewrite_file with the COMPLETE, CORRECTLY MODIFIED file content. Do NOT use replace_block or replace_text — they keep failing because the search anchor does not match. Write the ENTIRE file from scratch with the change applied.`
+  : `Do NOT repeat the same patch. Generate a DIFFERENT, CORRECT patch that avoids these errors.\nFor JSX/TSX files: mentally trace the tag structure of your patch before outputting it.`}
 `
     : "";
 
@@ -406,6 +439,12 @@ PATCH RULES
 - Never include markdown fences.
 - For JSX, keep all tags balanced — every opened tag must be closed.
 
+CSS LAYOUT RULES (Tailwind / absolute positioning)
+- An \`absolute\` element sizes relative to its nearest \`relative\` ancestor — NOT to the page.
+- When the task is "make a vertical line span all list items": the line must be \`absolute\` inside the CONTENT container (the div that grows with items), NOT inside a scroll wrapper (a div with \`overflow-y-auto\` or \`max-h-*\`). If the line currently sits inside the scroll wrapper: (1) remove \`relative\` from the scroll wrapper, (2) add \`relative\` to the inner items div, (3) move the line element inside that inner div, AND (4) set the line to \`top-0 bottom-0\` so it spans the full content height. All four changes must be in the same patch.
+- A scroll container with \`max-h-[320px]\` is only 320 px tall in the viewport. An \`absolute top-0 bottom-0\` line inside it will never be taller than 320 px no matter how many items exist. After moving \`relative\` to the items container, also update any \`top-X bottom-X\` values on the line to \`top-0 bottom-0\` so it spans actual content height.
+- For hover-only UI (copy buttons, action overlays): add \`group\` to the wrapper, then \`opacity-0 group-hover:opacity-100\` to the action element — no JS state needed.
+
 If you cannot confidently fix the issue, return a read_only step explaining the exact blocker.`;
 }
 
@@ -417,13 +456,20 @@ function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToR
   const fileSnippets = [];
   let totalChars = 0;
 
+  // Multi mode: keep each file small so the combined input doesn't eat the model's
+  // output budget. gapgpt-qwen-3.6 has ~8192 total tokens; with 2 files at 10k chars
+  // each the input alone uses ~6k tokens and the JSON plan gets truncated mid-write.
+  // 5000 chars per file leaves ~4000 tokens for the plan output (enough for 2 patches).
+  const totalBudget = MAX_TOTAL_CONTEXT_CHARS;
+  const perFileBudget = mode === "multi" ? 5000 : MAX_FILE_CHARS;
+
   for (const f of filesToShow) {
     const outline = buildJsxOutline(f.content, f.path);
-    const numbered = addLineNumbers(shortenContentSmart(f.content, MAX_FILE_CHARS, cleanMsg));
+    const numbered = addLineNumbers(shortenContentSmart(f.content, perFileBudget, cleanMsg));
     const summary = f.summary ? `\nSummary: ${f.summary}` : "";
     const block = `### File: ${f.path}${summary}${outline}\n\`\`\`\n${numbered}\n\`\`\``;
 
-    if (totalChars + block.length > MAX_TOTAL_CONTEXT_CHARS && fileSnippets.length > 0) break;
+    if (totalChars + block.length > totalBudget && fileSnippets.length > 0) break;
     totalChars += block.length;
     fileSnippets.push(block);
   }
@@ -442,14 +488,26 @@ function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToR
     debug: "Use the investigation evidence to fix the root cause. Do not edit blindly.",
     scoped: "The user referenced a specific element. Use replace_block or replace_text targeting ONLY that element. NEVER use rewrite_file. Leave all surrounding code untouched.",
     surgical: "Make the MINIMUM change. Touch ONLY the code the user explicitly mentioned. Every line not mentioned in the request must remain identical.",
+    multi: "The user requested MULTIPLE changes. Produce one edit step per task — every task gets an EDIT action, not read_only. NEVER mark a file read_only just because you are unsure; if the file is shown below, you have enough context to edit it. Use replace_block or replace_text per task.",
   };
 
   const retryNote = retryErrors.length > 0
     ? `\n\n⚠️ RETRY: Previous patch failed — ${retryErrors.slice(0, 2).join(" | ")}. Generate a DIFFERENT correct patch.`
     : "";
 
-  return `User request: "${cleanMsg}"${focusNote}${investigationNote}${retryNote}
+  // In multi mode, list every available file upfront so the model can't claim
+  // a file is "not provided" when it is clearly in the snippets below.
+  const availableFilesNote = mode === "multi" && fileSnippets.length > 1
+    ? `\nAVAILABLE FILES (all ${fileSnippets.length} must have an edit step):\n${
+        fileSnippets.map((_, i) => {
+          const header = filesToShow[i]?.path ?? "?";
+          return `  [${i + 1}] ${header}`;
+        }).join("\n")
+      }\nNever write "file content was not provided" for any file listed above — the content IS present in the "### File:" blocks below.\n`
+    : "";
 
+  return `User request: "${cleanMsg}"${focusNote}${investigationNote}${retryNote}
+${availableFilesNote}
 ${instructions[mode] || instructions.surgical}
 
 CRITICAL: Use each file's EXACT path as shown in the "### File: <path>" header.
@@ -650,9 +708,76 @@ function applyPathCanonicalization(plan, fileContext, rememberedTargetFile) {
 
 
 
-async function generatePlanWithRetry({ system, content, modelRoute }) {
+// Build a focused single-file user prompt for the sequential planner.
+// For files over 12 000 chars, use smart truncation centred on the relevant
+// section so the model's ~8 192-token context window is not exceeded.
+const MAX_SINGLE_FILE_CHARS = 12_000;
+function buildSingleFilePrompt(userMessage, file, focusInstruction) {
+  const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
+  const content = String(file.content || "");
+  const outline = buildJsxOutline(content, file.path);
+  // Focus the window on the section most relevant to the task+file instruction
+  const displayContent = content.length > MAX_SINGLE_FILE_CHARS
+    ? shortenContentSmart(content, MAX_SINGLE_FILE_CHARS, `${cleanMsg} ${focusInstruction}`)
+    : content;
+  const numbered = addLineNumbers(displayContent);
+  const summary = file.summary ? `\nSummary: ${file.summary}` : "";
+
+  return `User request: "${cleanMsg}"
+
+${focusInstruction}
+
+Use replace_block or replace_text for surgical changes.
+Use the SHORTEST unique anchor (2-5 lines). Never include line numbers or markdown fences in search/replace text.
+For JSX: every opened tag must be closed. After patching, re-read the result mentally to confirm JSX is valid.
+
+Project files:
+
+### File: ${file.path}${summary}${outline}
+\`\`\`
+${numbered}
+\`\`\`
+
+Return ONLY valid JSON (same schema as always: { reasoning, dependencyNotes, plan: [...] }).`;
+}
+
+// Plan each file independently (Claude Code approach): one LLM call per file,
+// full content each time. Combines results into a single plan array.
+async function planFilesSequentially({ filesToShow, userMessage, system, modelRoute, investigation }) {
+  const combined = [];
+
+  for (const file of filesToShow.slice(0, 4)) {
+    const baseName = file.path.split("/").pop();
+    const instruction = `Edit ONLY "${file.path}". Apply the part of the user request that relates to this file. Do NOT reference or touch any other file. Do NOT emit read_only for this file — its full content is provided below.`;
+
+    const content = buildSingleFilePrompt(userMessage, file, instruction);
+
+    let result;
+    try {
+      result = await generatePlanWithRetry({ system, content, modelRoute, mode: "single_file" });
+    } catch (e) {
+      console.warn(`[PlanChanges] Sequential plan failed for ${baseName}: ${e.message}`);
+      continue;
+    }
+
+    if (result.parsed?.plan) {
+      const steps = result.parsed.plan.filter(s => s.action !== "read_only" || combined.length === 0);
+      combined.push(...steps);
+      console.log(`[PlanChanges] Sequential[${baseName}]: ${steps.length} step(s)`);
+    }
+  }
+
+  return combined.length > 0 ? { plan: combined } : null;
+}
+
+async function generatePlanWithRetry({ system, content, modelRoute, mode = "surgical" }) {
   let lastError = null;
   let rawResponse = "";
+
+  // Keep maxOut consistent across attempts so the retry isn't token-starved.
+  // single_file prompts are smaller (one full file) so 4096 is plenty;
+  // other modes need more room for the full JSON plan.
+  const maxOut = (mode === "single_file") ? 4096 : 6000;
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
@@ -660,7 +785,7 @@ async function generatePlanWithRetry({ system, content, modelRoute }) {
         system,
         messages: [{ role: "user", content }],
         modelRoute,
-        maxTokens: attempt === 0 ? 6000 : 3000,
+        maxTokens: maxOut, // same on both attempts — don't starve the retry
         temperature: 0,
         stream: true,
       });
@@ -688,7 +813,7 @@ async function generatePlanWithRetry({ system, content, modelRoute }) {
   return { rawResponse, parsed: null, error: lastError };
 }
 
-function buildFallbackPlan({ fileContext, rememberedTargetFile, mode }) {
+function buildFallbackPlan({ fileContext, rememberedTargetFile, mode, emptyResponse = false }) {
   const files = Array.isArray(fileContext) ? fileContext.filter((f) => f?.path) : [];
   const target =
     files.find((f) => f.path === rememberedTargetFile) ||
@@ -728,14 +853,19 @@ function buildFallbackPlan({ fileContext, rememberedTargetFile, mode }) {
   }
 
   if (target.content && target.content.length > 0) {
+    const description = emptyResponse
+      ? `Token quota may be exhausted — the model returned no content. Retry with a more specific request targeting "${target.path}".`
+      : `Inspect ${target.path} and retry planning with a smaller prompt.`;
     return {
-      reasoning: "The planner timed out, so the safest fallback is to return the target file for a focused re-run.",
+      reasoning: emptyResponse
+        ? "Model returned empty response, likely due to token quota exhaustion during the exploration phase."
+        : "The planner timed out, so the safest fallback is to return the target file for a focused re-run.",
       dependencyNotes: "The target file is the most likely edit location, but the model did not produce a safe patch plan.",
       plan: [
         {
           action: "read_only",
           path: target.path,
-          description: `Inspect ${target.path} and retry planning with a smaller prompt.`,
+          description,
           patches: [],
         },
       ],
@@ -788,15 +918,17 @@ export async function planChangesNode(state) {
   let mode = "surgical";
   if (isLintFixRequest(cleanMsg)) mode = "lint";
   else if (isBugFixRequest(cleanMsg)) mode = "debug";
+  else if (isMultiTaskRequest(cleanMsg)) mode = "multi";
   else if (isScopedChange(cleanMsg) && !isCreativeRequest(cleanMsg)) mode = "scoped";
   else if (isCreativeRequest(cleanMsg)) mode = "creative";
 
   if (lockToRemembered) console.log(`[PlanChanges] Locked to: ${rememberedTargetFile}`);
   console.log(`[PlanChanges] Mode: ${mode}${isRetry ? ` (retry ${retryCount})` : ""}`);
+  console.log(`[PlanChanges] fileContext has ${(fileContext || []).length} file(s): ${(fileContext || []).map(f => f?.path?.split('/').pop() ?? '?').join(', ')}`);
   if (retryErrors.length) console.log(`[PlanChanges] Retry errors:`, retryErrors.slice(0, 3).join(" | "));
 
-  const modeEmoji = { debug: "🐛", creative: "🎨", surgical: "🧠", lint: "🔧", scoped: "🎯" };
-  const modeMsg = { debug: "Debugging...", creative: "Designing...", surgical: "Planning...", lint: "Fixing lint...", scoped: "Targeting element..." };
+  const modeEmoji = { debug: "🐛", creative: "🎨", surgical: "🧠", lint: "🔧", scoped: "🎯", multi: "📋" };
+  const modeMsg = { debug: "Debugging...", creative: "Designing...", surgical: "Planning...", lint: "Fixing lint...", scoped: "Targeting element...", multi: "Planning all tasks..." };
 
   emit?.({
     type: "progress",
@@ -814,6 +946,32 @@ export async function planChangesNode(state) {
     retryErrors,
   });
 
+  let parsed = null;
+  let rawResponse = "";
+  let plannerError = null;
+
+  // Multi mode (first attempt only): plan each file separately so each LLM call
+  // sees one file's FULL content instead of two truncated halves. This is the
+  // Claude Code approach — avoids JSON truncation and stale-anchor failures.
+  const filesToShowForSeq = pickFilesForPrompt(fileContext || [], String(userMessage).split(/conversation memory:/i)[0].trim(), rememberedTargetFile, investigation, mode);
+
+  if (mode === "multi" && !isRetry && filesToShowForSeq.length > 1) {
+    try {
+      parsed = await planFilesSequentially({
+        filesToShow: filesToShowForSeq,
+        userMessage,
+        system,
+        modelRoute,
+        investigation,
+      });
+      if (parsed) rawResponse = JSON.stringify(parsed);
+    } catch (seqErr) {
+      console.warn("[PlanChanges] Sequential planning failed, falling back to combined:", seqErr.message);
+      parsed = null;
+    }
+  }
+
+  if (!parsed) {
   const content = buildUserPrompt(
     userMessage,
     fileContext || [],
@@ -824,15 +982,12 @@ export async function planChangesNode(state) {
     retryErrors
   );
 
-  let parsed = null;
-  let rawResponse = "";
-  let plannerError = null;
-
   try {
     const result = await generatePlanWithRetry({
       system,
       content,
       modelRoute,
+      mode,
     });
 
     rawResponse = result.rawResponse || "";
@@ -841,6 +996,7 @@ export async function planChangesNode(state) {
   } catch (err) {
     plannerError = err;
   }
+  } // end if (!parsed) fallback block
 
   if (!parsed?.plan) {
     const preview = rawResponse.trim().slice(0, 600);
@@ -849,6 +1005,7 @@ export async function planChangesNode(state) {
       fileContext,
       rememberedTargetFile,
       mode,
+      emptyResponse: rawResponse.trim().length === 0,
     });
 
     if (fallback?.plan?.length) {

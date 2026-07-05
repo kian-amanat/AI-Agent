@@ -1,0 +1,20 @@
+{
+  "sessionId": "sess_1783013164444_k4ab1m",
+  "requestId": "req_1783267729281_9zpwy3",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-05T16:11:42.538Z",
+  "files": [
+    {
+      "relativePath": "backend1/agents/kodo_graph.mjs",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/agents/kodo_graph.mjs",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783013164444_k4ab1m/req_1783267729281_9zpwy3/backend1__agents__kodo_graph.mjs.snap"
+    },
+    {
+      "relativePath": "backend1/services/graph_runner.mjs",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/services/graph_runner.mjs",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783013164444_k4ab1m/req_1783267729281_9zpwy3/backend1__services__graph_runner.mjs.snap"
+    }
+  ]
+}

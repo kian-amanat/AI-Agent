@@ -1,5 +1,5 @@
 # Kodo Memory Index
 
-- [code-patterns](code-patterns.md) — Chat UI component patterns, icon usage, and styling details
-- [user-preferences](user-preferences.md) — User coding style preferences and constraints
-- [project-context](project-context.md) — Next.js config, image quality settings, and project structure
+- [code-patterns](code-patterns.md) — Frontend AbortController implementation and ChatComposer integration
+- [user-preferences](user-preferences.md) — User preferences for UI interactions, styling, and code structure
+- [project-context](project-context.md) — Backend abort endpoint and agent structure

@@ -192,107 +192,109 @@ export default function ThinkingTrace({
             <AnimatePresence initial={false}>
         {expanded && (
           <motion.div
-            initial={{ height: 0, opacity: 0, y: -4 }}
-            animate={{ height: "auto", opacity: 1, y: 0 }}
-            exit={{ height: 0, opacity: 0, y: -4 }}
-            transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
-            className="overflow-hidden"
+          initial={{ height: 0, opacity: 0, y: -4 }}
+          animate={{ height: "auto", opacity: 1, y: 0 }}
+          exit={{ height: 0, opacity: 0, y: -4 }}
+          transition={{ duration: 0.24, ease: [0.22, 1, 0.36, 1] }}
+          className="overflow-hidden"
           >
-                        <div ref={scrollRef} className="relative mt-1.5 max-h-[320px] overflow-y-auto pl-4 pr-1">
-              {/* Gray vertical connecting line — centered on the bullet dot */}
-                                                        <div className="absolute left-[29.5px] top-2.5 bottom-3 w-px bg-white/[0.15]" />
+                    <div className="relative mt-1.5 pl-4 pr-1">
+          {/* Gray vertical connecting line — spans full content height */}
+          <div className="absolute left-[29.5px] top-0 bottom-0 w-px bg-white/[0.15]" />
 
-              <div className="space-y-0 py-0.5">
-                <AnimatePresence initial={false}>
-                  {steps.map((step, idx) => {
-                                        const Icon = KIND_ICON[step.kind] || Sparkles;
-                    const accent = KIND_ACCENT[step.kind] || "#94a3b8";
-                    const isLive = isActive && idx === lastIndex;
-                    const isPrevious = isActive && idx === lastIndex - 1;
-                    const isDone = !isActive;
-                    const isError = step.status === "error";
+          <div ref={scrollRef} className="max-h-[320px] overflow-y-auto">
+          <div className="relative space-y-0 py-0.5">
+          <AnimatePresence initial={false}>
+          {steps.map((step, idx) => {
+          const Icon = KIND_ICON[step.kind] || Sparkles;
+          const accent = KIND_ACCENT[step.kind] || "#94a3b8";
+          const isLive = isActive && idx === lastIndex;
+          const isPrevious = isActive && idx < lastIndex;
+          const isDone = !isActive;
+          const isError = step.status === "error";
 
-                    // Determine bullet color based on state
-                    let bulletBackground = "rgba(255,255,255,0.22)";
-                    let bulletShadow = "none";
-                    let bulletPulse = false;
+          // Determine bullet color based on state
+          let bulletBackground = "rgba(255,255,255,0.22)";
+          let bulletShadow = "none";
+          let bulletPulse = false;
 
-                    if (isLive) {
-                      // Last step while thinking: orange
-                      bulletBackground = "linear-gradient(135deg, #ff9b5f, #ff5a45)";
-                      bulletShadow = "0 0 8px rgba(255,122,61,0.6)";
-                      bulletPulse = true;
-                    } else if (isPrevious) {
-                      // Previous step while thinking: green
-                      bulletBackground = "linear-gradient(135deg, #34d399, #059669)";
-                      bulletShadow = "0 0 6px rgba(52,211,153,0.5)";
-                    } else if (isDone) {
-                      // Thinking done: all green for success
-                      bulletBackground = "linear-gradient(135deg, #34d399, #059669)";
-                      bulletShadow = "0 0 6px rgba(52,211,153,0.5)";
-                    }
+          if (isLive) {
+          // Last step while thinking: orange
+          bulletBackground = "linear-gradient(135deg, #ff9b5f, #ff5a45)";
+          bulletShadow = "0 0 8px rgba(255,122,61,0.6)";
+          bulletPulse = true;
+          } else if (isPrevious) {
+          // Previous step while thinking: green
+          bulletBackground = "linear-gradient(135deg, #34d399, #059669)";
+          bulletShadow = "0 0 6px rgba(52,211,153,0.5)";
+          } else if (isDone) {
+          // Thinking done: all green for success
+          bulletBackground = "linear-gradient(135deg, #34d399, #059669)";
+          bulletShadow = "0 0 6px rgba(52,211,153,0.5)";
+          }
 
-                    return (
-                      <motion.div
-                        key={step.id}
-                        layout
-                        initial={{ opacity: 0, x: -6 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0, x: -4 }}
-                        transition={{ duration: 0.22, ease: "easeOut" }}
-                        className="relative flex items-start gap-3 py-1.5 pl-1"
-                      >
-                        {/* Circular Bullet Point */}
-                        <div className="relative z-10 flex h-5 w-5 flex-shrink-0 items-center justify-center pt-1">
-                          {bulletPulse && (
-                            <motion.span
-                              className="absolute inset-0 rounded-full"
-                              animate={{ opacity: [0.2, 0.6, 0.2], scale: [0.9, 1.3, 0.9] }}
-                              transition={{ repeat: Infinity, duration: 1.5, ease: "easeInOut" }}
-                              style={{
-                                background: "rgba(249, 115, 22, 0.4)",
-                              }}
-                            />
-                          )}
-                          <div
-                            className="relative h-2.5 w-2.5 rounded-full"
-                            style={{
-                              background: bulletBackground,
-                              boxShadow: bulletShadow,
-                            }}
-                          />
-                        </div>
+          return (
+          <motion.div
+          key={step.id}
+          layout
+          initial={{ opacity: 0, x: -6 }}
+          animate={{ opacity: 1, x: 0 }}
+          exit={{ opacity: 0, x: -4 }}
+          transition={{ duration: 0.22, ease: "easeOut" }}
+          className="relative flex items-start gap-3 py-1.5 pl-1"
+          >
+          {/* Circular Bullet Point */}
+          <div className="relative z-10 flex h-5 w-5 flex-shrink-0 items-center justify-center pt-1">
+          {bulletPulse && (
+          <motion.span
+          className="absolute inset-0 rounded-full"
+          animate={{ opacity: [0.2, 0.6, 0.2], scale: [0.9, 1.3, 0.9] }}
+          transition={{ repeat: Infinity, duration: 1.5, ease: "easeInOut" }}
+          style={{
+          background: "rgba(249, 115, 22, 0.4)",
+          }}
+          />
+          )}
+          <div
+          className="relative h-2.5 w-2.5 rounded-full"
+          style={{
+          background: bulletBackground,
+          boxShadow: bulletShadow,
+          }}
+          />
+          </div>
 
-                        <div className="min-w-0 flex-1">
-                          <span
-                            className="text-[12.5px] leading-5 tracking-[-0.01em]"
-                            style={{
-                              color: isLive
-                                ? "rgba(255,255,255,0.92)"
-                                : isError
-                                ? "rgba(255,170,170,0.88)"
-                                : "rgba(255,255,255,0.56)",
-                              fontWeight: isLive ? 500 : 400,
-                            }}
-                          >
-                            {step.text}
-                          </span>
+          <div className="min-w-0 flex-1">
+          <span
+          className="text-[12.5px] leading-5 tracking-[-0.01em]"
+          style={{
+          color: isLive
+          ? "rgba(255,255,255,0.92)"
+          : isError
+          ? "rgba(255,170,170,0.88)"
+          : "rgba(255,255,255,0.56)",
+          fontWeight: isLive ? 500 : 400,
+          }}
+          >
+          {step.text}
+          </span>
 
-                          {step.detail && (
-                            <span className="ml-1.5 rounded-md bg-white/[0.04] px-1.5 py-px font-mono text-[10.5px] text-white/35">
-                              {step.detail.split("/").pop()}
-                            </span>
-                          )}
-                        </div>
-                      </motion.div>
-                    );
-                  })}
-                </AnimatePresence>
-              </div>
-            </div>
+          {step.detail && (
+          <span className="ml-1.5 rounded-md bg-white/[0.04] px-1.5 py-px font-mono text-[10.5px] text-white/35">
+          {step.detail.split("/").pop()}
+          </span>
+          )}
+          </div>
           </motion.div>
-        )}
-      </AnimatePresence>
+          );
+          })}
+          </AnimatePresence>
+          </div>
+          </div>
+          </div>
+          </motion.div>
+          )}
+          </AnimatePresence>
     </div>
   );
 }
