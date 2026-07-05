@@ -60,7 +60,8 @@ export function useAgentPipeline() {
   const [progress, setProgress] = useState(0);
   const [stageIndex, setStageIndex] = useState(0);
   const [events, setEvents]     = useState<PipelineAgentEvent[]>([]);
-  const [liveLog, setLiveLog]   = useState<string>("");
+    const [liveLog, setLiveLog]   = useState<string>("");
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const pushEvent = useCallback((e: PipelineAgentEvent) => {
     setEvents(prev => [...prev.slice(-40), e]); // keep last 40
@@ -80,7 +81,7 @@ export function useAgentPipeline() {
     advanceTo("planner");
   }, [advanceTo]);
 
-  const stop = useCallback(() => {
+    const stop = useCallback(() => {
     advanceTo("complete");
     setProgress(100);
     setTimeout(() => {
@@ -89,7 +90,10 @@ export function useAgentPipeline() {
     }, 2000);
   }, [advanceTo]);
 
-  // Called for every SSEEvent from sendMessage
+  const abort = useCallback(() => {
+    abortControllerRef.current?.abort();
+  }, []);
+
   const onSSEEvent = useCallback((event: SSEEvent) => {
     const now = Date.now();
 
@@ -164,6 +168,7 @@ export function useAgentPipeline() {
     // Actions
     start,
     stop,
+    abort,
     onSSEEvent,
 
     // Legacy compat

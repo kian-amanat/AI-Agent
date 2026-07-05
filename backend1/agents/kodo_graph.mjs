@@ -98,8 +98,11 @@ export const KodoStateAnnotation = {
   // Final streamed answer
   finalAnswer: { default: () => "" },
 
-  // SSE emitter — injected by graph_runner, never serialised
+    // SSE emitter — injected by graph_runner, never serialised
   emit: { default: () => null },
+
+  // AbortController signal for cancellation
+  abortSignal: { default: () => null },
 };
 
 // ── Error boundary ────────────────────────────────────────────────────────────

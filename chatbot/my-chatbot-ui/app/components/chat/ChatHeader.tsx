@@ -25,8 +25,7 @@ export default function ChatHeader({
         </button>
 
                 <div className="flex items-center justify-end ml-auto mr-4">
-                    <motion.button
-            whileHover={{ scale: 1.08 }}
+                                <motion.button
             whileTap={{ scale: 0.95 }}
             transition={{ type: "spring", stiffness: 400, damping: 17 }}
             onClick={() => router.push("/settings")}

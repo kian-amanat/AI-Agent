@@ -255,9 +255,13 @@ export function sendMessage(
   sessionId: string | null,
   onEvent:   (event: SSEEvent) => void,
   onDone:    (sessionId: string, requestId?: string | null) => void,
-  onError:   (err: string) => void
+  onError:   (err: string) => void,
+  signal?:    AbortSignal
 ): () => void {
   const controller = new AbortController();
+  if (signal) {
+    signal.addEventListener('abort', () => controller.abort(), { once: true });
+  }
 
   void (async () => {
     try {

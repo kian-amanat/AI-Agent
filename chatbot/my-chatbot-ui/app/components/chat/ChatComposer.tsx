@@ -4,6 +4,7 @@ import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { Loader2, Mic, Paperclip, StopCircle, X } from "lucide-react";
 import NorthRoundedIcon from "@mui/icons-material/NorthRounded";
+import StopRoundedIcon from "@mui/icons-material/StopRounded";
 import { transcribeAudio } from "../../lib/api";
 
 type ChatComposerProps = {
@@ -16,6 +17,7 @@ type ChatComposerProps = {
   isRecording: boolean;
   setIsRecording: React.Dispatch<React.SetStateAction<boolean>>;
   onSendMessage: () => void;
+  onStop?: () => void;
   onMessageKeyDown: (e: React.KeyboardEvent<HTMLTextAreaElement>) => void;
   selectedFiles: File[];
   setSelectedFiles: React.Dispatch<React.SetStateAction<File[]>>;
@@ -48,6 +50,7 @@ export default function ChatComposer({
   isRecording,
   setIsRecording,
   onSendMessage,
+  onStop,
   onMessageKeyDown,
   selectedFiles,
   setSelectedFiles,
@@ -307,25 +310,25 @@ export default function ChatComposer({
               )}
             </motion.button>
 
-            <motion.button
+                        <motion.button
               type="button"
               whileHover={{ scale: isSending ? 1 : 1.03 }}
               whileTap={{ scale: isSending ? 1 : 0.96 }}
-              onClick={onSendMessage}
-              disabled={!canSend || isSending || isTranscribing}
+                            onClick={isSending ? () => onStop?.() : onSendMessage}
+              disabled={isTranscribing}
               className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#ff8a3d]/20 bg-gradient-to-br from-[#ff6a3d] via-[#ff4d3d] to-[#ff2d2d] text-white shadow-[0_12px_26px_rgba(255,77,61,0.22)] transition-all duration-200 hover:shadow-[0_16px_32px_rgba(255,77,61,0.28)] disabled:cursor-not-allowed disabled:opacity-45"
-              title="Send"
+              title={isSending ? "Stop" : "Send"}
             >
               <AnimatePresence mode="wait" initial={false}>
                 {isSending ? (
-                  <motion.span
-                    key="loading"
-                    initial={{ opacity: 0, scale: 0.9, rotate: -8 }}
-                    animate={{ opacity: 1, scale: 1, rotate: 0 }}
-                    exit={{ opacity: 0, scale: 0.9 }}
-                  >
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                  </motion.span>
+                <motion.span
+                key="loading"
+                initial={{ opacity: 0, scale: 0.9, rotate: -8 }}
+                animate={{ opacity: 1, scale: 1, rotate: 0 }}
+                exit={{ opacity: 0, scale: 0.9 }}
+                >
+                <StopRoundedIcon className="h-4 w-4 text-white" />
+                </motion.span>
                 ) : (
                   <motion.span
                     key="send"
