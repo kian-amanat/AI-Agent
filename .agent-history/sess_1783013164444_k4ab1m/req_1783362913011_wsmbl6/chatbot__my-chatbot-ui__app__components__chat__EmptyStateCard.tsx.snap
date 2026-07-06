@@ -17,7 +17,11 @@ const item = {
   show: { opacity: 1, y: 0 },
 };
 
-
+const typingDots = [
+  { delay: 0, color: "#ff8a3d" },
+  { delay: 0.2, color: "#ff5e4d" },
+  { delay: 0.4, color: "#ff8a3d" },
+];
 
 export default function EmptyStateCard({
   title,
@@ -44,28 +48,26 @@ export default function EmptyStateCard({
         animate="show"
         className="relative z-10"
       >
-                {/* Minimal sparkle icon */}
-        <motion.div
-          className="mb-6 flex items-center justify-center"
-          animate={{
-            rotate: [0, 10, -10, 0],
-            scale: [1, 1.1, 1],
-          }}
-          transition={{
-            duration: 3,
-            repeat: Infinity,
-            ease: "easeInOut",
-          }}
-        >
-          <svg
-            className="h-8 w-8 text-[#ff8a3d]/60 group-hover:text-[#ff8a3d] transition-colors duration-300"
-            fill="currentColor"
-            viewBox="0 0 24 24"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <path d="M12 2L14.09 8.26L20 9.27L15.55 13.97L16.91 20L12 16.9L7.09 20L8.45 13.97L4 9.27L9.91 8.26L12 2Z" />
-          </svg>
-        </motion.div>
+        {/* Animated typing indicator */}
+        <div className="mb-6 flex items-center gap-2">
+          {typingDots.map((dot, index) => (
+            <motion.div
+              key={index}
+              className="h-2 w-2 rounded-full"
+              style={{ backgroundColor: dot.color }}
+              animate={{
+                y: [0, -8, 0],
+                opacity: [0.4, 1, 0.4],
+              }}
+              transition={{
+                duration: 1.2,
+                repeat: Infinity,
+                delay: dot.delay,
+                ease: "easeInOut",
+              }}
+            />
+          ))}
+        </div>
 
         {/* Title with gradient text */}
         <motion.p

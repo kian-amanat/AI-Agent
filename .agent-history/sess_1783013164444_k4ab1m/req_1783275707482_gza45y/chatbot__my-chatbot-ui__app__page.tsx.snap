@@ -287,12 +287,6 @@ export default function MinimalChatComponent() {
     setTimeout(() => textareaRef.current?.focus(), 50);
   }
 
-  function handleStop() {
-    abortRequestRef.current?.();
-    abortRequestRef.current = null;
-    setIsSending(false);
-  }
-
   function applyUndoResultToMessage(
     list: Message[],
     messageId: string,
@@ -720,19 +714,18 @@ export default function MinimalChatComponent() {
   }`}
 >
   <div className="group max-w-[min(92%,48rem)]">
-        {m.role === "user" ? (
-      <>
-        <div className="rounded-[24px] border border-[#ff8a3d]/18 bg-gradient-to-br from-[#ff8a3d]/10 via-[#ff5e4d]/8 to-[#ff2d2d]/6 px-4 py-3.5 shadow-sm md:px-5 md:py-4 text-white">
-          <div className="mb-2 flex items-center gap-2 text-xs text-white/32">
-            <UserIcon className="h-4 w-4 text-[#ff8a3d]" />
-            <span>You</span>
-          </div>
-
-          <div className="whitespace-pre-wrap text-[15px] leading-7 text-white/92">
-            {m.content}
-          </div>
+    {m.role === "user" ? (
+      <div className="rounded-[24px] border border-[#ff8a3d]/18 bg-gradient-to-br from-[#ff8a3d]/10 via-[#ff5e4d]/8 to-[#ff2d2d]/6 px-4 py-3.5 shadow-sm md:px-5 md:py-4 text-white">
+        <div className="mb-2 flex items-center gap-2 text-xs text-white/32">
+          <UserIcon className="h-4 w-4 text-[#ff8a3d]" />
+          <span>You</span>
         </div>
-<div className="mt-2 flex items-center justify-end gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+
+                <div className="whitespace-pre-wrap text-[15px] leading-7 text-white/92">
+          {m.content}
+        </div>
+
+        <div className="mt-2 flex items-center gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
           <motion.button
             whileTap={{ scale: 0.96 }}
             onClick={() => copyToClipboard(m.content, m.id)}
@@ -751,7 +744,7 @@ export default function MinimalChatComponent() {
             )}
           </motion.button>
         </div>
-      </>
+      </div>
     ) : (
       <div className="px-0 py-0 text-white">
         <div className="mb-2 flex items-center gap-2 text-xs text-white/30">
@@ -838,7 +831,6 @@ export default function MinimalChatComponent() {
             isRecording={isRecording}
             setIsRecording={setIsRecording}
             onSendMessage={handleSendMessage}
-            onStop={handleStop}
             onMessageKeyDown={handleMessageKeyDown}
             selectedFiles={selectedFiles}
             setSelectedFiles={setSelectedFiles}

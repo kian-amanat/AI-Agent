@@ -47,7 +47,11 @@ const PIPELINE_PATTERNS = [
   /\b(build|scaffold|develop)\s+(a\s+)?(full|complete|entire|whole)\s+(app|project|system|platform|website|application)\b/i,
   /\b(create|make|generate)\s+(a\s+)?(full.?stack|end.?to.?end)\b/i,
   /\b(start|create|build)\s+(my\s+)?(ai\s+)?agent\b/i,
-  /\b(codex|cursor|claude code)\b/i,
+  // "codex" / "cursor" alone are reliable signals; "claude code" is NOT — users say
+  // "make it look like claude code" as a design reference, not a build request.
+  // Require an explicit build/create verb before the tool name to avoid false positives.
+  /\b(codex|cursor)\b/i,
+  /\b(build|create|scaffold|develop|make)\b.{0,30}\b(claude\s*code)\b/i,
 ];
 
 const FILE_EXTENSION = /\.(tsx?|jsx?|mjs|cjs|css|scss|sass|less|json|md|ya?ml|html|xml|env|sh|py|rs|go|png|jpe?g|gif|svg|webp|ico)\b/i;
@@ -81,13 +85,20 @@ const DEBUG_HINTS = [
 ];
 
 function isMultiTaskRequest(msg) {
-  // Optional markdown bold (**) before digit: "**1." or "1." both match
+  const m = String(msg || "");
+  // Numbered list: "1. ...", "**1. ...", "1- ...", "1) ..."
   const numberedItem = /(?:^|[\n\r])\s*(?:\*{1,2})?[1-5][.\-\)]\s*\S/;
   const secondItem   = /(?:^|[\n\r])\s*(?:\*{1,2})?[2-5][.\-\)]\s*\S/;
-  if (numberedItem.test(msg) && secondItem.test(msg)) return true;
-  if (/\b1[.\-\)]\s*.{3,80}[,\n]?\s*2[.\-\)]\s*\S/s.test(msg)) return true;
-  // "Edit these 2 files", "update 3 files", "change these 2 files"
-  if (/\b(edit|update|change|modify|fix)\s+(?:these\s+)?([2-9]|two|three|four|five)\s+files?\b/i.test(msg)) return true;
+  if (numberedItem.test(m) && secondItem.test(m)) return true;
+  if (/\b1[.\-\)]\s*.{3,80}[,\n]?\s*2[.\-\)]\s*\S/s.test(m)) return true;
+  // Explicit count words
+  if (/\b(two|three|four|five|2|3|4|5)\s+(things?|changes?|tasks?|items?|fixes?|improvements?|updates?)\b/i.test(m)) return true;
+  // Multiple conjunctions connecting distinct actions
+  if (/\b(also|additionally|furthermore|moreover|plus|as well as|on top of that)\b/i.test(m)) return true;
+  // Comma-separated actions with verbs — expanded to include create/build/implement/design/move/refactor
+  if (/\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite)\b.{3,80},\s+(?:and\s+)?\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite)\b/i.test(m)) return true;
+  // "Edit these 2 files", "update 3 files"
+  if (/\b(edit|update|change|modify|fix)\s+(?:these\s+)?([2-9]|two|three|four|five)\s+files?\b/i.test(m)) return true;
   return false;
 }
 
@@ -113,17 +124,25 @@ function classifyByHeuristic(message) {
     if (p.test(cleanMsg)) return "answer";
   }
 
+  // Numbered list (1- ... 2- ...) checked BEFORE pipeline patterns.
+  // Pipeline patterns fire on keywords like "claude code" that appear in design references
+  // ("make it look like claude code") — a numbered list is almost always a multi-task edit,
+  // never a full-project scaffold, so it must win over pipeline classification.
+  const numberedListItem = /(?:^|[\n\r])\s*(?:\*{1,2})?[1-5][.\-\)]\s*\S/;
+  const numberedListSecond = /(?:^|[\n\r])\s*(?:\*{1,2})?[2-5][.\-\)]\s*\S/;
+  if (numberedListItem.test(cleanMsg) && numberedListSecond.test(cleanMsg)) return "multi_task";
+
   for (const p of PIPELINE_PATTERNS) {
     if (p.test(cleanMsg)) return "pipeline";
   }
 
   const isQuestion = QUESTION_PATTERNS.some((p) => p.test(cleanMsg));
 
-  // Multi-task feature requests with named files must win over install/debug checks —
-  // phrases like "add abortControllerRef.current" look like npm packages to the install regex.
+  // Multi-task requests with named files win over install/debug checks.
+  // Route to multi_task_runner which uses LLM decomposition — not regex — to split tasks.
   const hasFileExtensionEarly = FILE_EXTENSION.test(cleanMsg);
   const hasComponentNameEarly = COMPONENT_NAME.test(cleanMsg);
-  if (isMultiTaskRequest(cleanMsg) && (hasFileExtensionEarly || hasComponentNameEarly)) return "explore";
+  if (isMultiTaskRequest(cleanMsg) && (hasFileExtensionEarly || hasComponentNameEarly)) return "multi_task";
 
   if (INSTALL_PATTERNS.some((p) => p.test(cleanMsg))) return "install";
   if (TEST_PATTERNS.some((p) => p.test(cleanMsg))) return "test";
@@ -134,6 +153,9 @@ function classifyByHeuristic(message) {
   const hasFilePath = FILE_PATH.test(cleanMsg);
   const hasComponentName = COMPONENT_NAME.test(cleanMsg);
   const hasCodeEditVerb = CODE_EDIT_VERB.test(cleanMsg);
+
+  // Second multi-task check: catches patterns without a file extension in the early check
+  if (isMultiTaskRequest(cleanMsg) && (hasFilePath || hasComponentName || hasCodeEditVerb || EDIT_VERB.test(cleanMsg))) return "multi_task";
 
   if (hasFileExtension) return "explore";
   if (hasFilePath) return "explore";
@@ -172,10 +194,11 @@ export async function routerNode(state) {
     stage: "routed",
     message:
       intent === "investigate" ? "🧠 Starting investigation mode..." :
-      intent === "explore" ? "📂 Entering workspace mode..." :
-      intent === "pipeline" ? "📂 Entering workspace mode..." :
-      intent === "test" ? "🧪 Running tests..." :
-      intent === "install" ? "📦 Installing packages..." :
+      intent === "explore"     ? "📂 Entering workspace mode..." :
+      intent === "pipeline"    ? "📂 Entering workspace mode..." :
+      intent === "multi_task"  ? "🧩 Multi-task mode — decomposing..." :
+      intent === "test"        ? "🧪 Running tests..." :
+      intent === "install"     ? "📦 Installing packages..." :
       "💬 Preparing response...",
   });
 

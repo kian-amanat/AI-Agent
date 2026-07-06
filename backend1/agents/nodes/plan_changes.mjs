@@ -9,12 +9,107 @@
  * - Retry once on transient LLM failures.
  */
 
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
 import { AIMessage } from "@langchain/core/messages";
 import { callLLM } from "../../services/llm.mjs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname  = path.dirname(__filename);
+const PC_PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..");
 
 const MAX_PROMPT_FILES = 5;
 const MAX_FILE_CHARS = 15000; // raised from 10000 so 12-15KB files aren't truncated
 const MAX_TOTAL_CONTEXT_CHARS = 20000;
+
+// ── Self-healing: load missing files when the plan is all read_only ────────────
+
+const SKIP_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", ".turbo", "uploads", ".agent-history"]);
+const CODE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
+
+async function findWorkspaceFiles(projectRoot, dir = projectRoot, depth = 0) {
+  if (depth > 9) return [];
+  const results = [];
+  let entries;
+  try { entries = await fs.readdir(dir, { withFileTypes: true }); } catch { return results; }
+  for (const e of entries) {
+    if (SKIP_DIRS.has(e.name)) continue;
+    const abs = path.join(dir, e.name);
+    const rel = path.relative(projectRoot, abs).replace(/\\/g, "/");
+    if (e.isDirectory()) {
+      results.push(...await findWorkspaceFiles(projectRoot, abs, depth + 1));
+    } else if (CODE_EXTS.has(path.extname(e.name).toLowerCase())) {
+      results.push(rel);
+    }
+  }
+  return results;
+}
+
+async function selfHealLoadMissingFiles(plan, fileContext, root, userMsg, emit) {
+  const descriptions = plan.map(s => `${s.description || ""} ${s.path || ""}`).join(" ");
+  const loadedPaths = new Set((fileContext || []).map(f => f?.path).filter(Boolean));
+  const newFiles = [];
+
+  const allFiles = await findWorkspaceFiles(root);
+
+  // Extract PascalCase words from descriptions — likely component names
+  const componentNames = [...new Set([...descriptions.matchAll(/\b([A-Z][a-zA-Z]{2,})\b/g)].map(m => m[1]))];
+
+  for (const name of componentNames) {
+    const lowerName = name.toLowerCase();
+    const match = allFiles.find(f => {
+      const base = path.basename(f, path.extname(f)).toLowerCase();
+      return base === lowerName;
+    });
+    if (match && !loadedPaths.has(match)) {
+      try {
+        const content = await fs.readFile(path.resolve(root, match), "utf-8");
+        newFiles.push({ path: match, content, size: content.length, score: 250 });
+        loadedPaths.add(match);
+        emit?.({ type: "progress", stage: "planning", message: `📖 Loading missing file: ${path.basename(match)}` });
+        console.log(`[PlanChanges] Self-heal: loaded ${match}`);
+      } catch {}
+    }
+  }
+
+  // Fallback: "user message" with no component found → load the main page
+  if (newFiles.length === 0 && /user.?message|chat.?bubble|message.?bubble/i.test(descriptions + " " + (userMsg || ""))) {
+    const pageTsx = allFiles.find(f => path.basename(f) === "page.tsx" && f.includes("app/page"));
+    if (pageTsx && !loadedPaths.has(pageTsx)) {
+      try {
+        const raw = await fs.readFile(path.resolve(root, pageTsx), "utf-8");
+        // page.tsx is large (~800 lines). shortenContentSmart picks the wrong
+        // window (copyToClipboard fn body) missing the JSX message rendering at
+        // line ~700+. Pre-trim: show imports (top 60 lines) + message render area.
+        const rawLines = raw.split("\n");
+        // Match the JSX message-loop entry: "{messages.map((m)" or "{m.role === "user""
+        // Avoid early filter() calls like "(m) => m.role === ..." by requiring { prefix.
+        const renderStart = rawLines.findIndex(
+          (l, i) => i > 50 && (/\{\s*messages\s*\.\s*map\s*\(/.test(l) || /\{\s*m\s*\.\s*role\s*===/.test(l))
+        );
+        let content = raw;
+        if (renderStart > 60) {
+          const header = rawLines.slice(0, 60);
+          const renderArea = rawLines.slice(Math.max(60, renderStart - 20), Math.min(rawLines.length, renderStart + 250));
+          content = [
+            ...header,
+            "",
+            "// ── [file truncated — showing message rendering area] ──",
+            "",
+            ...renderArea,
+          ].join("\n");
+          console.log(`[PlanChanges] Self-heal: page.tsx trimmed to render area (abs line ${renderStart})`);
+        }
+        newFiles.push({ path: pageTsx, content, size: content.length, score: 250 });
+        emit?.({ type: "progress", stage: "planning", message: `📖 Loading page.tsx — user messages rendered here` });
+        console.log(`[PlanChanges] Self-heal fallback: loaded ${pageTsx}`);
+      } catch {}
+    }
+  }
+
+  return newFiles;
+}
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -32,8 +127,8 @@ function isMultiTaskRequest(msg) {
   if (/\b(two|three|four|five|2|3|4|5)\s+(things?|changes?|tasks?|items?|fixes?|improvements?|updates?)\b/i.test(m)) return true;
   // Multiple conjunctions connecting distinct actions
   if (/\b(also|additionally|furthermore|moreover|plus|as well as|on top of that)\b/i.test(m)) return true;
-  // Comma-separated actions with verbs ("make X, add Y, fix Z")
-  if (/\b(make|add|fix|change|update|remove|improve)\b.{3,50},\s+(?:and\s+)?\b(make|add|fix|change|update|remove|improve)\b/i.test(m)) return true;
+  // Comma-separated actions — expanded verb list (includes create/build/implement/design/move/refactor)
+  if (/\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite)\b.{3,80},\s+(?:and\s+)?\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite)\b/i.test(m)) return true;
   // "I want X things"
   if (/\bi\s+(?:want|need|would like)\s+(?:to\s+(?:have\s+)?)?\d+\b/i.test(m)) return true;
   // "Edit these 2 files", "update 3 files"
@@ -61,8 +156,9 @@ function isLintFixRequest(msg) {
 
 function isScopedChange(msg) {
   const m = String(msg || "").toLowerCase();
+  // "move X" requires structural changes (fragment wrappers, reparenting) — not scoped
+  if (/\bmove\b/.test(m)) return false;
   // "change button X in sidebar", "update the collapse icon", "make the search button red"
-  // Detects references to a specific named element inside a larger container
   return /\b(button|icon|toggle|link|input|badge|label|text|color|colour|style|class|className|title|placeholder)\b/.test(m)
     && /\b(in|inside|within|of|on|for|the)\b/.test(m);
 }
@@ -124,20 +220,31 @@ function shortenContentSmart(content, maxChars, userMsg) {
   const text = normalizeSnippet(content);
   if (text.length <= maxChars) return text;
 
-  const stopWords = new Set(["that", "this", "with", "from", "more", "have", "will", "just", "what", "your", "into", "over", "then", "them", "they", "make", "also", "each", "left", "right"]);
-  const keywords = String(userMsg || "")
+  const stopWords = new Set(["that", "this", "with", "from", "more", "have", "will", "just", "what", "your", "into", "over", "then", "them", "they", "make", "also", "each", "left", "right", "the", "not", "and", "but", "for", "are", "was", "its", "can", "all", "has", "had", "our", "out", "one", "you", "like", "same"]);
+  // Deduplicate — duplicate words (e.g. "message bubble not inside message bubble")
+  // inflate scores for irrelevant lines that happen to contain that word once.
+  const keywords = [...new Set(String(userMsg || "")
     .toLowerCase()
     .replace(/[^\w\s[\]-]/g, " ")
     .split(/\s+/)
-    .filter(w => w.length >= 3 && !stopWords.has(w));
+    .filter(w => w.length >= 3 && !stopWords.has(w)))];
 
   const lines = text.split("\n");
   const charsPerLine = Math.max(20, text.length / lines.length);
 
   if (keywords.length > 0) {
+    // When the task is UI-related, boost JSX lines so the window lands on JSX
+    // rendering rather than plain function bodies (e.g. copyToClipboard fn).
+    const isUITask = /button|bubble|hover|component|render|icon|class|style|copy|color|colour|badge|label/i.test(userMsg);
     const scores = lines.map(line => {
       const lower = line.toLowerCase();
-      return keywords.reduce((s, kw) => s + (lower.includes(kw) ? 1 : 0), 0);
+      let score = keywords.reduce((s, kw) => s + (lower.includes(kw) ? 1 : 0), 0);
+      // JSX lines have closing tags, self-close markers, or JSX-specific attrs.
+      // Avoid false-positives from TypeScript generics (useState<string>).
+      if (isUITask && score > 0 && (/<\/[A-Za-z]|\/>|className=|onClick=|^\s*<[A-Za-z]/.test(line))) {
+        score += 2; // prefer JSX context for UI tasks
+      }
+      return score;
     });
 
     const maxScore = Math.max(...scores);
@@ -397,6 +504,7 @@ JSX/TSX VALIDITY RULES (always enforced)
 - Every JSX attribute MUST be inside its element's opening tag. Never leave props floating outside a tag.
 - All tags must be balanced: every <Foo> must have </Foo> or be self-closed <Foo />.
 - A JSX expression returns exactly one root element. Use a fragment (<> </>) if you need siblings.
+- When adding a sibling element inside a ternary branch (e.g. adding a button below a div inside "condition ? (DIV) : …"), wrap the whole true-branch in a React fragment so it has one root: "condition ? (Fragment DIV BUTTON /Fragment) : …".
 - After applying your patch, mentally re-read the resulting JSX to confirm it is valid.
 - If your patch adds new JSX elements, confirm existing closing tags are still present.
 
@@ -407,7 +515,9 @@ DEPENDENCY RULES
 - If you need to edit a file NOT in the list, emit a read_only step explaining what you need.
 
 OUTPUT FORMAT
-Return ONLY valid JSON:
+Return ONLY valid JSON. Two forms are allowed:
+
+Form A — normal plan (you have enough context):
 {
   "reasoning": "Root cause in one sentence. Which layer is broken and why.",
   "dependencyNotes": "Which files call which, and why editing X requires or does not require editing Y.",
@@ -427,6 +537,16 @@ Return ONLY valid JSON:
     }
   ]
 }
+
+Form B — request more context (file is truncated and you need a specific section):
+{
+  "reasoning": "Why you need more lines.",
+  "plan": [],
+  "read_more": [
+    { "path": "exact/path/from/file/list", "around": "short keyword or code phrase that appears near the section you need" }
+  ]
+}
+Use Form B ONLY when the file shown is explicitly truncated (contains "[file continues]" or "[truncated]") AND you cannot make a correct patch without seeing the missing section. The system will load the requested section and retry.
 
 PATCH RULES
 - Use the EXACT path from the "### File: <path>" header — never shorten it.
@@ -486,8 +606,8 @@ function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToR
     lint: "Fix ONLY the exact lint violations. Use replace_text per violation. NEVER use rewrite_file. Keep all logic, components, and imports that are not directly causing the error.",
     creative: "Be bold but controlled. Improve the design and clarity where it helps. Prefer replace_block over rewrite_file unless the change is truly file-wide.",
     debug: "Use the investigation evidence to fix the root cause. Do not edit blindly.",
-    scoped: "The user referenced a specific element. Use replace_block or replace_text targeting ONLY that element. NEVER use rewrite_file. Leave all surrounding code untouched.",
-    surgical: "Make the MINIMUM change. Touch ONLY the code the user explicitly mentioned. Every line not mentioned in the request must remain identical.",
+    scoped: "The user referenced a specific element. If it exists, use replace_block or replace_text to change ONLY that element. If it does not exist yet, use insert_after to add it in the correct position. NEVER use rewrite_file. Leave all surrounding code untouched.",
+    surgical: "Make the MINIMUM change to fulfill the request. When moving an element to a new location, restructure the immediate parent section as needed — add a React fragment wrapper, remove the element from its current position, and insert it in the new position — all in a single replace_block patch. Every other line must remain identical.",
     multi: "The user requested MULTIPLE changes. Produce one edit step per task — every task gets an EDIT action, not read_only. NEVER mark a file read_only just because you are unsure; if the file is shown below, you have enough context to edit it. Use replace_block or replace_text per task.",
   };
 
@@ -709,17 +829,36 @@ function applyPathCanonicalization(plan, fileContext, rememberedTargetFile) {
 
 
 // Build a focused single-file user prompt for the sequential planner.
-// For files over 12 000 chars, use smart truncation centred on the relevant
-// section so the model's ~8 192-token context window is not exceeded.
+// Claude Code approach: always show the file HEADER (imports + hook declarations)
+// plus a focused body window around the relevant change location.
+// This lets the planner see both where to declare a new ref/state AND where to use it.
 const MAX_SINGLE_FILE_CHARS = 12_000;
+const HEAD_LINES = 60; // enough to capture all imports + useState/useRef declarations
+
 function buildSingleFilePrompt(userMessage, file, focusInstruction) {
   const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
   const content = String(file.content || "");
   const outline = buildJsxOutline(content, file.path);
-  // Focus the window on the section most relevant to the task+file instruction
-  const displayContent = content.length > MAX_SINGLE_FILE_CHARS
-    ? shortenContentSmart(content, MAX_SINGLE_FILE_CHARS, `${cleanMsg} ${focusInstruction}`)
-    : content;
+
+  let displayContent;
+  if (content.length > MAX_SINGLE_FILE_CHARS) {
+    const lines = content.split("\n");
+    const head = lines.slice(0, HEAD_LINES).join("\n");
+    const bodyLines = lines.slice(HEAD_LINES).join("\n");
+    const bodyBudget = MAX_SINGLE_FILE_CHARS - head.length - 60; // 60 chars for separator
+
+    if (bodyBudget > 1500) {
+      // Focused body: find the most relevant section AFTER the header
+      const focusedBody = shortenContentSmart(bodyLines, bodyBudget, `${cleanMsg} ${focusInstruction}`);
+      displayContent = `${head}\n\n// ── [file continues — focused section below] ──\n\n${focusedBody}`;
+    } else {
+      // Header alone already fills the budget — just show it with smart truncation
+      displayContent = shortenContentSmart(content, MAX_SINGLE_FILE_CHARS, `${cleanMsg} ${focusInstruction}`);
+    }
+  } else {
+    displayContent = content;
+  }
+
   const numbered = addLineNumbers(displayContent);
   const summary = file.summary ? `\nSummary: ${file.summary}` : "";
 
@@ -727,9 +866,14 @@ function buildSingleFilePrompt(userMessage, file, focusInstruction) {
 
 ${focusInstruction}
 
+IMPORTANT: The file is shown in two parts — a HEADER (top ${HEAD_LINES} lines with imports and hook declarations) and a focused BODY section. You may need to add patches in BOTH parts. For example:
+- If you must declare a new variable (useRef, useState, const), add an insert_after patch in the HEADER section near similar declarations.
+- If you must use that variable later, add a replace_block patch in the BODY section.
+Both patches go into the same plan step (same "patches" array).
+
 Use replace_block or replace_text for surgical changes.
 Use the SHORTEST unique anchor (2-5 lines). Never include line numbers or markdown fences in search/replace text.
-For JSX: every opened tag must be closed. After patching, re-read the result mentally to confirm JSX is valid.
+For JSX: every opened tag must be closed.
 
 Project files:
 
@@ -887,7 +1031,7 @@ function buildFallbackPlan({ fileContext, rememberedTargetFile, mode, emptyRespo
 }
 
 export async function planChangesNode(state) {
-  const { userMessage, fileContext, modelRoute, emit, rememberedTargetFile = "", investigation = null, retryCount = 0, verifyResult = null } = state;
+  const { userMessage, fileContext, modelRoute, emit, rememberedTargetFile = "", investigation = null, retryCount = 0, verifyResult = null, workspacePath = "" } = state;
 
   const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
   // Exploration result overrides session memory: if the agent found a different target file,
@@ -1094,6 +1238,151 @@ export async function planChangesNode(state) {
           content: "",
         },
       ];
+    }
+  }
+
+  // read_more: model explicitly signals it needs a specific section of a truncated file.
+  // Load that section and retry planning once (like Claude Code's Read-on-demand).
+  if (parsed.read_more?.length > 0 && !isRetry) {
+    const expandedContext = [...(fileContext || [])];
+    let anyExpanded = false;
+    for (const req of parsed.read_more) {
+      const target = (fileContext || []).find(f => f.path === req.path || f.path.endsWith(req.path));
+      if (!target) continue;
+      const around = String(req.around || "");
+      if (!around) continue;
+      // Read the FULL file from disk — the explore may have stored only a partial
+      // section (start_line..end_line), so target.content may be truncated.
+      let rawContent = target.content;
+      try {
+        const absPath = path.resolve(workspacePath || PC_PROJECT_ROOT, target.path);
+        rawContent = await fs.readFile(absPath, "utf-8");
+      } catch { /* fall back to stored content */ }
+      const lines = rawContent.split("\n");
+      const keywords = around.toLowerCase().split(/\s+/).filter(w => w.length >= 3);
+      const scores = lines.map(l => keywords.reduce((s, kw) => s + (l.toLowerCase().includes(kw) ? 1 : 0), 0));
+      const maxScore = Math.max(...scores);
+      if (maxScore === 0) continue;
+      const bestLine = scores.indexOf(maxScore);
+      const WINDOW = 120;
+      const start = Math.max(0, bestLine - Math.floor(WINDOW / 2));
+      const end = Math.min(lines.length, start + WINDOW);
+      const snippet = [
+        `// ── [read_more: lines ${start + 1}–${end} of ${target.path}] ──`,
+        ...lines.slice(start, end),
+      ].join("\n");
+      // Append as a supplemental section to the target file's content
+      expandedContext.forEach(f => {
+        if (f.path === target.path) {
+          f._readMoreSnippet = snippet;
+        }
+      });
+      anyExpanded = true;
+      emit?.({ type: "progress", stage: "planning", message: `📖 Loading more of ${target.path.split("/").pop()} (lines ${start + 1}–${end})…` });
+      console.log(`[PlanChanges] read_more: loaded ${target.path} lines ${start + 1}–${end} (around "${around}")`);
+    }
+    if (anyExpanded) {
+      // Rebuild the prompt with supplemental snippets appended, then retry once
+      const supplemented = expandedContext.map(f =>
+        f._readMoreSnippet
+          ? { ...f, content: f.content + "\n\n" + f._readMoreSnippet }
+          : f
+      );
+      const retryContent = buildUserPrompt(userMessage, supplemented, rememberedTargetFile, lockToRemembered, mode, investigation, []);
+      const retryResult = await generatePlanWithRetry({ system, content: retryContent, modelRoute, mode });
+      if (retryResult.parsed?.plan) {
+        const retryPlan = applyPathCanonicalization(
+          retryResult.parsed.plan.map(item => ({
+            action: String(item.action || "read_only"),
+            path: String(item.path || ""),
+            description: String(item.description || ""),
+            patches: normalizePatchList(item),
+            edits: [],
+            content: typeof item.content === "string" ? stripLineNumbers(item.content) : "",
+          })),
+          fileContext || [],
+          rememberedTargetFile
+        );
+        if (retryPlan.some(s => s.action !== "read_only")) {
+          console.log(`[PlanChanges] read_more retry succeeded: ${retryPlan.length} step(s)`);
+          return {
+            plan: retryPlan,
+            fileContext,
+            messages: [new AIMessage(`read_more plan (${retryPlan.length}):\n` +
+              retryPlan.map((p, i) => `  ${i + 1}. [${p.action.toUpperCase()}] ${p.path}`).join("\n"))],
+          };
+        }
+      }
+    }
+  }
+
+  // Self-heal: if ALL steps are read_only on the first attempt, the planner
+  // couldn't see the file it needed. Load missing files from the descriptions
+  // and retry planning once — no graph cycle needed.
+  const allReadOnly = plan.length > 0 && plan.every(s => s.action === "read_only");
+  if (allReadOnly && !isRetry) {
+    const root = workspacePath || PC_PROJECT_ROOT;
+    const healedFiles = await selfHealLoadMissingFiles(plan, fileContext || [], root, userMessage, emit);
+    if (healedFiles.length > 0) {
+      console.log(`[PlanChanges] Self-heal: retrying with ${healedFiles.length} new file(s)`);
+      emit?.({ type: "progress", stage: "planning", message: "🔄 Found missing files — retrying plan..." });
+      const expandedContext = [...(fileContext || []), ...healedFiles];
+
+      // Augment userMessage with a reference snippet from any already-loaded file
+      // that shows the pattern to apply (e.g. the AssistantMessage copy button).
+      // This is needed because planFilesSequentially only shows the target file
+      // content — the model has no other context to understand what to build.
+      let userMessageForSeq = userMessage;
+      for (const ref of (fileContext || [])) {
+        if (!ref?.content) continue;
+        const refLines = ref.content.split("\n");
+        const patternIdx = refLines.findIndex(l =>
+          /copyToClipboard|group-hover:opacity|Copy.*className|clipboard/i.test(l)
+        );
+        if (patternIdx >= 0) {
+          const start = Math.max(0, patternIdx - 5);
+          const snippet = refLines.slice(start, Math.min(refLines.length, start + 30)).join("\n");
+          userMessageForSeq = `${userMessage}\n\n// Pattern to follow from ${ref.path}:\n${snippet}`;
+          console.log(`[PlanChanges] Self-heal: injecting reference pattern from ${ref.path}`);
+          break;
+        }
+      }
+
+      // Use sequential planning (one LLM call per new file) so each file gets
+      // its own full token budget. Combined prompts fail when reference file +
+      // target file exceed MAX_TOTAL_CONTEXT_CHARS.
+      const seqResult = await planFilesSequentially({
+        filesToShow: healedFiles, // only newly loaded files are edit targets
+        userMessage: userMessageForSeq,
+        system,
+        modelRoute,
+        investigation,
+      });
+
+      if (seqResult?.plan) {
+        const healedPlan = applyPathCanonicalization(
+          seqResult.plan.map(item => ({
+            action: String(item.action || "read_only"),
+            path: String(item.path || ""),
+            description: String(item.description || ""),
+            patches: normalizePatchList(item),
+            edits: [],
+            content: typeof item.content === "string" ? stripLineNumbers(item.content) : "",
+          })),
+          expandedContext,
+          rememberedTargetFile
+        );
+        if (healedPlan.some(s => s.action !== "read_only")) {
+          plan = healedPlan;
+          console.log(`[PlanChanges] Self-heal succeeded: ${plan.length} step(s)`);
+          return {
+            plan,
+            fileContext: expandedContext,
+            messages: [new AIMessage(`Self-heal plan (${plan.length}):\n` +
+              plan.map((p, i) => `  ${i + 1}. [${p.action.toUpperCase()}] ${p.path} – ${p.description}`).join("\n"))],
+          };
+        }
+      }
     }
   }
 
