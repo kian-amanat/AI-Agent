@@ -32,14 +32,15 @@
 
 import { StateGraph, END, START } from "@langchain/langgraph";
 
-import { routerNode }         from "./nodes/router.mjs";
-import { agenticExploreNode } from "./nodes/agentic_explore.mjs";
-import { planChangesNode }    from "./nodes/plan_changes.mjs";
-import { executeChangesNode } from "./nodes/execute_changes.mjs";
-import { verifyNode }         from "./nodes/verify.mjs";
-import { answerNode }         from "./nodes/answer.mjs";
-import { runTestsNode }       from "./nodes/run_tests.mjs";
-import { installPackagesNode} from "./nodes/install_packages.mjs";
+import { routerNode }          from "./nodes/router.mjs";
+import { agenticExploreNode }  from "./nodes/agentic_explore.mjs";
+import { planChangesNode }     from "./nodes/plan_changes.mjs";
+import { executeChangesNode }  from "./nodes/execute_changes.mjs";
+import { verifyNode }          from "./nodes/verify.mjs";
+import { answerNode }          from "./nodes/answer.mjs";
+import { runTestsNode }        from "./nodes/run_tests.mjs";
+import { installPackagesNode } from "./nodes/install_packages.mjs";
+import { multiTaskRunnerNode } from "./nodes/multi_task_runner.mjs";
 
 // ── State annotation ──────────────────────────────────────────────────────────
 
@@ -124,6 +125,8 @@ function withErrorBoundary(nodeName, fn) {
 
 function routerEdge(state) {
   switch (state.intent) {
+    case "multi_task":
+      return "multi_task_runner";
     case "investigate":
     case "explore":
     case "pipeline":
@@ -152,24 +155,26 @@ export function buildKodoGraph() {
   const graph = new StateGraph({ channels: KodoStateAnnotation });
 
   graph
-    .addNode("router",           withErrorBoundary("router",          routerNode))
-    .addNode("agentic_explore",  withErrorBoundary("agentic_explore", agenticExploreNode))
-    .addNode("plan_changes",     withErrorBoundary("plan_changes",    planChangesNode))
-    .addNode("execute_changes",  withErrorBoundary("execute_changes", executeChangesNode))
-    .addNode("verify",           withErrorBoundary("verify",          verifyNode))
-    .addNode("answer",           withErrorBoundary("answer",          answerNode))
-    .addNode("run_tests",        withErrorBoundary("run_tests",       runTestsNode))
-    .addNode("install_packages", withErrorBoundary("install_packages",installPackagesNode));
+    .addNode("router",            withErrorBoundary("router",            routerNode))
+    .addNode("agentic_explore",   withErrorBoundary("agentic_explore",   agenticExploreNode))
+    .addNode("plan_changes",      withErrorBoundary("plan_changes",      planChangesNode))
+    .addNode("execute_changes",   withErrorBoundary("execute_changes",   executeChangesNode))
+    .addNode("verify",            withErrorBoundary("verify",            verifyNode))
+    .addNode("answer",            withErrorBoundary("answer",            answerNode))
+    .addNode("run_tests",         withErrorBoundary("run_tests",         runTestsNode))
+    .addNode("install_packages",  withErrorBoundary("install_packages",  installPackagesNode))
+    .addNode("multi_task_runner", withErrorBoundary("multi_task_runner", multiTaskRunnerNode));
 
   // Entry point
   graph.addEdge(START, "router");
 
-  // Router dispatches to one of five paths
+  // Router dispatches to one of six paths
   graph.addConditionalEdges("router", routerEdge, {
-    agentic_explore:  "agentic_explore",
-    answer:           "answer",
-    run_tests:        "run_tests",
-    install_packages: "install_packages",
+    multi_task_runner: "multi_task_runner",
+    agentic_explore:   "agentic_explore",
+    answer:            "answer",
+    run_tests:         "run_tests",
+    install_packages:  "install_packages",
   });
 
   // Code-edit pipeline: explore → plan → execute → verify → (retry | done)
@@ -183,9 +188,10 @@ export function buildKodoGraph() {
   });
 
   // Terminal nodes
-  graph.addEdge("answer",           END);
-  graph.addEdge("run_tests",        END);
-  graph.addEdge("install_packages", END);
+  graph.addEdge("answer",            END);
+  graph.addEdge("run_tests",         END);
+  graph.addEdge("install_packages",  END);
+  graph.addEdge("multi_task_runner", END); // runs full pipeline internally per task
 
   return graph.compile();
 }
