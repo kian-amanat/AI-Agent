@@ -449,40 +449,61 @@ export async function agenticExploreNode(state) {
   let iteration = 0;
 
   // ── Fast-path: skip LLM loop when explicit file names are in the message ──
-  // For pure feature/edit requests ("explore" intent) the user often names the
-  // exact files they want changed. Pre-loading them avoids 12 LLM round-trips.
+  // Strategy: check whether each workspace file's FULL relative path appears
+  // verbatim in the message (substring match). This is unambiguous — if the user
+  // wrote "chatbot/my-chatbot-ui/app/page.tsx", only that exact file matches,
+  // not "connection/page.tsx" or any other file that shares a basename.
   if (intent === "explore") {
-    const EXPLICIT_FILE_RE = /\b([\w\-.]+\.(tsx?|jsx?|mjs|cjs|css|scss|json))\b/gi;
-    const mentionedBases = [
-      ...new Set([...cleanMessage.matchAll(EXPLICIT_FILE_RE)].map(m => m[1].toLowerCase())),
-    ];
+    const msgLower = cleanMessage.toLowerCase();
+    const allFiles = await walkWorkspace(root, 10);
+    const codeFiles = allFiles.filter(f => !f.isDir);
 
-    if (mentionedBases.length > 0) {
-      const allFiles = await walkWorkspace(root, 10);
-      const codeFiles = allFiles.filter(f => !f.isDir);
+    // Phase 1: full-path substring match (preferred — unambiguous)
+    for (const file of codeFiles) {
+      if (msgLower.includes(file.path.toLowerCase())) {
+        const absPath = path.resolve(root, file.path);
+        const content = await readFileSafe(absPath);
+        if (content) loadedFiles.set(file.path, { path: file.path, content, size: content.length, score: 200 });
+      }
+    }
+
+    // Phase 2: if no full paths matched, try bare filenames with disambiguation.
+    // When multiple files share a basename, prefer the one with more path
+    // segments that appear in the message, then fewer total segments (shallower).
+    if (loadedFiles.size === 0) {
+      const BARE_FILE_RE = /\b([\w\-.]+\.(tsx?|jsx?|mjs|cjs|css|scss|json))\b/gi;
+      const mentionedBases = [...new Set([...cleanMessage.matchAll(BARE_FILE_RE)].map(m => m[1].toLowerCase()))];
 
       for (const base of mentionedBases) {
-        const match = codeFiles.find(f => path.basename(f.path).toLowerCase() === base);
-        if (match) {
+        const candidates = codeFiles.filter(f => path.basename(f.path).toLowerCase() === base);
+        let match = null;
+        if (candidates.length === 1) {
+          match = candidates[0];
+        } else if (candidates.length > 1) {
+          const scored = candidates.map(c => {
+            const segs = c.path.toLowerCase().split("/");
+            const overlap = segs.filter(s => s.length > 2 && msgLower.includes(s)).length;
+            return { file: c, score: overlap * 10 - segs.length }; // tie-break: fewer segments
+          });
+          scored.sort((a, b) => b.score - a.score);
+          match = scored[0]?.file;
+        }
+        if (match && !loadedFiles.has(match.path)) {
           const absPath = path.resolve(root, match.path);
           const content = await readFileSafe(absPath);
           if (content) loadedFiles.set(match.path, { path: match.path, content, size: content.length, score: 200 });
         }
       }
+    }
 
-      // Activate fast-path as long as at least one named file was loaded.
-      // Missing files will appear as read_only steps in plan_changes, which is
-      // far better than a 5-minute LLM loop timeout.
-      if (loadedFiles.size > 0) {
-        const missing = mentionedBases.filter(b => ![...loadedFiles.keys()].some(p => path.basename(p).toLowerCase() === b));
-        console.log(`[AgenticExplore] Fast-path: loaded ${loadedFiles.size}/${mentionedBases.length} named file(s), skipping LLM loop${missing.length ? ` (not found: ${missing.join(', ')})` : ''}`);
-        readySignal = {
-          summary: `Fast-path load of explicitly named file(s): ${[...loadedFiles.keys()].join(', ')}`,
-          priorityFiles: [...loadedFiles.keys()],
-          rootCause: null,
-        };
-        iteration = MAX_LOOP_ITERATIONS; // skip while loop
-      }
+    if (loadedFiles.size > 0) {
+      console.log(`[AgenticExplore] Fast-path: loaded ${loadedFiles.size} file(s): ${[...loadedFiles.keys()].join(", ")}`);
+      readySignal = {
+        summary: `Fast-path load: ${[...loadedFiles.keys()].join(", ")}`,
+        priorityFiles: [...loadedFiles.keys()],
+        rootCause: null,
+      };
+      iteration = MAX_LOOP_ITERATIONS; // skip while loop
     }
   }
 

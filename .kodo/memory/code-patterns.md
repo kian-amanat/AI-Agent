@@ -1,23 +1,23 @@
 ---
-updated: 2026-07-05T17:16:52.046Z
+updated: 2026-07-06T18:35:52.563Z
 ---
 
-- **Frontend AbortController Pattern**:
-  - Implemented in `chatbot/my-chatbot-ui/app/hooks/useAgentPipeline.ts`.
-  - Uses `abortControllerRef = useRef<AbortController | null>(null)` to track the current request.
-  - On sending a message: `abortControllerRef.current = new AbortController()`.
-  - Passes `signal: abortControllerRef.current.signal` to the API call.
-  - Hook returns the abort function/controller to allow UI trigger (Stop button).
-- **API Layer Update**:
-  - Updated `chatbot/my-chatbot-ui/app/lib/api.ts`.
-  - `sendMessage` function now accepts an optional `signal` parameter.
-  - Passes this signal directly to the underlying `fetch` call.
-- **Integration**:
-  - Frontend cancellation triggers immediate abort of the fetch/SSE connection.
-  - Complements backend `AbortController` support (already in `backend1`).
-- **ChatComposer Component**:
-  - Props type includes `onStop?: () => void`.
-  - Imports `StopRounded` from `@mui/icons-material/StopRounded`.
-  - Uses `StopRoundedIcon` with white color for loading states (per user preference).
-  - **Stop Button Logic**: The `onStop` prop in `ChatComposer` triggers `abortRequestRef.current?.()` and `pipeline.stop()`.
-  - **Implementation Detail**: In `app/page.tsx`, `abortControllerRef.current` is initialized immediately before `sendMessage` call to ensure the signal is fresh for the new request.
+- **ChatComposer Abort Button Logic**:
+  - The abort button functionality is enabled by passing the `onStop` prop to the `ChatComposer` component.
+  - Implementation updated in `chatbot/my-chatbot-ui/app/page.tsx`.
+  - This allows the UI to trigger the abort signal when the user clicks the stop button.
+  - **Verified Fix**: The abort button now correctly stops the agent workflow.
+- **ChatComposer Send Button Logic**:
+  - The send button's `disabled` prop is bound to `!canSend`.
+  - `canSend` evaluates to `false` when the input has no characters.
+  - This ensures the send button is disabled when the input is empty.
+- **Message Bubble UI Pattern**:
+  - Assistant messages have a copy button visible on hover.
+  - **User messages now have a copy button placed BELOW the message bubble**, aligned to the **right side**.
+  - Implementation updated in `chatbot/my-chatbot-ui/app/page.tsx`.
+  - The copy button is no longer inside the user message bubble but positioned underneath it on the right.
+- **Empty State Styling**:
+  - `EmptyStateCard.tsx` transformed to resemble Claude Code UI.
+  - **Removed** the '3 dots' loading animation.
+  - Replaced with a minimal design featuring subtle entrance/hover animations.
+  - Uses custom animations and color variables defined in `globals.css` (or similar).
