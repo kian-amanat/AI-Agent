@@ -181,12 +181,26 @@ export async function verifyNode(state) {
             action: r.action,
             error: r.error,
             currentContent: currentContent ? currentContent.slice(0, 12000) : null,
+            // Pass through the failed search anchors from execute_changes for retry context
+            failedPatches: r.failedPatches || [],
           });
         } catch (err) {
           issues.push(`Invalid failed path "${r.path}": ${err.message}`);
         }
       }
     }
+  }
+
+  // Fix: all-read_only on a retry is "gave up", not success.
+  // execute_changes returns executionResults:[] when the plan has zero actionable steps,
+  // which makes issues.length===0 → ok=true → "✅ Verification passed" — a false positive.
+  // Surface it honestly so the user and the retry loop know nothing was done.
+  const actionableInPlan = (plan || []).filter(p => p.action !== "read_only");
+  if (actionableInPlan.length === 0 && (retryCount || 0) > 0) {
+    issues.push(
+      "Model could not generate an actionable patch after retry — " +
+      "the search anchor may not match the current file. Try rephrasing with a more specific description of what to change."
+    );
   }
 
   const writtenSteps = (plan || []).filter(
@@ -266,17 +280,32 @@ export async function verifyNode(state) {
   }
 
   const ok = issues.length === 0;
-  const canRetry = !ok && (retryCount || 0) < 2;
+  // MAX_RETRIES must match kodo_graph.mjs's verifyEdge, and canRetry must be computed
+  // from the POST-increment count (nextRetryCount) — verifyEdge gates on the retryCount
+  // this node returns, not the one it received. Using the pre-increment value here caused
+  // canRetry=true right when the graph was actually about to stop, which skipped setting
+  // finalAnswer and left the user with an empty response instead of the failure message.
+  const MAX_RETRIES = 2;
+  const nextRetryCount = (retryCount || 0) + (ok ? 0 : 1);
+  const canRetry = !ok && nextRetryCount < MAX_RETRIES;
 
   let retryFileContext = null;
   if (canRetry && failedEdits.length > 0) {
     retryFileContext = failedEdits
-      .map((fe) => ({
-        path: fe.path,
-        content: fe.currentContent,
-        summary: `RETRY: Previous edit failed with "${fe.error}". Use the CURRENT content below as source of truth.`,
-        score: 200,
-      }))
+      .map((fe) => {
+        // Include the exact search text that didn't match — the model can see what it tried
+        // and pick a different, correct anchor instead of guessing blind (Claude Code approach).
+        const anchorHints = (fe.failedPatches || [])
+          .filter(p => p.search)
+          .map(p => `  • [${p.kind}] searched for: "${p.search.slice(0, 150).replace(/\n/g, "↵")}"`)
+          .join("\n");
+
+        const summary = anchorHints
+          ? `RETRY: Previous edit failed with "${fe.error}".\nSearch anchors that did NOT match the file:\n${anchorHints}\nUse the CURRENT content below — find the correct location and use a DIFFERENT anchor.`
+          : `RETRY: Previous edit failed with "${fe.error}". Use the CURRENT content below as source of truth.`;
+
+        return { path: fe.path, content: fe.currentContent, summary, score: 200 };
+      })
       .filter((fe) => fe.content);
 
     console.log(`[Verify] Built retry context for ${retryFileContext.length} file(s)`);
@@ -324,7 +353,7 @@ export async function verifyNode(state) {
 
   const result = {
     verifyResult: { ok, issues, validationResults },
-    retryCount: (retryCount || 0) + (ok ? 0 : 1),
+    retryCount: nextRetryCount,
     messages: [
       new AIMessage(
         ok

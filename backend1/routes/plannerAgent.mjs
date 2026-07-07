@@ -289,7 +289,7 @@ export default async function plannerAgentRoute(fastify) {
     }
 
         // ── Run the LangGraph (with hard timeout so SSE always closes) ───────────
-    const GRAPH_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes max
+    const GRAPH_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max
 
     // Client disconnect handling
     const controller = new AbortController();

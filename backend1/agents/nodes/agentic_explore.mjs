@@ -35,7 +35,7 @@ const MAX_TOOL_OUTPUT_CHARS = 8_000;
 
 const IGNORE_DIRS = new Set([
   "node_modules", ".git", ".next", "dist", "build",
-  "coverage", ".turbo", ".cache", "out", ".agent-history", "uploads",
+  "coverage", ".turbo", ".cache", "out", ".agent-history", ".kodo", "uploads",
 ]);
 
 const CODE_EXTENSIONS = new Set([
@@ -539,9 +539,56 @@ export async function agenticExploreNode(state) {
     }
   }
 
+  // ── Name-match fast-path ─────────────────────────────────────────────────
+  // When the user describes a component by name (e.g. "sidebar", "composer")
+  // without spelling out the filename, find the ONE file whose basename contains
+  // that word and pre-load it. This skips 4-6 slow LLM iterations entirely.
+  // Only fires when exactly one file matches (safe — no ambiguity).
+  if (intent === "explore" && loadedFiles.size === 0) {
+    const NAME_STOP = new Set([
+      "chat", "code", "your", "open", "close", "show", "hide", "icon", "mode",
+      "view", "page", "main", "keep", "this", "that", "with", "from", "have",
+      "been", "will", "would", "could", "should", "when", "then", "than", "what",
+      "which", "where", "there", "their", "they", "also", "just", "more", "make",
+      "want", "like", "some", "such", "into", "after", "before", "about", "over",
+    ]);
+    const msgWords = cleanMessage.toLowerCase()
+      .replace(/[^a-z0-9 ]/g, " ")
+      .split(/\s+/)
+      .filter(w => w.length >= 4 && !NAME_STOP.has(w));
+
+    const allFiles = loadedFiles.size === 0 ? await walkWorkspace(root, 10) : [];
+    const codeFiles = allFiles.filter(f => !f.isDir);
+
+    for (const word of msgWords) {
+      const nameMatches = codeFiles.filter(f => {
+        const base = path.basename(f.path, path.extname(f.path)).toLowerCase();
+        return base.includes(word);
+      });
+      if (nameMatches.length === 1) {
+        const file = nameMatches[0];
+        const absPath = path.resolve(root, file.path);
+        const content = await readFileSafe(absPath);
+        if (content && !loadedFiles.has(file.path)) {
+          loadedFiles.set(file.path, { path: file.path, content, size: content.length, score: 150 });
+          console.log(`[AgenticExplore] Name-match fast-path: loaded "${file.path}" (word: "${word}")`);
+        }
+      }
+    }
+
+    if (loadedFiles.size > 0) {
+      readySignal = {
+        summary: `Name-match fast-path: loaded ${[...loadedFiles.keys()].join(", ")}`,
+        priorityFiles: [...loadedFiles.keys()],
+        rootCause: null,
+      };
+      iteration = MAX_LOOP_ITERATIONS; // skip LLM loop
+    }
+  }
+
   // ── Agentic loop ──────────────────────────────────────────────────────────
 
-    while (iteration < MAX_LOOP_ITERATIONS) {
+  while (iteration < MAX_LOOP_ITERATIONS) {
     if (state?.abortSignal?.aborted) break;
     iteration++;
     console.log(`[AgenticExplore] Iteration ${iteration}/${MAX_LOOP_ITERATIONS}`);

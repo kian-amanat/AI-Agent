@@ -148,9 +148,19 @@ export default function ChatSidebar({
         </motion.button>
       </div>
 
-            {/* ── Collapsed icon buttons ── */}
+      {/* ── Collapsed icon buttons ── */}
       {isSidebarCollapsed && (
         <div className="flex flex-col items-center gap-3 pb-4 translate-x-[2px]">
+          <motion.button
+            whileHover={{ scale: 1.05, y: -1 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={() => { onStartNewChat(); openSidebarIfCollapsed(); }}
+            className="flex h-11 w-11 items-center justify-center rounded-2xl"
+            title="New chat"
+          >
+            <GlowingPlusIcon compact />
+          </motion.button>
+
           <motion.button
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
@@ -159,16 +169,6 @@ export default function ChatSidebar({
             title="Search"
           >
             <Search className="h-4 w-4" />
-          </motion.button>
-
-          <motion.button
-            whileHover={{ scale: 1.05, y: -1 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={() => { onStartNewChat(); openSidebarIfCollapsed(); }}
-            className="flex h-9 w-9 items-center justify-center rounded-2xl"
-            title="New chat"
-          >
-            <GlowingPlusIcon compact />
           </motion.button>
 
           <motion.button
