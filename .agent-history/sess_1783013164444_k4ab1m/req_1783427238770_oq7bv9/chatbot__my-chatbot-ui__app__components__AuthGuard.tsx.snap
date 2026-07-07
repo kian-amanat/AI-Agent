@@ -58,22 +58,18 @@ export default function AuthGuard({
 
           <div className="p-10 flex flex-col items-center text-center gap-8">
 
-                        {/* Icon with pulse rings */}
+            {/* Icon with pulse rings */}
             <div className="relative flex items-center justify-center w-20 h-20">
-              {loading && (
-                <>
-                  <motion.div
-                    animate={{ scale: [1, 1.35, 1], opacity: [0.15, 0, 0.15] }}
-                    transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
-                    className="absolute inset-0 rounded-full bg-[#ff8a3d]/20"
-                  />
-                  <motion.div
-                    animate={{ scale: [1, 1.6, 1], opacity: [0.08, 0, 0.08] }}
-                    transition={{ duration: 3, repeat: Infinity, ease: "easeInOut", delay: 0.5 }}
-                    className="absolute inset-0 rounded-full bg-[#ff8a3d]/10"
-                  />
-                </>
-              )}
+              <motion.div
+                animate={{ scale: [1, 1.35, 1], opacity: [0.15, 0, 0.15] }}
+                transition={{ duration: 3, repeat: Infinity, ease: "easeInOut" }}
+                className="absolute inset-0 rounded-full bg-[#ff8a3d]/20"
+              />
+              <motion.div
+                animate={{ scale: [1, 1.6, 1], opacity: [0.08, 0, 0.08] }}
+                transition={{ duration: 3, repeat: Infinity, ease: "easeInOut", delay: 0.5 }}
+                className="absolute inset-0 rounded-full bg-[#ff8a3d]/10"
+              />
               <motion.div
                 initial={{ scale: 0.85, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}

@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import {
   Clock,
   Loader2,
@@ -105,67 +105,41 @@ export default function ChatSidebar({
           </div>
         )}
 
-                {/* Collapse / expand toggle */}
-                <motion.button
-          whileTap={{ scale: 0.96 }}
-          onClick={onToggleSidebar}
-          className={`relative flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 text-white/72 transition-colors duration-200 hover:border-white/14 hover:text-white ${
-            isSidebarCollapsed ? "mx-auto" : ""
-          }`}
-          title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
-          aria-label={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+        {/* Collapse / expand toggle */}
+        <motion.div
+          animate={{
+            opacity: isSidebarCollapsed && !isSidebarHovered ? 0 : 1,
+            x: isSidebarCollapsed && !isSidebarHovered ? -8 : 0,
+          }}
+          transition={{ duration: 0.18, ease: "easeOut" }}
+          style={{ pointerEvents: isSidebarCollapsed && !isSidebarHovered ? "none" : "auto" }}
         >
-          {isSidebarCollapsed ? (
-            <AnimatePresence mode="wait">
-              {!isSidebarHovered && (
-                <motion.div
-                  key="icon"
-                  initial={{ opacity: 0, x: -8 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: 8 }}
-                  transition={{ duration: 0.2, ease: "easeOut" }}
-                  className="absolute inset-0 flex items-center justify-center"
-                >
-                  <Image src="/icon.png" alt="Open sidebar" width={24} height={24} className="rounded-md" />
-                </motion.div>
-              )}
-              {isSidebarHovered && (
-                <motion.div
-                  key="arrow"
-                  initial={{ opacity: 0, x: 8 }}
-                  animate={{ opacity: 1, x: 0 }}
-                  exit={{ opacity: 0, x: -8 }}
-                  transition={{ duration: 0.2, ease: "easeOut" }}
-                  className="absolute inset-0 flex items-center justify-center"
-                >
-                  <KeyboardDoubleArrowRightRoundedIcon className="h-5 w-5" />
-                </motion.div>
-              )}
-            </AnimatePresence>
-          ) : (
-            <KeyboardDoubleArrowLeftRoundedIcon className="h-5 w-5" />
-          )}
-        </motion.button>
+          <motion.button
+            whileTap={{ scale: 0.96 }}
+            onClick={onToggleSidebar}
+            className={`flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 text-white/72 transition-colors duration-200 hover:border-white/14 hover:text-white ${
+              isSidebarCollapsed ? "mx-auto" : ""
+            }`}
+            title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+            aria-label={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+          >
+            {isSidebarCollapsed ? (
+              <KeyboardDoubleArrowRightRoundedIcon className="h-5 w-5" />
+            ) : (
+              <KeyboardDoubleArrowLeftRoundedIcon className="h-5 w-5" />
+            )}
+          </motion.button>
+        </motion.div>
       </div>
 
-            {/* ── Collapsed icon buttons ── */}
+      {/* ── Collapsed icon buttons ── */}
       {isSidebarCollapsed && (
         <div className="flex flex-col items-center gap-3 pb-4 translate-x-[2px]">
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={openSidebarIfCollapsed}
-                        className="flex h-11 w-11 items-center justify-center rounded-2xl text-white/80 transition-colors hover:bg-white/[0.06]"
-            title="Search"
-          >
-            <Search className="h-4 w-4" />
-          </motion.button>
-
           <motion.button
             whileHover={{ scale: 1.05, y: -1 }}
             whileTap={{ scale: 0.95 }}
             onClick={() => { onStartNewChat(); openSidebarIfCollapsed(); }}
-            className="flex h-9 w-9 items-center justify-center rounded-2xl"
+            className="flex h-11 w-11 items-center justify-center rounded-2xl"
             title="New chat"
           >
             <GlowingPlusIcon compact />
@@ -175,10 +149,20 @@ export default function ChatSidebar({
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             onClick={openSidebarIfCollapsed}
-            className="flex h-11 w-11 items-center justify-center rounded-2xl text-white/80 transition-colors hover:bg-white/[0.06]"
+            className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/[0.06] text-white/80 transition-colors hover:bg-white/[0.10]"
+            title="Search"
+          >
+            <Search className="h-5 w-5" />
+          </motion.button>
+
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={openSidebarIfCollapsed}
+            className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/[0.06] text-white/80 transition-colors hover:bg-white/[0.10]"
             title="Recent chats"
           >
-            <Clock className="h-4 w-4" />
+            <Clock className="h-5 w-5" />
           </motion.button>
         </div>
       )}

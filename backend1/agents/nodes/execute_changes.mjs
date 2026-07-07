@@ -140,7 +140,7 @@ async function findFileByPartialPath(root, partialPath) {
     }
 
     for (const entry of entries) {
-      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === ".next") continue;
+      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === ".next" || entry.name === ".agent-history" || entry.name === ".kodo") continue;
 
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -226,6 +226,8 @@ function findUniqueNormalizedBlock(content, needle) {
 
   if (needleLines.length === 0) return { ok: false, error: "empty search text" };
 
+  const matches = [];
+
   for (let start = 0; start < lines.length; start++) {
     let si = 0;
     let end = start;
@@ -237,7 +239,14 @@ function findUniqueNormalizedBlock(content, needle) {
         continue;
       }
 
-      if (current === needleLines[si]) {
+      // Allow the last needle line to be a prefix of the file line — models often
+      // truncate the anchor mid-line (e.g. "<Image s" instead of the full attribute list).
+      const isLastNeedle = si === needleLines.length - 1;
+      const lineMatches = isLastNeedle
+        ? current.startsWith(needleLines[si])
+        : current === needleLines[si];
+
+      if (lineMatches) {
         si++;
         end++;
       } else {
@@ -246,11 +255,13 @@ function findUniqueNormalizedBlock(content, needle) {
     }
 
     if (si === needleLines.length) {
-      return { ok: true, start, end };
+      matches.push({ start, end });
     }
   }
 
-  return { ok: false, error: "block not found" };
+  if (matches.length === 0) return { ok: false, error: "block not found" };
+  if (matches.length > 1) return { ok: false, error: "search text is not unique" };
+  return { ok: true, start: matches[0].start, end: matches[0].end };
 }
 
 function applyReplaceText(content, search, replace) {
@@ -561,6 +572,7 @@ export async function executeChangesNode(state) {
 
     let result = { success: false, error: "unknown" };
     let diffPayload = null;
+    let failedPatchDetails = [];
 
     try {
       if (step.action === "create") {
@@ -616,6 +628,8 @@ export async function executeChangesNode(state) {
           } else {
             let working = original;
             const patchResults = [];
+            // Track failed patch anchors — verify.mjs feeds these back to the planner on retry
+            // so the model sees exactly what search text didn't match (Claude Code approach).
 
             for (let p = 0; p < patches.length; p++) {
               const patch = patches[p];
@@ -627,6 +641,11 @@ export async function executeChangesNode(state) {
                 working = applied.content;
               } else {
                 console.warn(`[Execute] Patch ${p + 1}/${patches.length} on ${step.path}: ${applied.error}`);
+                failedPatchDetails.push({
+                  kind: patch.kind,
+                  search: (patch.search || patch.anchor || patch.before || "").slice(0, 400),
+                  error: applied.error,
+                });
               }
             }
 
@@ -685,6 +704,8 @@ export async function executeChangesNode(state) {
       error: result.error || null,
       description: step.description,
       note: result.note,
+      // failedPatches lets verify.mjs include the exact search anchors in retry context
+      failedPatches: failedPatchDetails.length > 0 ? failedPatchDetails : undefined,
     });
 
     if (result.success) console.log(`[Execute] ✅ ${step.action} ${step.path}${result.note ? " — " + result.note : ""}`);
