@@ -25,7 +25,7 @@ const MAX_TOTAL_CONTEXT_CHARS = 20000;
 
 // ── Self-healing: load missing files when the plan is all read_only ────────────
 
-const SKIP_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", ".turbo", "uploads", ".agent-history"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", ".turbo", "uploads", ".agent-history", ".kodo"]);
 const CODE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
 
 async function findWorkspaceFiles(projectRoot, dir = projectRoot, depth = 0) {
@@ -394,7 +394,7 @@ function pickFilesForPrompt(fileContext, cleanMsg, rememberedTargetFile, investi
   return picked.slice(0, mode === "debug" ? Math.max(MAX_PROMPT_FILES, 6) : MAX_PROMPT_FILES);
 }
 
-function buildSystemPrompt({ rememberedTargetFile, lockToRemembered, mode, investigation, retryErrors = [] }) {
+function buildSystemPrompt({ rememberedTargetFile, lockToRemembered, mode, investigation, retryErrors = [], retryCount = 0 }) {
   const focusRule = lockToRemembered && rememberedTargetFile
     ? `\nFOCUS: Edit ONLY "${rememberedTargetFile}". Do NOT touch unrelated files.\n`
     : "";
@@ -484,7 +484,10 @@ RULES — read carefully:
 5. If you find you need to change two elements to satisfy the request, add TWO separate patches — not a rewrite.`,
   };
 
-  const hasMultipleRetries = retryErrors.length >= 2;
+  // Escalate to rewrite_file on the FIRST retry, not after two failures.
+  // retryErrors is rebuilt fresh each call so it never accumulates to >=2.
+  // One failed surgical patch is enough signal — use the full file on retry.
+  const hasMultipleRetries = retryCount >= 1;
   const retrySection = retryErrors.length > 0
     ? `
 ⚠️ RETRY — PREVIOUS ATTEMPT FAILED
@@ -492,7 +495,7 @@ The last patch was rejected for the following reason(s):
 ${retryErrors.map(e => `  • ${e}`).join("\n")}
 
 ${hasMultipleRetries
-  ? `ESCALATE TO REWRITE: Two surgical patches already failed. For this retry, use rewrite_file with the COMPLETE, CORRECTLY MODIFIED file content. Do NOT use replace_block or replace_text — they keep failing because the search anchor does not match. Write the ENTIRE file from scratch with the change applied.`
+  ? `ESCALATE TO REWRITE: A surgical patch already failed. For this retry, use rewrite_file with the COMPLETE, CORRECTLY MODIFIED file content. Do NOT use replace_block or replace_text — the search anchor did not match. Write the ENTIRE file from scratch with the change correctly applied.`
   : `Do NOT repeat the same patch. Generate a DIFFERENT, CORRECT patch that avoids these errors.\nFor JSX/TSX files: mentally trace the tag structure of your patch before outputting it.`}
 `
     : "";
@@ -558,6 +561,7 @@ PATCH RULES
 - Never include line numbers in search/replace text.
 - Never include markdown fences.
 - For JSX, keep all tags balanced — every opened tag must be closed.
+- CRITICAL JSON RULE: "search" and "replace" values are JSON strings. Double-quotes inside them MUST be escaped as \\". For example: "search": "<div className=\\"flex items-center\\">" — never use raw unescaped " inside a JSON string value.
 
 CSS LAYOUT RULES (Tailwind / absolute positioning)
 - An \`absolute\` element sizes relative to its nearest \`relative\` ancestor — NOT to the page.
@@ -642,8 +646,12 @@ Return ONLY valid JSON.`;
 }
 
 function repairJSON(text) {
-  // LLMs sometimes embed literal newlines/tabs inside JSON string values instead of \n/\t.
-  // Walk char-by-char and escape bare control characters that appear inside strings.
+  // LLMs often embed literal newlines/tabs inside JSON strings, AND forget to escape
+  // double-quotes that appear inside JSX attribute values (className="foo", href="...", etc.).
+  //
+  // Strategy for unescaped quotes: a `"` that genuinely closes a JSON string is always
+  // followed by a JSON structural character (, } ] or newline/end-of-input).
+  // A `"` followed by anything else (letters, =, /, >) is JSX content — escape it.
   let result = "";
   let inString = false;
   let escape = false;
@@ -657,8 +665,25 @@ function repairJSON(text) {
       result += ch;
       escape = true;
     } else if (ch === '"') {
-      result += ch;
-      inString = !inString;
+      if (!inString) {
+        result += ch;
+        inString = true;
+      } else {
+        // Peek ahead (skip spaces, NOT newlines) to decide if this closes the string.
+        let j = i + 1;
+        while (j < text.length && text[j] === " ") j++;
+        const next = j < text.length ? text[j] : "\0";
+        const isStructural =
+          next === "," || next === "}" || next === "]" ||
+          next === "\n" || next === "\r" || next === "\0" || next === ":";
+        if (isStructural) {
+          result += ch;
+          inString = false;
+        } else {
+          // Unescaped quote inside JSX content — escape it.
+          result += '\\"';
+        }
+      }
     } else if (inString && ch === "\n") {
       result += "\\n";
     } else if (inString && ch === "\r") {
@@ -914,7 +939,7 @@ async function planFilesSequentially({ filesToShow, userMessage, system, modelRo
   return combined.length > 0 ? { plan: combined } : null;
 }
 
-async function generatePlanWithRetry({ system, content, modelRoute, mode = "surgical" }) {
+async function generatePlanWithRetry({ system, content, modelRoute, mode = "surgical", emit }) {
   let lastError = null;
   let rawResponse = "";
 
@@ -923,35 +948,49 @@ async function generatePlanWithRetry({ system, content, modelRoute, mode = "surg
   // other modes need more room for the full JSON plan.
   const maxOut = (mode === "single_file") ? 4096 : 6000;
 
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const result = await callLLM({
-        system,
-        messages: [{ role: "user", content }],
-        modelRoute,
-        maxTokens: maxOut, // same on both attempts — don't starve the retry
-        temperature: 0,
-        stream: true,
-      });
+  // Heartbeat: slow LLM providers can take 1-3 min for a large planning prompt.
+  // Send a progress tick every 15s so the UI shows the agent is alive, not stuck.
+  let secondsWaiting = 0;
+  const heartbeat = emit
+    ? setInterval(() => {
+        secondsWaiting += 15;
+        emit({ type: "progress", stage: "planning", message: `⏳ Still designing... (${secondsWaiting}s)` });
+      }, 15_000)
+    : null;
 
-      rawResponse = result?.content || "";
-      if (!rawResponse.trim() && attempt === 0) {
-        // Empty response on first attempt — retry once
-        await delay(600);
-        continue;
-      }
-      return { rawResponse, parsed: extractJSON(rawResponse), error: null };
-    } catch (err) {
-      lastError = err;
-      const msg = String(err?.message || err || "");
-      const isTransient = /504|502|503|gateway timeout|timeout|ETIMEDOUT|ECONNRESET|network|rate limit/i.test(msg);
+  try {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const result = await callLLM({
+          system,
+          messages: [{ role: "user", content }],
+          modelRoute,
+          maxTokens: maxOut, // same on both attempts — don't starve the retry
+          temperature: 0,
+          stream: true,
+        });
 
-      if (attempt === 0 && isTransient) {
-        await delay(800);
-        continue;
+        rawResponse = result?.content || "";
+        if (!rawResponse.trim() && attempt === 0) {
+          // Empty response on first attempt — retry once
+          await delay(600);
+          continue;
+        }
+        return { rawResponse, parsed: extractJSON(rawResponse), error: null };
+      } catch (err) {
+        lastError = err;
+        const msg = String(err?.message || err || "");
+        const isTransient = /504|502|503|gateway timeout|timeout|ETIMEDOUT|ECONNRESET|network|rate limit/i.test(msg);
+
+        if (attempt === 0 && isTransient) {
+          await delay(800);
+          continue;
+        }
+        break;
       }
-      break;
     }
+  } finally {
+    if (heartbeat) clearInterval(heartbeat);
   }
 
   return { rawResponse, parsed: null, error: lastError };
@@ -1088,6 +1127,7 @@ export async function planChangesNode(state) {
     mode,
     investigation,
     retryErrors,
+    retryCount,
   });
 
   let parsed = null;
@@ -1132,6 +1172,7 @@ export async function planChangesNode(state) {
       content,
       modelRoute,
       mode,
+      emit,
     });
 
     rawResponse = result.rawResponse || "";
@@ -1289,7 +1330,7 @@ export async function planChangesNode(state) {
           : f
       );
       const retryContent = buildUserPrompt(userMessage, supplemented, rememberedTargetFile, lockToRemembered, mode, investigation, []);
-      const retryResult = await generatePlanWithRetry({ system, content: retryContent, modelRoute, mode });
+      const retryResult = await generatePlanWithRetry({ system, content: retryContent, modelRoute, mode, emit });
       if (retryResult.parsed?.plan) {
         const retryPlan = applyPathCanonicalization(
           retryResult.parsed.plan.map(item => ({
