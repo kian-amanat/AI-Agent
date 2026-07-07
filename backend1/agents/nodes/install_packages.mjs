@@ -191,10 +191,13 @@ function extractInstallRequest(message) {
   );
   if (!packageMatch) return null;
 
-  const packages = packageMatch[1]
-    .trim()
-    .split(/\s+/)
-    .filter((p) => p && !["--save", "--dev", "-D", "-S", "package", "packages"].includes(p));
+  // Stop at the first preposition/stop word so "add date-fns for logging" → ["date-fns"]
+  const INSTALL_STOP_WORDS = new Set(["for", "to", "in", "from", "as", "so", "that", "the", "a", "an", "of", "on", "at", "by", "with", "and", "or", "then", "when", "while"]);
+  const packages = [];
+  for (const p of packageMatch[1].trim().split(/\s+/)) {
+    if (INSTALL_STOP_WORDS.has(p.toLowerCase())) break;
+    if (p && !["--save", "--dev", "-D", "-S", "package", "packages"].includes(p)) packages.push(p);
+  }
 
   const isDevDep = /\b(--dev|-D|devDependency|dev dependency)\b/i.test(msg);
 
