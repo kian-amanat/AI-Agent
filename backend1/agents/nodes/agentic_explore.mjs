@@ -507,38 +507,6 @@ export async function agenticExploreNode(state) {
     }
   }
 
-  // ── Backend directory fast-path ───────────────────────────────────────────
-  // When the user asks to create/add something in "backend1" without naming a
-  // specific file, pre-load the key backbone files (route, runner, graph) so
-  // planning has the patterns it needs without any LLM iterations.
-  if (intent === "explore" && loadedFiles.size === 0) {
-    const backendRef = /\bbackend1?\b/i.test(cleanMessage);
-    const createAction = /\b(create|add|implement|build|write|generate|abort|controller|cancel|stop|feature|function)\b/i.test(cleanMessage);
-    if (backendRef && createAction) {
-      const BACKEND_KEY_FILES = [
-        "backend1/routes/plannerAgent.mjs",
-        "backend1/services/graph_runner.mjs",
-        "backend1/agents/kodo_graph.mjs",
-      ];
-      for (const relPath of BACKEND_KEY_FILES) {
-        const absPath = path.resolve(root, relPath);
-        const content = await readFileSafe(absPath);
-        if (content) {
-          loadedFiles.set(relPath, { path: relPath, content, size: content.length, score: 200 });
-        }
-      }
-      if (loadedFiles.size > 0) {
-        console.log(`[AgenticExplore] Backend fast-path: pre-loaded ${loadedFiles.size} files, skipping LLM loop`);
-        readySignal = {
-          summary: `Backend fast-path: loaded key backend files — plannerAgent, graph_runner, kodo_graph`,
-          priorityFiles: [...loadedFiles.keys()],
-          rootCause: null,
-        };
-        iteration = MAX_LOOP_ITERATIONS; // skip while loop
-      }
-    }
-  }
-
   // ── Name-match fast-path ─────────────────────────────────────────────────
   // When the user describes a component by name (e.g. "sidebar", "composer")
   // without spelling out the filename, find the ONE file whose basename contains
@@ -560,10 +528,14 @@ export async function agenticExploreNode(state) {
     const allFiles = loadedFiles.size === 0 ? await walkWorkspace(root, 10) : [];
     const codeFiles = allFiles.filter(f => !f.isDir);
 
+    // Skip hook files unless the user explicitly mentions "hook" or a "useX" pattern
+    const wantsHook = /\b(hook|use[A-Z])/i.test(cleanMessage);
     for (const word of msgWords) {
       const nameMatches = codeFiles.filter(f => {
         const base = path.basename(f.path, path.extname(f.path)).toLowerCase();
-        return base.includes(word);
+        if (!base.includes(word)) return false;
+        if (/\/hooks?\//i.test(f.path) && !wantsHook) return false;
+        return true;
       });
       if (nameMatches.length === 1) {
         const file = nameMatches[0];

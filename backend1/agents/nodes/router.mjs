@@ -95,8 +95,8 @@ function isMultiTaskRequest(msg) {
   if (/\b(two|three|four|five|2|3|4|5)\s+(things?|changes?|tasks?|items?|fixes?|improvements?|updates?)\b/i.test(m)) return true;
   // Multiple conjunctions connecting distinct actions
   if (/\b(also|additionally|furthermore|moreover|plus|as well as|on top of that)\b/i.test(m)) return true;
-  // Comma-separated actions with verbs — expanded to include create/build/implement/design/move/refactor
-  if (/\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite)\b.{3,80},\s+(?:and\s+)?\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite)\b/i.test(m)) return true;
+  // Comma-separated actions with verbs — expanded to include give/show/display/set/enable
+  if (/\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite|give|show|display|set|enable)\b.{3,80},\s+(?:and\s+)?\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite|give|show|display|set|enable)\b/i.test(m)) return true;
   // "Edit these 2 files", "update 3 files"
   if (/\b(edit|update|change|modify|fix)\s+(?:these\s+)?([2-9]|two|three|four|five)\s+files?\b/i.test(m)) return true;
   return false;
