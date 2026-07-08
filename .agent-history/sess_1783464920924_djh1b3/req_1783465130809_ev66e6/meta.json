@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess_1783464920924_djh1b3",
+  "requestId": "req_1783465130809_ev66e6",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-07T22:59:14.985Z",
+  "files": [
+    {
+      "relativePath": "backend1/routes/plannerAgent.mjs",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/routes/plannerAgent.mjs",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783464920924_djh1b3/req_1783465130809_ev66e6/backend1__routes__plannerAgent.mjs.snap"
+    }
+  ]
+}

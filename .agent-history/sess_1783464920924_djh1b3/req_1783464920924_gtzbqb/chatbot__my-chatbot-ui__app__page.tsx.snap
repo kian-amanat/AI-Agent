@@ -697,15 +697,9 @@ export default function MinimalChatComponent() {
                         />
                       ))}
                     </div>
-                                    </motion.div>
+                  </motion.div>
                 ) : (
-                  <motion.div
-                    layout
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ duration: 0.3, ease: "easeOut" }}
-                    className="space-y-5 pb-8"
-                  >
+                  <motion.div layout className="space-y-5 pb-8">
                     <AnimatePresence initial={false}>
                       {messages.map((m) => {
                         const trace = thinking.getTrace(m.id);

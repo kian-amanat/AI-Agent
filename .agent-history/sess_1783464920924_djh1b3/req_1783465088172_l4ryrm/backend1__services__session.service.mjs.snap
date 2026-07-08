@@ -62,14 +62,3 @@ export function updateSessionMemory(sessionId, userId, patch = {}) {
 export function clearSessionMemory(sessionId, userId) {
   return dbClearSessionMemory(sessionId, userId);
 }
-
-export function incrementRequestCount(sessionId, userId) {
-  return dbUpdateSessionMemory(sessionId, userId, {
-    requestCount: (prev) => (prev || 0) + 1
-  });
-}
-
-export function getRequestCount(sessionId, userId) {
-  const memory = dbGetSessionMemory(sessionId, userId);
-  return memory?.requestCount || 0;
-}
