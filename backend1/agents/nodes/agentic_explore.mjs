@@ -528,8 +528,9 @@ export async function agenticExploreNode(state) {
     const allFiles = loadedFiles.size === 0 ? await walkWorkspace(root, 10) : [];
     const codeFiles = allFiles.filter(f => !f.isDir);
 
-    // Skip hook files unless the user explicitly mentions "hook" or a "useX" pattern
-    const wantsHook = /\b(hook|use[A-Z])/i.test(cleanMessage);
+    // Skip hook files unless the user explicitly mentions "hook" or a PascalCase useX pattern.
+    // Note: no 'i' flag on use[A-Z] — must be uppercase to avoid matching "users", "useful" etc.
+    const wantsHook = /\bhook\b/i.test(cleanMessage) || /\buse[A-Z]/.test(cleanMessage);
     for (const word of msgWords) {
       const nameMatches = codeFiles.filter(f => {
         const base = path.basename(f.path, path.extname(f.path)).toLowerCase();

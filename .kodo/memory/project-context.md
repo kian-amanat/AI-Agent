@@ -1,5 +1,5 @@
 ---
-updated: 2026-07-05T16:12:17.458Z
+updated: 2026-07-07T22:59:23.482Z
 ---
 
 - **Backend Integration Pattern**:
@@ -13,8 +13,14 @@ updated: 2026-07-05T16:12:17.458Z
   - Must follow existing function structure but include AbortController support.
   - State annotation (`KodoStateAnnotation`) now includes `abortSignal`.
   - Graph runner (`graph_runner.mjs`) manages signal propagation.
+- **Timeout Configuration**:
+  - `backend1/routes/plannerAgent.mjs` defines `GRAPH_TIMEOUT_MS`.
+  - **Current Value**: 60 seconds (updated from 10 minutes).
+- **Session Tracking**:
+  - `backend1/services/session.service.mjs` now includes a request counter.
+  - Tracks how many agent runs each session has made.
+  - Function added to increment request count and modify session tracking to include this counter.
 - **Testing Protocol**:
   - Verify backend functionality using `curl` commands against the endpoint.
 - **Existing Structure**:
-  - `api.ts` already contains structure for calling `/api/agent/run`.
-  - `ChatComposer.tsx` uses `api.ts` sendMessage function.
+  - `api.ts` already contains structure for calling `/api/`

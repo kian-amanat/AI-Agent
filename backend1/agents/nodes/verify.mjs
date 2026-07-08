@@ -180,7 +180,7 @@ export async function verifyNode(state) {
             path: r.path,
             action: r.action,
             error: r.error,
-            currentContent: currentContent ? currentContent.slice(0, 12000) : null,
+            currentContent: currentContent ? currentContent.slice(0, 40000) : null,
             // Pass through the failed search anchors from execute_changes for retry context
             failedPatches: r.failedPatches || [],
           });

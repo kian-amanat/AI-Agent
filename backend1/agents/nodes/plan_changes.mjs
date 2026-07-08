@@ -1188,6 +1188,20 @@ export async function planChangesNode(state) {
   if (!parsed?.plan) {
     const preview = rawResponse.trim().slice(0, 600);
     console.warn("[PlanChanges] JSON parse failed. Raw response chars:", rawResponse.length, preview ? `— preview: ${preview}` : "— EMPTY (model returned no content)");
+
+    // Empty response = quota exhausted. Return a clean user-facing error immediately —
+    // do NOT fall through to self-heal, which would inject page.tsx and produce
+    // anchor mismatches on files the user never asked to change.
+    if (rawResponse.trim().length === 0) {
+      const errMsg = "⚠️ The AI model returned an empty response — your API token quota may be exhausted. Please check your quota at your API provider and try again.";
+      console.warn("[PlanChanges] Empty response — aborting plan (no self-heal).");
+      return {
+        plan: [],
+        finalAnswer: errMsg,
+        messages: [new AIMessage(errMsg)],
+      };
+    }
+
     const fallback = buildFallbackPlan({
       fileContext,
       rememberedTargetFile,

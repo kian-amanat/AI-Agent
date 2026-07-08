@@ -63,7 +63,7 @@ async function decomposeRequest(userMessage, modelRoute) {
   const { apiKey, baseURL, model } = resolveClientCredentials(modelRoute);
   if (!apiKey) return null;
 
-  const client = new OpenAI({ apiKey, baseURL, timeout: 30_000, maxRetries: 0 });
+  const client = new OpenAI({ apiKey, baseURL, timeout: 60_000, maxRetries: 0 });
   const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
 
   const system = `You are a task decomposer for a code editor AI agent.
@@ -101,6 +101,22 @@ Return ONLY valid JSON (no markdown fences):
   } catch (err) {
     console.warn("[MultiTaskRunner] Decomposition failed:", String(err.message || err).slice(0, 120));
   }
+
+  // Regex fallback: split on "and <verb>" after a comma so the LLM timeout
+  // doesn't silently collapse multi-task requests into single-task mode.
+  // e.g. "add X to sidebar, and give Y a Z" → two tasks.
+  const fallbackMatch = cleanMsg.match(
+    /^(.{10,120}),\s+(?:and\s+)?((?:create|make|add|fix|change|update|remove|improve|give|show|display|set|enable|build|implement|design|move|refactor|rewrite).{10,})$/i
+  );
+  if (fallbackMatch) {
+    const tasks = [
+      { description: fallbackMatch[1].trim(), scopeHint: "" },
+      { description: fallbackMatch[2].trim(), scopeHint: "" },
+    ];
+    console.log(`[MultiTaskRunner] Regex fallback decomposition: ${tasks.length} task(s)`);
+    return tasks;
+  }
+
   return null;
 }
 
@@ -173,11 +189,18 @@ async function runOneTask({ taskIndex, taskTotal, taskDescription, scopeHint, ba
       break;
     }
 
-    // If plan is all read_only, no file changes — mark done
+    // If plan is all read_only on the FIRST attempt, escalate to rewrite on next pass.
+    // On subsequent attempts (retryCount >= 1) the planner is already in rewrite mode —
+    // if it still returns read_only, give up.
     const actionable = (taskState.plan || []).filter(s => s.action !== "read_only");
     if (actionable.length === 0) {
+      if (attempt === 0) {
+        console.log(`[MultiTaskRunner] Task ${taskIndex + 1}: all read_only on attempt 0 — escalating to rewrite`);
+        taskState = { ...taskState, retryCount: 1 }; // signal escalation to buildSystemPrompt
+        continue;
+      }
       const readOnlyDesc = (taskState.plan || []).find(s => s.action === "read_only")?.description || "";
-      console.log(`[MultiTaskRunner] Task ${taskIndex + 1}: all read_only — ${readOnlyDesc.slice(0, 80)}`);
+      console.log(`[MultiTaskRunner] Task ${taskIndex + 1}: all read_only after escalation — ${readOnlyDesc.slice(0, 80)}`);
       taskOk    = false;
       taskError = readOnlyDesc || "No actionable changes found";
       break;

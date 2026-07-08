@@ -1,5 +1,5 @@
 ---
-updated: 2026-07-07T21:56:15.521Z
+updated: 2026-07-07T23:04:37.450Z
 ---
 
 - **ChatSidebar Toggle Icon (Collapsed State)**: 
@@ -13,7 +13,9 @@ updated: 2026-07-07T21:56:15.521Z
   - Clock icon size updated from `h-5 w-5` to `h-4 w-4` to match the search icon.
   - **Background Removal**: Removed persistent `bg-white/[0.06]` class from the history icon button to remove background, while keeping hover effects.
   - File: `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
+- **ChatSidebar Search Input**: 
+  - Added a search input to filter chat sessions.
+  - Uses a `ref` to focus the input when the sidebar opens via the collapsed search button.
+  - File: `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
 - **ChatComposer Abort Button Logic**:
   - The abort button functionality is enabled by passing the `onStop` prop to the `ChatComposer` component.
-  - Implementation updated in `chatbot/my-chatbot-ui/app/page.tsx`.
-  - This allows the UI to trigger the abort signal when the user clicks the stop button.
