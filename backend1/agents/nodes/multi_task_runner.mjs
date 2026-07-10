@@ -18,7 +18,7 @@ import { readFileSync } from "fs";
 import OpenAI from "openai";
 import { AIMessage } from "@langchain/core/messages";
 
-import { agenticExploreNode } from "./agentic_explore.mjs";
+import { agenticExploreNode, walkWorkspace, PROJECT_ROOT } from "./agentic_explore.mjs";
 import { planChangesNode }    from "./plan_changes.mjs";
 import { executeChangesNode } from "./execute_changes.mjs";
 import { verifyNode }         from "./verify.mjs";
@@ -270,15 +270,22 @@ export async function multiTaskRunnerNode(state) {
 
   emit?.({ type: "progress", stage: "decomposing", message: "🧩 Understanding tasks…" });
 
-  // Step 1: LLM-based decomposition
-  const tasks = await decomposeRequest(userMessage, modelRoute);
+  const workspaceRoot = state.workspacePath || PROJECT_ROOT;
+
+  // Step 1: LLM-based decomposition, run alongside the one workspace walk this whole
+  // request needs. Both tasks' explores (below) reuse this single snapshot instead of
+  // each doing their own walk — one walk total per request instead of one per task.
+  const [tasks, workspaceSnapshot] = await Promise.all([
+    decomposeRequest(userMessage, modelRoute),
+    walkWorkspace(workspaceRoot, 10),
+  ]);
 
   // If decomposition failed or returned a single task, run the normal single-task pipeline
   if (!tasks || tasks.length <= 1) {
     console.log("[MultiTaskRunner] Single task — running normal pipeline");
     emit?.({ type: "progress", stage: "exploring", message: "📂 Exploring workspace…" });
 
-    let s = { ...state, intent: "explore", retryCount: 0 };
+    let s = { ...state, intent: "explore", retryCount: 0, workspaceSnapshot };
 
     const exploreResult = await agenticExploreNode(s);
     s = { ...s, ...exploreResult };
@@ -338,6 +345,7 @@ export async function multiTaskRunnerNode(state) {
       executionResults: [],
       verifyResult:     null,
       retryCount:       0,
+      workspaceSnapshot, // shared walk — this task's explore won't re-walk the tree
     };
 
     try {

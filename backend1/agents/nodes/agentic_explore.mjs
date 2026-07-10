@@ -26,7 +26,7 @@ import { readMemoryTopic, listMemoryTopics, loadMemoryIndex } from "../../servic
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..");
+export const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..");
 
 const MAX_LOOP_ITERATIONS = 6;
 const MAX_FILE_BYTES = 80_000;
@@ -172,7 +172,7 @@ async function readFileSafe(absPath, maxBytes = MAX_FILE_BYTES) {
   } catch { return null; }
 }
 
-async function walkWorkspace(root, maxDepth = 4, currentDepth = 0) {
+export async function walkWorkspace(root, maxDepth = 4, currentDepth = 0) {
   const results = [];
   if (currentDepth > maxDepth) return results;
 
@@ -199,9 +199,10 @@ async function walkWorkspace(root, maxDepth = 4, currentDepth = 0) {
   return results;
 }
 
-async function grepWorkspace(root, query, maxResults = MAX_GREP_RESULTS) {
-  const files = await walkWorkspace(root, 10);
-  const codeFiles = files.filter(f => !f.isDir);
+// Takes a pre-fetched workspace snapshot instead of walking the tree itself —
+// callers already have one shared walk result, no need to re-scan disk per grep.
+async function grepWorkspace(root, snapshot, query, maxResults = MAX_GREP_RESULTS) {
+  const codeFiles = snapshot.filter(f => !f.isDir);
   const pattern = query.toLowerCase();
   const results = [];
 
@@ -266,7 +267,10 @@ function resolveClientCredentials(modelRoute) {
 
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
-async function executeTool(name, args, root) {
+// workspaceSnapshot is a pre-fetched flat file list (from the one walk done at the
+// top of agenticExploreNode) — grep_code and list_files filter it in memory instead
+// of re-walking the directory tree on every tool call.
+async function executeTool(name, args, root, workspaceSnapshot) {
   try {
     switch (name) {
       case "read_file": {
@@ -299,7 +303,7 @@ async function executeTool(name, args, root) {
       case "grep_code": {
         const query = String(args.query || "").trim();
         if (!query) return { success: false, error: "query is required" };
-        const matches = await grepWorkspace(root, query);
+        const matches = await grepWorkspace(root, workspaceSnapshot, query);
         return { success: true, query, matches, count: matches.length };
       }
 
@@ -307,7 +311,18 @@ async function executeTool(name, args, root) {
         const dir = String(args.dir || "").trim();
         const absDir = dir ? path.resolve(root, dir) : root;
         if (!absDir.startsWith(root)) return { success: false, error: "path escapes workspace" };
-        const files = await walkWorkspace(absDir, 2);
+
+        // Derive this listing from the shared snapshot instead of walking absDir fresh.
+        // relDir/prefix reproject the snapshot's root-relative paths onto absDir; the
+        // "<= 3 segments" cutoff reproduces walkWorkspace(absDir, 2)'s depth limit
+        // (maxDepth N includes entries up to N+1 path segments deep).
+        const relDir = path.relative(root, absDir).replace(/\\/g, "/");
+        const prefix = relDir ? `${relDir}/` : "";
+        const files = workspaceSnapshot
+          .filter(f => !prefix || f.path.startsWith(prefix))
+          .map(f => ({ ...f, path: prefix ? f.path.slice(prefix.length) : f.path }))
+          .filter(f => f.path && f.path.split("/").length <= 3);
+
         return {
           success: true,
           dir: dir || ".",
@@ -410,8 +425,21 @@ export async function agenticExploreNode(state) {
   const root = workspacePath || PROJECT_ROOT;
   const cleanMessage = String(userMessage).split(/conversation memory:/i)[0].trim();
 
-  // Workspace snapshot for the system prompt
-  const workspaceTree = await walkWorkspace(root, 3);
+  // Single workspace walk, reused everywhere below (system prompt, fast-paths, grep,
+  // list_files) instead of re-walking the tree at each of those call sites.
+  // multi_task_runner.mjs can pass a pre-computed one via state.workspaceSnapshot so
+  // parallel task explores share a single walk instead of one each.
+  const workspaceSnapshot = state?.workspaceSnapshot || await walkWorkspace(root, 10);
+  console.log(
+    `[AgenticExplore] Workspace snapshot: ${workspaceSnapshot.length} entries` +
+    (state?.workspaceSnapshot ? " (shared)" : " (fresh walk)")
+  );
+
+  // System prompt snapshot: filter the depth-10 walk down to what walkWorkspace(root, 3)
+  // used to return. Filtering a flat depth-first list by path-segment count reproduces
+  // the same entries in the same order as a shallower walk would have — see the
+  // maxDepth→segment-count relation documented on the list_files case below.
+  const workspaceTree = workspaceSnapshot.filter(f => f.path.split("/").length <= 4);
 
   // Resolve API credentials
   const { apiKey, baseURL, model } = resolveClientCredentials(modelRoute);
@@ -458,7 +486,7 @@ export async function agenticExploreNode(state) {
   // not "connection/page.tsx" or any other file that shares a basename.
   if (intent === "explore") {
     const msgLower = cleanMessage.toLowerCase();
-    const allFiles = await walkWorkspace(root, 10);
+    const allFiles = workspaceSnapshot;
     const codeFiles = allFiles.filter(f => !f.isDir);
 
     // Phase 1: full-path substring match (preferred — unambiguous)
@@ -542,7 +570,7 @@ export async function agenticExploreNode(state) {
       .split(/\s+/)
       .filter(w => w.length >= 4 && !NAME_STOP.has(w));
 
-    const allFiles = loadedFiles.size === 0 ? await walkWorkspace(root, 10) : [];
+    const allFiles = loadedFiles.size === 0 ? workspaceSnapshot : [];
     // Exclude docs and utility scripts — they match action verbs but are never the right target
     const codeFiles = allFiles.filter(f =>
       !f.isDir &&
@@ -706,7 +734,7 @@ export async function agenticExploreNode(state) {
         continue;
       }
 
-      const result = await executeTool(toolName, args, root);
+      const result = await executeTool(toolName, args, root, workspaceSnapshot);
 
       // Cache files the model reads so we can pass them to plan_changes.
       // Never let a partial (start_line/end_line) read overwrite a longer read —

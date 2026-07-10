@@ -1,11 +1,11 @@
 ---
-updated: 2026-07-10T17:47:56.378Z
+updated: 2026-07-10T21:06:19.670Z
 ---
 
 - **ChatSidebar Toggle Icon (Collapsed State)**: 
   - Uses `Plus` icon from `@mui/icons-material/Plus`.
   - Located in `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
-  - **Styling**: Orange color (`#ff6b2b`), no background, no border.
+  - **Styling**: Orange color (`#ff6b2b`), subtle default background, no border. Removed conditional centering.
   - **Layout**: Search icon is positioned **above** the plus icon.
   - **Sizing**: Plus icon background reduced.
   - **Shape**: Collapsed sidebar icon buttons use `rounded-full`.
@@ -22,7 +22,7 @@ updated: 2026-07-10T17:47:56.378Z
   - File: `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
 - **ChatSidebar Chat List**: 
   - Implements a loading skeleton for the chat list.
-  - Skeleton mimics the layout of chat items (avatar, title, subtitle).
-- **ChatSidebar Expanded State**: 
-  - Background color updates to a slightly lighter shade when the sidebar is expanded.
-  - File: `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
+  - Skeleton mimics the layout of session items.
+- **ChatSidebar Session Item**: 
+  - Displays only the session title; preview text is hidden.
+  - Compact vertical padding/sizing relative to the title font size.
