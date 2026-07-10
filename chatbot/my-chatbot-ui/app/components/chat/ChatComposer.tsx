@@ -314,6 +314,19 @@ export default function ChatComposer({
               type="button"
               whileHover={{ scale: isSending ? 1 : 1.03 }}
               whileTap={{ scale: isSending ? 1 : 0.96 }}
+              animate={
+                canSend && !isSending
+                  ? {
+                      scale: [1, 1.02, 1],
+                      boxShadow: [
+                        "0 12px 26px rgba(255,77,61,0.22)",
+                        "0 14px 30px rgba(255,77,61,0.35)",
+                        "0 12px 26px rgba(255,77,61,0.22)",
+                      ],
+                    }
+                  : undefined
+              }
+              transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
                             onClick={isSending ? () => onStop?.() : onSendMessage}
               disabled={isTranscribing || (!isSending && !canSend)}
               className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#ff8a3d]/20 bg-gradient-to-br from-[#ff6a3d] via-[#ff4d3d] to-[#ff2d2d] text-white shadow-[0_12px_26px_rgba(255,77,61,0.22)] transition-all duration-200 hover:shadow-[0_16px_32px_rgba(255,77,61,0.28)] disabled:cursor-not-allowed disabled:opacity-45"

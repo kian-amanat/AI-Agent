@@ -1,16 +1,11 @@
 ---
-updated: 2026-07-07T22:56:14.455Z
+updated: 2026-07-08T23:10:29.373Z
 ---
 
-- **Send Button Behavior**: 
-  - Disabled when input length is 0 (no characters).
-  - **Exception**: Enabled when AI is responding (`isSending` is true) to allow aborting the stream.
-  - This ensures the user can stop generation even if the input field is empty (e.g., after a previous message).
-- **Code Change Preference**: User prefers minimal changes, specifically requesting to "just add this feature, and don't change any part of the code" beyond the necessary feature addition.
-- **UI Style Preference**: User prefers a "Claude Code" aesthetic for empty states, including specific animations and color consistency with the rest of the app.
-- **UI Layout Preference**: User prefers copy buttons for user messages to be placed **underneath** the bubble and aligned to the **right** side.
-- **Active Theme Colors**: 
-  - Primary accent color set to `#ff6b2b` (updated from `#ff8a3d`) in `ChatComposer.tsx`.
-- **Chat Sidebar Behavior**: 
-  - **Collapsed State**: Displays a `Plus` icon with orange color (`#ff6b2b`) and no background.
-  - **Hover Interaction**: Smoothly transitions (fade/slide) from `icon.png` to a right arrow (`KeyboardDoubleArrowLeft`).
+- **Send Button Behavior**: Disabled when input length is 0. Exception: Enabled when AI is responding (`isSending` is true) to allow aborting the stream.
+- **Code Change Preference**: Prefers minimal changes, specifically requesting to "just add this feature, and don't change any part of the code" beyond the necessary addition.
+- **UI Style Preference**: Prefers a "Claude Code" aesthetic for empty states, including specific animations and color consistency.
+- **Copy Button Preference**: Wants copy buttons on **all** message bubbles (user and AI) to copy text to clipboard. Previous detail for user messages (underneath/right-aligned) remains relevant.
+- **Active Theme Colors**: Primary accent color set to `#ff6b2b` in `ChatComposer.tsx`.
+- **Chat Sidebar Behavior**: Collapsed state displays orange `Plus` icon (`#ff6b2b`) with no background. Hover transitions smoothly from `icon.png` to right arrow.
+- **ChatHeader Design**: Minimal layout: sidebar toggle on the left only, flat dark background, thin bottom border.

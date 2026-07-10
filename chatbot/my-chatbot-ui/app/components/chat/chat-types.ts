@@ -92,5 +92,7 @@ export const AGENT_STAGES: PipelineStage[] = [
     label: "Complete",
     description: "Ready for review",
     icon: Bot,
-  },
+    },
 ];
+
+export type CharCount = number;

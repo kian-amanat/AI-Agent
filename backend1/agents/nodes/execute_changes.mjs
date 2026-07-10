@@ -431,7 +431,7 @@ async function saveUndoSnapshot(workspacePath, sessionId, requestId, plan) {
     await fs.mkdir(snapshotDir, { recursive: true });
 
     const writableSteps = plan.filter((p) =>
-      (p.action === "edit" || p.action === "create" || p.action === "delete") && p.path
+      (p.action === "edit" || p.action === "create" || p.action === "delete" || p.action === "rewrite_file") && p.path
     );
 
     const metaFiles = [];
@@ -676,6 +676,29 @@ export async function executeChangesNode(state) {
                 error: `0/${patches.length} patches matched — file unchanged`,
               };
             }
+          }
+        }
+      } else if (step.action === "rewrite_file") {
+        // Full-file rewrite — content comes from step.content or from the first patch
+        let rewriteContent = String(step.content || "");
+        if (!rewriteContent) {
+          const rwPatch = (step.patches || []).find(p => p.content);
+          if (rwPatch) rewriteContent = String(rwPatch.content || "");
+        }
+        if (!rewriteContent) {
+          result = { success: false, error: "rewrite_file: no content provided" };
+        } else {
+          const syntaxErr = validateSyntax(rewriteContent, absPath);
+          if (syntaxErr) {
+            result = { success: false, error: `Syntax error: ${syntaxErr}` };
+          } else {
+            const original = (await readFileSafe(absPath)) || "";
+            await writeFileAtomic(absPath, rewriteContent);
+            result = { success: true };
+            diffPayload = {
+              action: "edit", path: step.path, language: langFromPath(step.path),
+              hunks: [{ kind: "rewrite", before: original.slice(0, HUNK_MAX), after: rewriteContent.slice(0, HUNK_MAX) }],
+            };
           }
         }
       } else {

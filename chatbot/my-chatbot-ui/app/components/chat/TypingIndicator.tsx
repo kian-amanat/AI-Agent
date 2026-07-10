@@ -1,14 +1,11 @@
 import React from "react";
 
 export default function TypingIndicator() {
-  return (
-    <div className="flex items-center justify-center py-2">
-      <div
-        className="h-5 w-5 animate-spin rounded-full border-4 border-white/10 border-t-[#ff5e4d]"
-        role="status"
-        aria-label="Loading"
-      />
-      <span className="sr-only">Loading...</span>
+    return (
+    <div className="flex items-center justify-center py-2 space-x-2">
+      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "-0.3s" }} />
+      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "-0.15s" }} />
+      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" />
     </div>
   );
 }

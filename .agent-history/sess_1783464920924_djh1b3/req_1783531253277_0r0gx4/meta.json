@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess_1783464920924_djh1b3",
+  "requestId": "req_1783531253277_0r0gx4",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-08T17:21:07.568Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/components/chat/TypingIndicator.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/components/chat/TypingIndicator.tsx",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783464920924_djh1b3/req_1783531253277_0r0gx4/chatbot__my-chatbot-ui__app__components__chat__TypingIndicator.tsx.snap"
+    }
+  ]
+}

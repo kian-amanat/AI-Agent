@@ -1,5 +1,5 @@
 ---
-updated: 2026-07-07T22:59:23.482Z
+updated: 2026-07-08T17:34:38.195Z
 ---
 
 - **Backend Integration Pattern**:
@@ -20,7 +20,6 @@ updated: 2026-07-07T22:59:23.482Z
   - `backend1/services/session.service.mjs` now includes a request counter.
   - Tracks how many agent runs each session has made.
   - Function added to increment request count and modify session tracking to include this counter.
-- **Testing Protocol**:
-  - Verify backend functionality using `curl` commands against the endpoint.
-- **Existing Structure**:
-  - `api.ts` already contains structure for calling `/api/`
+- **API Headers**:
+  - **Req
+- **Error Handling Standard**: Unhandled backend errors must return a consistent JSON response with a `message` and `status_code` field.
