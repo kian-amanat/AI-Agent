@@ -431,7 +431,10 @@ export async function agenticExploreNode(state) {
 
   const isThinkingModel = /thinking|r1\b|reasoner/i.test(model);
   // Thinking models stream to keep the connection alive past gateway timeouts.
-  const client = new OpenAI({ apiKey, baseURL, timeout: isThinkingModel ? 600_000 : 120_000, maxRetries: 0 });
+  // Keep thinking-model timeout long (streams avoid gateway cuts).
+  // For standard models, 40s is enough for gapgpt to respond — if it hangs longer
+  // it's unlikely to succeed, and 120s × 6 iterations would exceed the graph timeout.
+  const client = new OpenAI({ apiKey, baseURL, timeout: isThinkingModel ? 600_000 : 40_000, maxRetries: 0 });
 
   // Load memory index (first 200 lines of MEMORY.md) and inject into system prompt
   const memoryIndex = workspacePath ? await loadMemoryIndex(workspacePath) : "";
@@ -512,21 +515,40 @@ export async function agenticExploreNode(state) {
   // without spelling out the filename, find the ONE file whose basename contains
   // that word and pre-load it. This skips 4-6 slow LLM iterations entirely.
   // Only fires when exactly one file matches (safe — no ambiguity).
-  if (intent === "explore" && loadedFiles.size === 0) {
+  // Skipped for backend-domain requests — words like "header", "request", "response"
+  // appear in both frontend component names and backend API concerns, and the LLM
+  // loop correctly finds backend files via grep while name-match would load ChatHeader.tsx.
+  const isBackendDomain = /\b(api|routes?|middleware|backend|server\.mjs|endpoint|handler|response\s+header|request\s+header|http\s+header|cors|jwt|authenticat|authori[sz]|database|\.service\.|\.controller\.|express|fastify|prisma|mongoose|req\b|res\b)\b/i.test(cleanMessage);
+  // In multi-task mode, use the original user message for name-match (not the LLM task description).
+  // The task description is verbose and contains verbs that match wrong files ("message" → AssistantMessage.tsx).
+  // The original message is concise — "sidebar" reliably maps to ChatSidebar.tsx.
+  const nameMatchSource = state?.nameMatchMessage || cleanMessage;
+  const nameMatchClean = String(nameMatchSource).split(/conversation memory:/i)[0].trim();
+  if (intent === "explore" && loadedFiles.size === 0 && !isBackendDomain) {
     const NAME_STOP = new Set([
       "chat", "code", "your", "open", "close", "show", "hide", "icon", "mode",
       "view", "page", "main", "keep", "this", "that", "with", "from", "have",
       "been", "will", "would", "could", "should", "when", "then", "than", "what",
       "which", "where", "there", "their", "they", "also", "just", "more", "make",
       "want", "like", "some", "such", "into", "after", "before", "about", "over",
+      // Action verbs from LLM-generated task descriptions that match unrelated files
+      "create", "implement", "retrieve", "visual", "apply", "generate", "handle",
+      "manage", "format", "display", "validate", "identify", "loading", "render",
+      "access", "fetch", "update", "define", "specify", "provide", "configure",
+      "placeholder", "component", "target", "source", "layout", "skeleton",
     ]);
-    const msgWords = cleanMessage.toLowerCase()
+    const msgWords = nameMatchClean.toLowerCase()
       .replace(/[^a-z0-9 ]/g, " ")
       .split(/\s+/)
       .filter(w => w.length >= 4 && !NAME_STOP.has(w));
 
     const allFiles = loadedFiles.size === 0 ? await walkWorkspace(root, 10) : [];
-    const codeFiles = allFiles.filter(f => !f.isDir);
+    // Exclude docs and utility scripts — they match action verbs but are never the right target
+    const codeFiles = allFiles.filter(f =>
+      !f.isDir &&
+      !/\.(md|txt|yaml|yml)$/i.test(f.path) &&
+      !/\/(tools?|scripts?|docs?|helpers?|constants)\//i.test(f.path)
+    );
 
     // Skip hook files unless the user explicitly mentions "hook" or a PascalCase useX pattern.
     // Note: no 'i' flag on use[A-Z] — must be uppercase to avoid matching "users", "useful" etc.
@@ -561,10 +583,12 @@ export async function agenticExploreNode(state) {
 
   // ── Agentic loop ──────────────────────────────────────────────────────────
 
-  while (iteration < MAX_LOOP_ITERATIONS) {
+  const iterationBudget = state?.maxIterations ?? MAX_LOOP_ITERATIONS;
+  let consecutiveErrors = 0;
+  while (iteration < iterationBudget) {
     if (state?.abortSignal?.aborted) break;
     iteration++;
-    console.log(`[AgenticExplore] Iteration ${iteration}/${MAX_LOOP_ITERATIONS}`);
+    console.log(`[AgenticExplore] Iteration ${iteration}/${iterationBudget}`);
 
     let assistantMsg;
     try {
@@ -622,9 +646,22 @@ export async function agenticExploreNode(state) {
         assistantMsg = response.choices?.[0]?.message;
       }
     } catch (err) {
-      console.error("[AgenticExplore] LLM error:", String(err.message || err).slice(0, 200));
+      const errStr = String(err.message || err);
+      console.warn("[AgenticExplore] LLM error:", errStr.slice(0, 200));
+      // 504/503/502/429 are transient — the gapgpt proxy is slow or overloaded.
+      // Retry up to 3 consecutive times before giving up.
+      const isTransient = /\b(504|503|502|429)\b|timeout|timed out|ETIMEDOUT|ECONNRESET/i.test(errStr);
+      if (isTransient) {
+        consecutiveErrors++;
+        if (consecutiveErrors < 3) {
+          console.warn(`[AgenticExplore] Transient error (${consecutiveErrors}/3) — retrying...`);
+          continue;
+        }
+        console.warn("[AgenticExplore] 3 consecutive transient errors — giving up.");
+      }
       break;
     }
+    consecutiveErrors = 0; // reset on successful LLM response
 
     if (!assistantMsg) break;
 
@@ -720,6 +757,22 @@ export async function agenticExploreNode(state) {
     }
 
     if (hitReady) break;
+  }
+
+  // If the loop ended with 0 files and no ready signal (all iterations failed —
+  // e.g. repeated 504 timeouts), return a clear error rather than letting plan_changes
+  // run against empty context and silently produce nothing useful.
+  if (loadedFiles.size === 0 && !readySignal && (existingContext || []).length === 0) {
+    const errMsg =
+      "⚠️ Could not gather workspace context — the AI model returned no response (possible API timeout or quota exhaustion). Please try again.";
+    console.warn("[AgenticExplore] Loop ended with 0 files and no ready signal — aborting early.");
+    emit?.({ type: "content", content: errMsg });
+    return {
+      fileContext: [],
+      investigation: null,
+      finalAnswer: errMsg,
+      messages: [new AIMessage(errMsg)],
+    };
   }
 
   // ── Build fileContext for plan_changes ────────────────────────────────────

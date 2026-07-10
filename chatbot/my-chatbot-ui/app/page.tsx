@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { v4 as uuidv4 } from "uuid";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Sparkles, Bot, Copy, Check, UserIcon } from "lucide-react";
+import { Bot, Copy, Check, UserIcon } from "lucide-react";
 import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import { useAgentPipeline } from "./hooks/useAgentPipeline";
 import { useThinkingSteps } from "./hooks/useThinkingSteps";
@@ -626,14 +626,18 @@ export default function MinimalChatComponent() {
     );
   }, [conversationSearch, sessions, sessionMessagesCache]);
 
-  const isEmpty = messages.length === 0;
+    const isEmpty = messages.length === 0;
+  const [showScrollButton, setShowScrollButton] = useState(false);
 
-  const quickPrompts = [
-    { title: "Show the agent pipeline", desc: "Make the current stage visible in chat." },
-    { title: "Use orange-red accents", desc: "Highlight important actions and progress." },
-    { title: "Add brilliant transitions", desc: "Make messages and inputs feel premium." },
-    { title: "Keep it minimal", desc: "Thin borders, calm surfaces, modern spacing." },
-  ];
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const handleScroll = () => {
+      setShowScrollButton(el.scrollHeight - el.scrollTop - el.clientHeight > 150);
+    };
+    el.addEventListener("scroll", handleScroll);
+    return () => el.removeEventListener("scroll", handleScroll);
+  }, []);
 
   return (
     <AuthGuard>
@@ -655,49 +659,33 @@ export default function MinimalChatComponent() {
         <ChatHeader onToggleSidebar={() => setIsSidebarCollapsed((p) => !p)} />
 
         <div className="flex min-h-0 flex-1 flex-col">
-          <div
+                    <div
             ref={scrollRef}
-            className="min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8"
+            className="relative min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8"
           >
+            {showScrollButton && (
+              <button
+                type="button"
+                onClick={() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" })}
+                className="absolute bottom-4 right-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[#ff8a3d] text-white shadow-lg transition-transform hover:scale-105 hover:bg-[#e67a35]"
+                aria-label="Scroll to bottom"
+              >
+                <KeyboardArrowDownRoundedIcon fontSize="small" />
+              </button>
+            )}
             <div className="mx-auto flex w-full max-w-4xl flex-col">
               <AnimatePresence mode="wait">
                 {isEmpty ? (
                   <motion.div
                     key="empty"
-                    initial={{ opacity: 0, y: 16 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -12 }}
-                    transition={{ duration: 0.35, ease: "easeOut" }}
-                    className="flex min-h-[calc(100vh-12rem)] flex-col items-center justify-center pb-16"
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className="flex min-h-[calc(100vh-12rem)] w-full items-center justify-center"
                   >
-                    <motion.div
-                      initial={{ scale: 0.92, opacity: 0 }}
-                      animate={{ scale: 1, opacity: 1 }}
-                      transition={{ type: "spring", stiffness: 260, damping: 22 }}
-                      className="mb-6 flex h-16 w-16 items-center justify-center rounded-[28px] border border-white/8 bg-white/[0.04]"
-                    >
-                      <Sparkles className="h-7 w-7 text-white/85" />
-                    </motion.div>
-
-                    <h1 className="text-center text-3xl font-normal tracking-[-0.03em] text-white md:text-5xl">
-                      What&apos;s on the agenda today?
-                    </h1>
-
-                    <p className="mt-4 max-w-2xl text-center text-sm leading-6 text-white/38 md:text-base">
-                      A cleaner chat surface with a visible agent pipeline, orange-red accents, and smoother motion.
-                    </p>
-
-                    <div className="mt-10 grid w-full max-w-4xl grid-cols-1 gap-3 md:grid-cols-2">
-                      {quickPrompts.map((item) => (
-                        <EmptyStateCard
-                          key={item.title}
-                          title={item.title}
-                          desc={item.desc}
-                          onClick={() => setMessageInput(item.title)}
-                        />
-                      ))}
-                    </div>
-                                    </motion.div>
+                    <EmptyStateCard />
+                  </motion.div>
                 ) : (
                   <motion.div
                     layout

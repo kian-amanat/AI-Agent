@@ -1,5 +1,7 @@
 "use client";
 
+import { useState } from "react";
+import { Send } from "lucide-react";
 import { motion } from "framer-motion";
 
 const container = {
@@ -17,78 +19,92 @@ const item = {
   show: { opacity: 1, y: 0 },
 };
 
+export default function EmptyStateCard() {
+    const [inputValue, setInputValue] = useState("");
 
+  const suggestions = [
+    "How do I start?",
+    "Explain quantum physics",
+    "Write a poem about AI",
+    "Debug my code",
+  ];
 
-export default function EmptyStateCard({
-  title,
-  desc,
-  onClick,
-}: {
-  title: string;
-  desc: string;
-  onClick: () => void;
-}) {
   return (
-    <motion.button
-      onClick={onClick}
-      className="group relative w-full overflow-hidden rounded-3xl border border-white/8 bg-gradient-to-br from-white/[0.04] to-white/[0.01] p-8 text-left transition-all duration-300 hover:border-[#ff8a3d]/30 hover:bg-gradient-to-br hover:from-[#ff8a3d]/5 hover:to-[#ff5e4d]/5"
-      whileHover={{ scale: 1.01, y: -4 }}
-      whileTap={{ scale: 0.99 }}
-    >
-      {/* Animated gradient background */}
-      <div className="absolute inset-0 bg-gradient-to-r from-[#ff8a3d]/0 via-[#ff8a3d]/5 to-[#ff5e4d]/0 opacity-0 transition-opacity duration-500 group-hover:opacity-100" />
-      
+    <div className="relative flex min-h-screen w-full items-center justify-center overflow-hidden bg-[#0a0a0a]">
+      {/* Ambient Background Effects */}
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-[#ff8a3d]/20 via-[#0a0a0a] to-[#0a0a0a]" />
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[500px] w-[500px] rounded-full bg-[#ff5e4d]/10 blur-[100px]" />
+
       <motion.div
         variants={container}
         initial="hidden"
         animate="show"
-        className="relative z-10"
+        className="relative z-10 mx-auto max-w-3xl px-6 text-center"
       >
-                {/* Minimal sparkle icon */}
-        <motion.div
-          className="mb-6 flex items-center justify-center"
-          animate={{
-            rotate: [0, 10, -10, 0],
-            scale: [1, 1.1, 1],
-          }}
-          transition={{
-            duration: 3,
-            repeat: Infinity,
-            ease: "easeInOut",
-          }}
+        {/* Greeting */}
+        <motion.h1
+          variants={item}
+          className="mb-4 text-5xl font-extrabold tracking-tight text-white sm:text-7xl md:text-8xl"
         >
-          <svg
-            className="h-8 w-8 text-[#ff8a3d]/60 group-hover:text-[#ff8a3d] transition-colors duration-300"
-            fill="currentColor"
-            viewBox="0 0 24 24"
-            xmlns="http://www.w3.org/2000/svg"
-          >
-            <path d="M12 2L14.09 8.26L20 9.27L15.55 13.97L16.91 20L12 16.9L7.09 20L8.45 13.97L4 9.27L9.91 8.26L12 2Z" />
-          </svg>
+          Good evening, <span className="bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d] bg-clip-text text-transparent">Kian</span>
+        </motion.h1>
+
+        <motion.p
+          variants={item}
+          className="mb-12 text-lg text-gray-400 sm:text-xl"
+        >
+          What can we create together today?
+        </motion.p>
+
+        {/* Suggestion Chips */}
+        <motion.div
+          variants={item}
+          className="flex flex-wrap justify-center gap-3"
+        >
+          {suggestions.map((suggestion, index) => (
+            <button
+              key={index}
+              className="group relative overflow-hidden rounded-full border border-white/10 bg-white/5 px-6 py-3 text-sm font-medium text-white/80 backdrop-blur-md transition-all duration-300 hover:border-[#ff8a3d]/50 hover:bg-[#ff8a3d]/10 hover:text-white hover:shadow-[0_0_20px_rgba(255,138,61,0.3)]"
+            >
+              <span className="relative z-10">{suggestion}</span>
+              <div className="absolute inset-0 -z-0 translate-x-[-100%] bg-gradient-to-r from-[#ff8a3d]/20 to-[#ff5e4d]/20 transition-transform duration-300 group-hover:translate-x-0" />
+            </button>
+          ))}
+                </motion.div>
+
+        {/* Message Input */}
+        <motion.div variants={item} className="mt-8 max-w-xl mx-auto">
+          <div className="relative rounded-full border border-white/10 bg-white/5 backdrop-blur-md transition-all duration-300 focus-within:border-[#ff8a3d]/50 focus-within:bg-white/[0.08]">
+            <textarea
+              value={inputValue}
+              onChange={(e) => setInputValue(e.target.value)}
+              placeholder="Type a message..."
+              rows={1}
+              className="w-full resize-none rounded-full bg-transparent px-5 py-3 pr-14 text-sm text-white placeholder:text-white/30 focus:outline-none"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && !e.shiftKey) {
+                  e.preventDefault();
+                }
+              }}
+            />
+            <button
+              disabled={!inputValue.trim()}
+              className={`absolute right-2 top-1/2 -translate-y-1/2 rounded-full p-2 transition-all duration-300 ${
+                inputValue.trim()
+                  ? "bg-[#ff8a3d] text-black shadow-[0_0_15px_rgba(255,138,61,0.4)] animate-pulse"
+                  : "bg-white/10 text-white/30 cursor-not-allowed"
+              }`}
+            >
+              <Send className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="mt-2 flex justify-end">
+            <span className="text-[11px] text-white/20">
+              {inputValue.length} characters
+            </span>
+          </div>
         </motion.div>
-
-        {/* Title with gradient text */}
-        <motion.p
-          variants={item}
-          className="mb-2 bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d] bg-clip-text text-xl font-semibold text-transparent"
-        >
-          {title}
-        </motion.p>
-
-        {/* Description */}
-        <motion.p
-          variants={item}
-          className="text-sm leading-relaxed text-white/50"
-        >
-          {desc}
-        </motion.p>
-
-        {/* Subtle bottom accent line */}
-        <motion.div
-          variants={item}
-          className="mt-6 h-px w-12 bg-gradient-to-r from-[#ff8a3d] to-transparent opacity-40 group-hover:opacity-70 group-hover:w-20 transition-all duration-300"
-        />
       </motion.div>
-    </motion.button>
+    </div>
   );
 }

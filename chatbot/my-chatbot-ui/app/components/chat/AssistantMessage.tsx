@@ -123,6 +123,8 @@ type AssistantMessageProps = {
   onUndoClick?: () => void;
   /** آیا الان در حال اجرای Undo برای این پیام هستیم؟ */
   isUndoing?: boolean;
+  /** زمان نمایش پیام */
+  timestamp?: string;
 };
 
 export default function AssistantMessage({
@@ -130,6 +132,7 @@ export default function AssistantMessage({
   metadata,
   onUndoClick,
   isUndoing,
+  timestamp,
 }: AssistantMessageProps) {
   const sections = parseAssistantContent(content);
   const canShowUndo =
@@ -138,7 +141,8 @@ export default function AssistantMessage({
   const undoResult = metadata?.undoResult;
 
   // حالت موفقیت دائمی بعد از اتمام Undo (تا وقتی metadata عوض نشه)
-  const [undoSucceeded, setUndoSucceeded] = React.useState(false);
+    const [undoSucceeded, setUndoSucceeded] = React.useState(false);
+  const [copied, setCopied] = React.useState(false);
 
   React.useEffect(() => {
     if (undoResult && !undoResult.error) {
@@ -146,8 +150,20 @@ export default function AssistantMessage({
     }
   }, [undoResult]);
 
-  return (
+    return (
     <div className="space-y-3">
+      {timestamp && (
+                <div className="flex justify-end mb-1">
+          <div className="relative group">
+            <span className="text-[11px] text-white/30 cursor-help">
+              {new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+            </span>
+            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 text-xs text-white bg-zinc-800 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap z-10">
+              {timestamp}
+            </div>
+          </div>
+        </div>
+      )}
       {sections.map((section, idx) => {
         if (section.type === "bullet") {
           const items = section.content.split("\n").filter((l) => l.trim());
@@ -308,7 +324,38 @@ export default function AssistantMessage({
             )}
           </button>
         </div>
-      )}
+                        )}
+
+      {/* Copy button */}
+      <button
+        type="button"
+        onClick={() => {
+          navigator.clipboard.writeText(content).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          });
+        }}
+        className={[
+          "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-300 ease-out",
+          copied
+            ? "border border-emerald-400/80 bg-emerald-400/10 text-emerald-50 shadow-[0_0_18px_rgba(16,185,129,0.25)]"
+            : "border border-white/14 bg-white/[0.02] text-white/80 hover:border-white/26 hover:bg-white/[0.06]",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+      >
+        {copied ? (
+          <>
+            <Check className="h-3.5 w-3.5" />
+            <span>Copied</span>
+          </>
+        ) : (
+          <>
+            <Copy className="h-3.5 w-3.5" />
+            <span>Copy message</span>
+          </>
+        )}
+      </button>
     </div>
   );
 }

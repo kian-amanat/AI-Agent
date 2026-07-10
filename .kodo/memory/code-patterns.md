@@ -1,21 +1,28 @@
 ---
-updated: 2026-07-07T23:04:37.450Z
+updated: 2026-07-10T17:47:56.378Z
 ---
 
 - **ChatSidebar Toggle Icon (Collapsed State)**: 
-  - Uses `Plus` icon from `@mui/icons-material/Plus` (or similar MUI Plus icon).
+  - Uses `Plus` icon from `@mui/icons-material/Plus`.
   - Located in `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
-  - **Styling**: Orange color (`#ff6b2b`), no background, no border. Replaced previous `KeyboardDoubleArrowRightRoundedIcon` logic.
-  - **Layout**: Search icon is positioned **above** the plus icon (reordered from previous bottom placement).
-  - **Sizing**: Plus icon background reduced (smaller padding/dimensions) to match refined aesthetic.
-  - **Shape**: Collapsed sidebar icon buttons use `rounded-full` to ensure perfect circles (fixed from `rounded-2xl`).
+  - **Styling**: Orange color (`#ff6b2b`), no background, no border.
+  - **Layout**: Search icon is positioned **above** the plus icon.
+  - **Sizing**: Plus icon background reduced.
+  - **Shape**: Collapsed sidebar icon buttons use `rounded-full`.
 - **ChatSidebar History Icon**: 
-  - Clock icon size updated from `h-5 w-5` to `h-4 w-4` to match the search icon.
-  - **Background Removal**: Removed persistent `bg-white/[0.06]` class from the history icon button to remove background, while keeping hover effects.
+  - Clock icon size updated to `h-4 w-4`.
+  - **Background Removal**: Removed persistent `bg-white/[0.06]` class.
   - File: `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
 - **ChatSidebar Search Input**: 
   - Added a search input to filter chat sessions.
-  - Uses a `ref` to focus the input when the sidebar opens via the collapsed search button.
+  - Uses a `ref` to focus the input when the sidebar opens.
+- **ChatSidebar Header**: 
+  - Displays the current user's name.
+  - Accesses user profile data to render the name in the header section.
   - File: `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
-- **ChatComposer Abort Button Logic**:
-  - The abort button functionality is enabled by passing the `onStop` prop to the `ChatComposer` component.
+- **ChatSidebar Chat List**: 
+  - Implements a loading skeleton for the chat list.
+  - Skeleton mimics the layout of chat items (avatar, title, subtitle).
+- **ChatSidebar Expanded State**: 
+  - Background color updates to a slightly lighter shade when the sidebar is expanded.
+  - File: `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.

@@ -33,6 +33,10 @@ const INSTALL_PATTERNS = [
   /\badd\s+(shadcn|shadcn-ui|tailwind|radix|react-query|zustand|prisma|axios|zod|framer|lucide)\b/i,
   /\binstall\s+(shadcn|package|packages|dependency|dependencies)\b/i,
   /\bshadcn\b.*\b(add|install|button|card|dialog|form|input|table|badge|avatar|select|dropdown|modal|sheet|toast|sidebar)\b/i,
+  // "install X" with a single word — "install" is almost never an edit verb, so any bare package name qualifies
+  /\binstall\s+(?!a\b|an\b|the\b|some\b|all\b)([a-z][a-z0-9]{2,})\b/i,
+  // "add X" for common single-word npm packages that have no hyphen
+  /\badd\s+(lodash|dayjs|uuid|clsx|nanoid|immer|jotai|valtio|rxjs|mobx|recoil|swr|express|fastify|mongoose|drizzle|redis|cors|helmet|morgan|winston|pino|nodemailer|bcrypt|passport|multer|cheerio|puppeteer|jest|vitest|mocha|prettier|eslint|husky|esbuild|turbo|dotenv|rimraf|concurrently|socket|marked|chokidar|glob|mime|sharp|stripe|twilio|chalk|yargs|commander|inquirer|ora|debug|semver|handlebars|mustache|nunjucks|pug|ejs|joi|yup|serialize)\b/i,
 ];
 
 const TEST_PATTERNS = [
