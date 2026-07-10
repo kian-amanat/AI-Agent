@@ -21,7 +21,7 @@ function GlowingPlusIcon({ compact = false }: { compact?: boolean }) {
   if (compact) {
     return (
       <div
-        className="relative flex h-8 w-8 items-center justify-center rounded-full"
+        className="relative flex h-11 w-11 items-center justify-center rounded-full"
         style={{
           boxShadow:
             "0 0 20px rgba(255,106,61,0.38), 0 0 38px rgba(255,45,85,0.22)",
@@ -29,7 +29,7 @@ function GlowingPlusIcon({ compact = false }: { compact?: boolean }) {
       >
         <div className="absolute inset-0 rounded-full bg-gradient-to-br from-[#ff7a3d] via-[#ff533d] to-[#ff2d55]" />
         <div className="absolute inset-[1px] rounded-full bg-gradient-to-br from-white/18 to-white/6" />
-        <Plus className="relative z-10 h-4 w-4 text-white" strokeWidth={2.6} />
+        <Plus className="relative z-10 h-5 w-5 text-white" strokeWidth={2.6} />
       </div>
     );
   }
@@ -95,7 +95,7 @@ export default function ChatSidebar({
       transition={{ type: "spring", stiffness: 260, damping: 30 }}
       onMouseEnter={() => setIsSidebarHovered(true)}
       onMouseLeave={() => setIsSidebarHovered(false)}
-            className={`ml-4 mt-4 mb-4 relative flex h-[calc(100vh-2rem)] shrink-0 flex-col rounded-2xl border border-white/8 shadow-[0_10px_40px_rgba(0,0,0,0.35)] ${isSidebarCollapsed ? 'bg-[#151515]' : 'bg-[#1a1a1a]'}`}
+            className={`relative flex h-full shrink-0 flex-col border-r border-white/8 ${isSidebarCollapsed ? 'bg-[#151515]' : 'bg-[#1a1a1a]'}`}
     >
       {/* ── Header ── */}
       <div className="flex items-center justify-between gap-2 px-3 py-3">
@@ -111,9 +111,9 @@ export default function ChatSidebar({
                 <motion.button
           whileTap={{ scale: 0.96 }}
           onClick={onToggleSidebar}
-          className={`relative flex h-10 w-10 items-center justify-center rounded-2xl text-white/72 transition-colors duration-200 hover:text-white ${
-            isSidebarCollapsed ? "" : "border border-white/8 hover:border-white/14"
-          } ${isSidebarCollapsed ? "mx-auto" : ""}`}
+          className={`relative flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 text-white/72 transition-colors duration-200 hover:border-white/14 hover:text-white ${
+            isSidebarCollapsed ? "mx-auto" : ""
+          }`}
           title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
           aria-label={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
         >
@@ -140,7 +140,7 @@ export default function ChatSidebar({
                   transition={{ duration: 0.2, ease: "easeOut" }}
                   className="absolute inset-0 flex items-center justify-center"
                 >
-                  <KeyboardDoubleArrowRightRoundedIcon className="h-4 w-4" />
+                  <KeyboardDoubleArrowRightRoundedIcon className="h-5 w-5" />
                 </motion.div>
               )}
             </AnimatePresence>
@@ -170,7 +170,7 @@ export default function ChatSidebar({
             whileHover={{ scale: 1.05, y: -1 }}
             whileTap={{ scale: 0.95 }}
             onClick={() => { onStartNewChat(); openSidebarIfCollapsed(); }}
-            className="flex h-8 w-8 items-center justify-center rounded-full"
+            className="flex h-9 w-9 items-center justify-center rounded-2xl"
             title="New chat"
           >
             <GlowingPlusIcon compact />
@@ -231,25 +231,20 @@ export default function ChatSidebar({
         </motion.div>
       )}
 
-            {!isSidebarCollapsed && (
-        <div className="px-3 py-2">
-                    <h2 className="ml-2 mt-2 text-xs font-bold uppercase tracking-wider text-white/40 font-space-grotesk">Chats</h2>
-        </div>
-      )}
-
       {/* ── Conversation list ── */}
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 pt-1">
                 {loadingSessions ? (
           <div className="flex flex-col gap-2">
             {[...Array(3)].map((_, i) => (
-              <div key={i} className="mb-1.5 flex w-full items-stretch gap-2 rounded-xl px-3 py-1.5 text-sm animate-pulse">
-                <span className="mt-0.5 h-5 w-0.5 rounded-full bg-white/10" />
+              <div key={i} className="mb-2 flex w-full items-stretch gap-2 rounded-xl px-3 py-3 text-sm animate-pulse">
+                <span className="mt-0.5 h-9 w-0.5 rounded-full bg-white/10" />
                 <div className="flex min-w-0 flex-1 gap-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-baseline justify-between gap-2">
                       <div className="h-[13px] w-2/3 rounded bg-white/10" />
                       <div className="h-[11px] w-8 rounded bg-white/10" />
                     </div>
+                    <div className="mt-1 h-[11px] w-3/4 rounded bg-white/10" />
                   </div>
                 </div>
                 <div className="relative ml-1 flex items-start justify-end">
@@ -273,7 +268,7 @@ export default function ChatSidebar({
                 key={conversation.id}
                 whileHover={{ x: 1 }}
                 className={[
-                  "group mb-1.5 flex w-full items-stretch gap-2 rounded-xl px-3 py-1.5 text-sm transition-all duration-150",
+                  "group mb-2 flex w-full items-stretch gap-2 rounded-xl px-3 py-3 text-sm transition-all duration-150",
                   isSelected
                     ? "bg-white/[0.06] text-white"
                     : "bg-transparent text-white/75 hover:bg-white/[0.04]",
@@ -281,7 +276,7 @@ export default function ChatSidebar({
               >
                 <span
                   className={[
-                    "mt-0.5 h-5 w-0.5 rounded-full bg-transparent transition-colors duration-200",
+                    "mt-0.5 h-9 w-0.5 rounded-full bg-transparent transition-colors duration-200",
                     isSelected ? "bg-[#ff8a3d]" : "group-hover:bg-white/18",
                   ].join(" ")}
                 />
@@ -302,7 +297,11 @@ export default function ChatSidebar({
                         </span>
                       )}
                     </div>
-                    
+                    {conversation.preview && (
+                      <p className="mt-1 truncate text-[11px] leading-5 text-white/40">
+                        {conversation.preview}
+                      </p>
+                    )}
                   </button>
                 </div>
 
@@ -345,7 +344,20 @@ export default function ChatSidebar({
         )}
       </div>
 
-      
+      {/* ── Footer / user ── */}
+      <div className="px-3 py-3">
+        <button className="flex w-full items-center gap-3 rounded-xl bg-white/[0.02] px-3 py-2.5 text-left text-sm text-white/80 transition-all duration-200 hover:bg-white/[0.05]">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06]">
+            <User className="h-4 w-4 text-white/80" />
+          </div>
+          {!isSidebarCollapsed && (
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[13px] font-medium text-white">{userName}</p>
+              <p className="truncate text-[11px] text-white/40">Free plan</p>
+            </div>
+          )}
+        </button>
+      </div>
     </motion.aside>
   );
 }
