@@ -33,6 +33,10 @@ const INSTALL_PATTERNS = [
   /\badd\s+(shadcn|shadcn-ui|tailwind|radix|react-query|zustand|prisma|axios|zod|framer|lucide)\b/i,
   /\binstall\s+(shadcn|package|packages|dependency|dependencies)\b/i,
   /\bshadcn\b.*\b(add|install|button|card|dialog|form|input|table|badge|avatar|select|dropdown|modal|sheet|toast|sidebar)\b/i,
+  // "install X" with a single word — "install" is almost never an edit verb, so any bare package name qualifies
+  /\binstall\s+(?!a\b|an\b|the\b|some\b|all\b)([a-z][a-z0-9]{2,})\b/i,
+  // "add X" for common single-word npm packages that have no hyphen
+  /\badd\s+(lodash|dayjs|uuid|clsx|nanoid|immer|jotai|valtio|rxjs|mobx|recoil|swr|express|fastify|mongoose|drizzle|redis|cors|helmet|morgan|winston|pino|nodemailer|bcrypt|passport|multer|cheerio|puppeteer|jest|vitest|mocha|prettier|eslint|husky|esbuild|turbo|dotenv|rimraf|concurrently|socket|marked|chokidar|glob|mime|sharp|stripe|twilio|chalk|yargs|commander|inquirer|ora|debug|semver|handlebars|mustache|nunjucks|pug|ejs|joi|yup|serialize)\b/i,
 ];
 
 const TEST_PATTERNS = [
@@ -95,8 +99,8 @@ function isMultiTaskRequest(msg) {
   if (/\b(two|three|four|five|2|3|4|5)\s+(things?|changes?|tasks?|items?|fixes?|improvements?|updates?)\b/i.test(m)) return true;
   // Multiple conjunctions connecting distinct actions
   if (/\b(also|additionally|furthermore|moreover|plus|as well as|on top of that)\b/i.test(m)) return true;
-  // Comma-separated actions with verbs — expanded to include create/build/implement/design/move/refactor
-  if (/\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite)\b.{3,80},\s+(?:and\s+)?\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite)\b/i.test(m)) return true;
+  // Comma-separated actions with verbs — expanded to include give/show/display/set/enable
+  if (/\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite|give|show|display|set|enable)\b.{3,80},\s+(?:and\s+)?\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite|give|show|display|set|enable)\b/i.test(m)) return true;
   // "Edit these 2 files", "update 3 files"
   if (/\b(edit|update|change|modify|fix)\s+(?:these\s+)?([2-9]|two|three|four|five)\s+files?\b/i.test(m)) return true;
   return false;

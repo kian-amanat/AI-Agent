@@ -180,7 +180,7 @@ export async function verifyNode(state) {
             path: r.path,
             action: r.action,
             error: r.error,
-            currentContent: currentContent ? currentContent.slice(0, 12000) : null,
+            currentContent: currentContent ? currentContent.slice(0, 40000) : null,
             // Pass through the failed search anchors from execute_changes for retry context
             failedPatches: r.failedPatches || [],
           });
@@ -204,7 +204,7 @@ export async function verifyNode(state) {
   }
 
   const writtenSteps = (plan || []).filter(
-    (p) => (p.action === "edit" || p.action === "create") && p.path
+    (p) => (p.action === "edit" || p.action === "create" || p.action === "rewrite_file") && p.path
   );
 
   for (const step of writtenSteps) {
@@ -368,7 +368,15 @@ export async function verifyNode(state) {
   }
 
   if (ok || !canRetry) {
-    result.finalAnswer = summaryLines.join("\n") || "Done.";
+    const allReadOnly = successSteps.length === 0 && readOnlySteps.length > 0;
+    const noSteps = (plan || []).length === 0;
+    result.finalAnswer =
+      summaryLines.join("\n") ||
+      (allReadOnly
+        ? "This feature already exists in the codebase — no changes were needed."
+        : noSteps
+        ? "The AI could not determine what to change. Try rephrasing with the specific file name or component you want edited."
+        : "Done.");
   }
 
   return result;

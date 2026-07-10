@@ -1,11 +1,11 @@
 {
   "provider": "gapgpt",
   "model": "gapgpt-qwen-3.6",
-  "apiKey": "sk-2A2LYfHybTM31XRInCRKEZOLy1qCvyJgqpv1GpAGV2MsVtif",
+  "apiKey": "sk-bdGgK47ioLeqBIPmT27iD07Uqv6FfWvW83ajogvqsscKGLBF",
   "baseUrl": "https://api.gapgpt.app/v1",
   "textProvider": "gapgpt",
   "textModel": "gapgpt-qwen-3.6",
-  "textApiKey": "sk-2A2LYfHybTM31XRInCRKEZOLy1qCvyJgqpv1GpAGV2MsVtif",
+  "textApiKey": "sk-bdGgK47ioLeqBIPmT27iD07Uqv6FfWvW83ajogvqsscKGLBF",
   "textBaseUrl": "https://api.gapgpt.app/v1",
   "visionProvider": null,
   "visionModel": null,

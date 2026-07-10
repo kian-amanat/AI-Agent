@@ -48,6 +48,7 @@ if (multipartAvailable && multipartPlugin) {
 }
 
 fastify.addHook("onRequest", async (request, reply) => {
+    reply.header("X-Request-ID", crypto.randomUUID());
   reply.header("Access-Control-Allow-Origin", "*");
   reply.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   reply.header(
@@ -140,6 +141,16 @@ await fastify.register(authRoute, {
   prefix: "/api/auth",
 });
 
+// Global error handler: ensures every unhandled error returns consistent JSON
+fastify.setErrorHandler((error, request, reply) => {
+  fastify.log.error(error);
+  const statusCode = error.statusCode || error.status || 500;
+  return reply.code(statusCode).send({
+    ok: false,
+    error: error.message || "Internal Server Error",
+    statusCode: statusCode,
+  });
+});
 
 fastify.get("/health", async () => {
   return {

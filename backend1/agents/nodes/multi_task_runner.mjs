@@ -60,11 +60,28 @@ function resolveClientCredentials(modelRoute) {
  * "scopeHint" is a likely filename or component area (used to bias exploration).
  */
 async function decomposeRequest(userMessage, modelRoute) {
+  const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
+
+  // Fast path: try regex BEFORE calling LLM.
+  // For the most common pattern "do X, and do Y" the regex is instant (microseconds).
+  // Only fall through to LLM for complex multi-task patterns the regex can't split.
+  const quickMatch = cleanMsg.match(
+    /^(.{10,120}),\s+(?:and\s+)?((?:create|make|add|fix|change|update|remove|improve|give|show|display|set|enable|build|implement|design|move|refactor|rewrite).{10,})$/i
+  );
+  if (quickMatch) {
+    const tasks = [
+      { description: quickMatch[1].trim(), scopeHint: "" },
+      { description: quickMatch[2].trim(), scopeHint: "" },
+    ];
+    console.log(`[MultiTaskRunner] Regex decomposition (fast path, 0ms): ${tasks.length} task(s)`);
+    return tasks;
+  }
+
+  // LLM decomposition for complex patterns the regex can't handle.
   const { apiKey, baseURL, model } = resolveClientCredentials(modelRoute);
   if (!apiKey) return null;
 
-  const client = new OpenAI({ apiKey, baseURL, timeout: 30_000, maxRetries: 0 });
-  const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
+  const client = new OpenAI({ apiKey, baseURL, timeout: 60_000, maxRetries: 0 });
 
   const system = `You are a task decomposer for a code editor AI agent.
 
@@ -95,12 +112,13 @@ Return ONLY valid JSON (no markdown fences):
     if (start === -1 || end === -1) return null;
     const parsed = JSON.parse(raw.slice(start, end + 1));
     if (Array.isArray(parsed?.tasks) && parsed.tasks.length > 0) {
-      console.log(`[MultiTaskRunner] Decomposed: ${parsed.tasks.length} task(s)`, parsed.tasks.map(t => t.description?.slice(0, 60)));
+      console.log(`[MultiTaskRunner] LLM decomposed: ${parsed.tasks.length} task(s)`, parsed.tasks.map(t => t.description?.slice(0, 60)));
       return parsed.tasks;
     }
   } catch (err) {
-    console.warn("[MultiTaskRunner] Decomposition failed:", String(err.message || err).slice(0, 120));
+    console.warn("[MultiTaskRunner] LLM decomposition failed:", String(err.message || err).slice(0, 120));
   }
+
   return null;
 }
 
@@ -122,11 +140,13 @@ async function runOneTask({ taskIndex, taskTotal, taskDescription, scopeHint, ba
     ? `${taskDescription}\n\n[File hint: ${scopeHint}]`
     : taskDescription;
 
-  // Task-isolated state — no shared fileContext or retryCount
+  // Task-isolated state — no shared fileContext or retryCount.
+  const originalMessage = String(baseState.userMessage || "").split(/conversation memory:/i)[0].trim();
   let taskState = {
     ...baseState,
-    userMessage: taskMessage,
-    intent: "explore",
+    userMessage:      taskMessage,
+    nameMatchMessage: originalMessage,
+    intent:           "explore",
     fileContext:      [],
     investigation:    null,
     plan:             [],
@@ -140,6 +160,11 @@ async function runOneTask({ taskIndex, taskTotal, taskDescription, scopeHint, ba
     const exploreResult = await agenticExploreNode(taskState);
     taskState = { ...taskState, ...exploreResult };
     console.log(`[MultiTaskRunner] Task ${taskIndex + 1} explore done: ${(taskState.fileContext || []).length} file(s)`);
+
+    // If explore bailed early (API error → 0 files), skip planning — there's nothing to work with.
+    if ((taskState.fileContext || []).length === 0 && exploreResult.finalAnswer) {
+      return { ok: false, error: exploreResult.finalAnswer, executionResults: [] };
+    }
   } catch (err) {
     const error = `Explore failed: ${err.message}`;
     console.error(`[MultiTaskRunner] Task ${taskIndex + 1} explore error:`, err.message);
@@ -173,11 +198,18 @@ async function runOneTask({ taskIndex, taskTotal, taskDescription, scopeHint, ba
       break;
     }
 
-    // If plan is all read_only, no file changes — mark done
+    // If plan is all read_only on the FIRST attempt, escalate to rewrite on next pass.
+    // On subsequent attempts (retryCount >= 1) the planner is already in rewrite mode —
+    // if it still returns read_only, give up.
     const actionable = (taskState.plan || []).filter(s => s.action !== "read_only");
     if (actionable.length === 0) {
+      if (attempt === 0) {
+        console.log(`[MultiTaskRunner] Task ${taskIndex + 1}: all read_only on attempt 0 — escalating to rewrite`);
+        taskState = { ...taskState, retryCount: 1 }; // signal escalation to buildSystemPrompt
+        continue;
+      }
       const readOnlyDesc = (taskState.plan || []).find(s => s.action === "read_only")?.description || "";
-      console.log(`[MultiTaskRunner] Task ${taskIndex + 1}: all read_only — ${readOnlyDesc.slice(0, 80)}`);
+      console.log(`[MultiTaskRunner] Task ${taskIndex + 1}: all read_only after escalation — ${readOnlyDesc.slice(0, 80)}`);
       taskOk    = false;
       taskError = readOnlyDesc || "No actionable changes found";
       break;
@@ -273,32 +305,176 @@ export async function multiTaskRunnerNode(state) {
     return { ...exploreResult, ...planResult, ...execResult, ...verifyResult };
   }
 
-  // Step 2: Multiple tasks — run each independently
-  console.log(`[MultiTaskRunner] Running ${tasks.length} tasks independently`);
+  // Step 2: Multiple tasks — parallel explore, sequential execute
+  // Exploration is read-only so running it concurrently is safe.
+  // Plan/execute/verify is sequential to avoid concurrent writes to the same file.
+  console.log(`[MultiTaskRunner] Running ${tasks.length} tasks — parallel explore, sequential execute`);
   emit?.({
     type: "progress",
     stage: "decomposed",
     message: `🧩 ${tasks.length} tasks: ${tasks.map((t, i) => `(${i + 1}) ${t.description.slice(0, 35)}`).join(" · ")}`,
   });
 
+  const originalCleanMsg = String(userMessage || "").split(/conversation memory:/i)[0].trim();
+
+  // ── Phase 1: Explore all tasks concurrently ──────────────────────────────
+  emit?.({ type: "progress", stage: "exploring", message: "📂 Exploring all tasks in parallel…" });
+
+  const exploredStates = await Promise.all(tasks.map(async (task, i) => {
+    if (abortSignal?.aborted) return { ok: false, error: "Aborted", taskState: null };
+
+    const taskMessage = task.scopeHint
+      ? `${task.description}\n\n[File hint: ${task.scopeHint}]`
+      : task.description;
+
+    let ts = {
+      ...state,
+      userMessage:      taskMessage,
+      nameMatchMessage: originalCleanMsg, // use original user words for name-match
+      intent:           "explore",
+      fileContext:      [],
+      investigation:    null,
+      plan:             [],
+      executionResults: [],
+      verifyResult:     null,
+      retryCount:       0,
+    };
+
+    try {
+      const exploreResult = await agenticExploreNode(ts);
+      ts = { ...ts, ...exploreResult };
+      console.log(`[MultiTaskRunner] Task ${i + 1} explore done: ${(ts.fileContext || []).length} file(s)`);
+
+      if ((ts.fileContext || []).length === 0 && exploreResult.finalAnswer) {
+        return { ok: false, error: exploreResult.finalAnswer, taskState: ts };
+      }
+      return { ok: true, taskState: ts };
+    } catch (err) {
+      console.error(`[MultiTaskRunner] Task ${i + 1} explore error:`, err.message);
+      return { ok: false, error: `Explore failed: ${err.message}`, taskState: ts };
+    }
+  }));
+
+  // ── Phase 2a: Plan all tasks in parallel ────────────────────────────────
+  // Plans are pure read + LLM inference — no file writes, safe to parallelize.
+  emit?.({ type: "progress", stage: "planning", message: "🧠 Planning all tasks in parallel…" });
+
+  const plannedStates = await Promise.all(exploredStates.map(async (ex, i) => {
+    if (!ex.ok || abortSignal?.aborted) return { ...ex };
+    try {
+      const planResult = await planChangesNode({ ...ex.taskState, retryCount: 0 });
+      const ts = { ...ex.taskState, ...planResult, retryCount: 0 };
+      const actionable = (ts.plan || []).filter(s => s.action !== "read_only");
+      // Flag all-read_only plans so the execute phase can re-plan with escalation
+      return { ok: true, taskState: { ...ts, _escalate: actionable.length === 0 } };
+    } catch (err) {
+      console.warn(`[MultiTaskRunner] Task ${i + 1} plan error:`, err.message);
+      return { ok: false, error: `Plan failed: ${err.message}`, taskState: ex.taskState };
+    }
+  }));
+
+  // ── Phase 2b: Execute + Verify sequentially ──────────────────────────────
+  // File writes must be sequential to avoid concurrent edits to the same file.
   const taskOutcomes  = [];
   const allExecResults = [];
 
   for (let i = 0; i < tasks.length; i++) {
     if (abortSignal?.aborted) break;
 
-    const task   = tasks[i];
-    const result = await runOneTask({
-      taskIndex:       i,
-      taskTotal:       tasks.length,
-      taskDescription: task.description,
-      scopeHint:       task.scopeHint || "",
-      baseState:       state,
-      emit,
+    const planned = plannedStates[i];
+
+    if (!planned.ok) {
+      emit?.({ type: "progress", stage: "task_done", message: `⚠️ Task ${i + 1}: failed` });
+      taskOutcomes.push({ description: tasks[i].description, ok: false, error: planned.error, executionResults: [] });
+      continue;
+    }
+
+    emit?.({
+      type: "progress",
+      stage: "task_start",
+      message: `📋 Task ${i + 1}/${tasks.length}: ${tasks[i].description.slice(0, 80)}`,
     });
 
-    taskOutcomes.push({ description: task.description, ...result });
-    allExecResults.push(...(result.executionResults || []));
+    let taskState = planned.taskState;
+    let taskOk    = false;
+    let taskError = null;
+    const thisExecResults = [];
+
+    // If the parallel plan was all read_only, do one escalated re-plan before the loop
+    if (taskState._escalate) {
+      taskState = { ...taskState, retryCount: 1, _escalate: false };
+      try {
+        const replan = await planChangesNode({ ...taskState });
+        taskState = { ...taskState, ...replan, retryCount: 1 };
+      } catch (err) {
+        taskError = `Plan failed: ${err.message}`;
+        taskOutcomes.push({ description: tasks[i].description, ok: false, error: taskError, executionResults: [] });
+        continue;
+      }
+    }
+
+    // Retry loop — attempt 0 uses the pre-computed plan, retries re-plan from scratch
+    for (let attempt = 0; attempt <= MAX_TASK_RETRIES; attempt++) {
+      if (abortSignal?.aborted) break;
+
+      // On retry, re-plan with updated fileContext from verify
+      if (attempt > 0) {
+        emit?.({ type: "progress", stage: "task_retry", message: `🔄 Task ${i + 1}: retry ${attempt}/${MAX_TASK_RETRIES}…` });
+        try {
+          const replan = await planChangesNode({ ...taskState, retryCount: attempt });
+          taskState = { ...taskState, ...replan, retryCount: attempt };
+        } catch (err) {
+          taskError = `Plan failed: ${err.message}`;
+          break;
+        }
+      }
+
+      const actionable = (taskState.plan || []).filter(s => s.action !== "read_only");
+      if (actionable.length === 0) {
+        const readOnlyDesc = (taskState.plan || []).find(s => s.action === "read_only")?.description || "";
+        // "Already exists" is not a real failure — treat as ok
+        const alreadyExists = /already (exist|implement|done|there|present)/i.test(readOnlyDesc);
+        taskOk    = alreadyExists;
+        taskError = alreadyExists ? null : (readOnlyDesc || "No actionable changes found");
+        break;
+      }
+
+      let execResult;
+      try {
+        execResult = await executeChangesNode({ ...taskState, retryCount: attempt });
+        taskState  = { ...taskState, ...execResult, retryCount: attempt };
+        thisExecResults.push(...(execResult.executionResults || []));
+      } catch (err) {
+        taskError = `Execute failed: ${err.message}`;
+        break;
+      }
+
+      let verResult;
+      try {
+        verResult = await verifyNode({ ...taskState, retryCount: attempt });
+        taskState  = { ...taskState, ...verResult };
+      } catch (err) {
+        taskError = `Verify failed: ${err.message}`;
+        break;
+      }
+
+      if (verResult.verifyResult?.ok) { taskOk = true; break; }
+
+      taskError = (verResult.verifyResult?.issues || []).join("; ") || "Verification failed";
+      if (attempt < MAX_TASK_RETRIES && verResult.fileContext?.length) {
+        taskState.fileContext = verResult.fileContext;
+      }
+    }
+
+    const statusEmoji = taskOk ? "✅" : "⚠️";
+    emit?.({
+      type: "progress",
+      stage: "task_done",
+      message: `${statusEmoji} Task ${i + 1}: ${taskOk ? "done" : `failed — ${taskError?.slice(0, 60) || "unknown"}`}`,
+    });
+
+    taskOutcomes.push({ description: tasks[i].description, ok: taskOk, error: taskError, executionResults: thisExecResults });
+    allExecResults.push(...thisExecResults);
   }
 
   // Step 3: Per-task final answer

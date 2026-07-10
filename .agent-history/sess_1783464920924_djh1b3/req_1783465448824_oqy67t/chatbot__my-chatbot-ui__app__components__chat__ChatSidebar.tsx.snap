@@ -1,0 +1,342 @@
+"use client";
+
+import React, { useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  Clock,
+  Loader2,
+  MoreVertical,
+  PanelLeftClose,
+  PanelLeftOpen,
+  Plus,
+  Search,
+  Trash2,
+  User,
+} from "lucide-react";
+import type { Conversation } from "./chat-types";
+import Image from 'next/image';
+import KeyboardDoubleArrowLeftRoundedIcon from '@mui/icons-material/KeyboardDoubleArrowLeftRounded';
+import KeyboardDoubleArrowRightRoundedIcon from '@mui/icons-material/KeyboardDoubleArrowRightRounded';
+function GlowingPlusIcon({ compact = false }: { compact?: boolean }) {
+  if (compact) {
+    return (
+      <div
+        className="relative flex h-11 w-11 items-center justify-center rounded-full"
+        style={{
+          boxShadow:
+            "0 0 20px rgba(255,106,61,0.38), 0 0 38px rgba(255,45,85,0.22)",
+        }}
+      >
+        <div className="absolute inset-0 rounded-full bg-gradient-to-br from-[#ff7a3d] via-[#ff533d] to-[#ff2d55]" />
+        <div className="absolute inset-[1px] rounded-full bg-gradient-to-br from-white/18 to-white/6" />
+        <Plus className="relative z-10 h-5 w-5 text-white" strokeWidth={2.6} />
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className="relative flex h-9 w-9 items-center justify-center rounded-full"
+      style={{
+        boxShadow:
+          "0 0 18px rgba(255,106,61,0.34), 0 0 34px rgba(255,45,85,0.22)",
+      }}
+    >
+      <motion.div
+        className="absolute inset-0 rounded-full"
+        animate={{ rotate: [0, 360] }}
+        transition={{ duration: 6, repeat: Infinity, ease: "linear" }}
+        style={{
+          background:
+            "conic-gradient(from 0deg, #ff7a3d 0deg, #ff533d 120deg, #ff2d55 240deg, #ff7a3d 360deg)",
+        }}
+      />
+      <div className="absolute inset-[1px] rounded-full bg-gradient-to-br from-white/20 to-white/8" />
+      <Plus className="relative z-10 h-4 w-4 text-white" strokeWidth={2.6} />
+    </div>
+  );
+}
+
+export default function ChatSidebar({
+  isSidebarCollapsed,
+  onToggleSidebar,
+  onStartNewChat,
+  conversationSearch,
+  setConversationSearch,
+  filteredConversations,
+  selectedSessionId,
+  onOpenSession,
+  onDeleteSession,
+  loadingSessions,
+}: {
+  isSidebarCollapsed: boolean;
+  onToggleSidebar: () => void;
+  onStartNewChat: () => void;
+  conversationSearch: string;
+  setConversationSearch: (value: string) => void;
+  filteredConversations: Conversation[];
+  selectedSessionId: string | null;
+  onOpenSession: (sessionId: string) => void;
+  onDeleteSession: (sessionId: string) => void;
+  loadingSessions: boolean;
+}) {
+  const [menuForId, setMenuForId] = useState<string | null>(null);
+  const [isSidebarHovered, setIsSidebarHovered] = useState(false);
+
+  const openSidebarIfCollapsed = () => {
+    if (isSidebarCollapsed) onToggleSidebar();
+  };
+
+  return (
+    <motion.aside
+      animate={{ width: isSidebarCollapsed ? 76 : 318 }}
+      transition={{ type: "spring", stiffness: 260, damping: 30 }}
+      onMouseEnter={() => setIsSidebarHovered(true)}
+      onMouseLeave={() => setIsSidebarHovered(false)}
+      className="relative flex h-full shrink-0 flex-col border-r border-white/8 bg-[#151515]"
+    >
+      {/* ── Header ── */}
+      <div className="flex items-center justify-between gap-2 px-3 py-3">
+        {/* Logo + name (hidden when collapsed) */}
+        {!isSidebarCollapsed && (
+          <div className="flex items-center gap-2">
+            <Image src="/icon.png" alt="" width={32} height={32} quality={100} className="ml-2" />
+            <motion.p className="text-sm font-semibold tracking-tight text-white" whileHover={{ scale: 1.1 }} style={{ fontFamily: '-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Helvetica, Arial, sans-serif', textShadow: '0 0 2px rgba(255,255,255,0.6)' }}></motion.p>
+          </div>
+        )}
+
+                {/* Collapse / expand toggle */}
+                <motion.button
+          whileTap={{ scale: 0.96 }}
+          onClick={onToggleSidebar}
+          className={`relative flex h-10 w-10 items-center justify-center rounded-2xl border border-white/8 text-white/72 transition-colors duration-200 hover:border-white/14 hover:text-white ${
+            isSidebarCollapsed ? "mx-auto" : ""
+          }`}
+          title={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+          aria-label={isSidebarCollapsed ? "Open sidebar" : "Collapse sidebar"}
+        >
+          {isSidebarCollapsed ? (
+            <AnimatePresence mode="wait">
+              {!isSidebarHovered && (
+                <motion.div
+                  key="icon"
+                  initial={{ opacity: 0, x: -8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: 8 }}
+                  transition={{ duration: 0.2, ease: "easeOut" }}
+                  className="absolute inset-0 flex items-center justify-center"
+                >
+                  <Image src="/icon.png" alt="Open sidebar" width={24} height={24} className="rounded-md" />
+                </motion.div>
+              )}
+              {isSidebarHovered && (
+                <motion.div
+                  key="arrow"
+                  initial={{ opacity: 0, x: 8 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  exit={{ opacity: 0, x: -8 }}
+                  transition={{ duration: 0.2, ease: "easeOut" }}
+                  className="absolute inset-0 flex items-center justify-center"
+                >
+                  <KeyboardDoubleArrowRightRoundedIcon className="h-5 w-5" />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          ) : (
+            <KeyboardDoubleArrowLeftRoundedIcon className="h-5 w-5" />
+          )}
+        </motion.button>
+      </div>
+
+            {/* ── Collapsed icon buttons ── */}
+      {isSidebarCollapsed && (
+        <div className="flex flex-col items-center gap-3 pb-4 translate-x-[2px]">
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={openSidebarIfCollapsed}
+                        className="flex h-11 w-11 items-center justify-center rounded-2xl text-white/80 transition-colors hover:bg-white/[0.06]"
+            title="Search"
+          >
+            <Search className="h-4 w-4" />
+          </motion.button>
+
+          <motion.button
+            whileHover={{ scale: 1.05, y: -1 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={() => { onStartNewChat(); openSidebarIfCollapsed(); }}
+            className="flex h-9 w-9 items-center justify-center rounded-2xl"
+            title="New chat"
+          >
+            <GlowingPlusIcon compact />
+          </motion.button>
+
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={openSidebarIfCollapsed}
+            className="flex h-11 w-11 items-center justify-center rounded-2xl text-white/80 transition-colors hover:bg-white/[0.06]"
+            title="Recent chats"
+          >
+            <Clock className="h-4 w-4" />
+          </motion.button>
+        </div>
+      )}
+
+            {/* ── Search + New chat (expanded only) ── */}
+      {!isSidebarCollapsed && (
+        <motion.div
+          initial={{ opacity: 0, y: -8 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -8 }}
+          transition={{ duration: 0.25, ease: "easeOut" }}
+          className="px-3 pb-3"
+        >
+                    <motion.div
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.2, ease: "easeOut", delay: 0.05 }}
+            className="relative mb-3"
+          >
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-white/30" />
+            <input
+              value={conversationSearch}
+              onChange={(e) => setConversationSearch(e.target.value)}
+              placeholder="Search conversations"
+              className="h-11 w-full rounded-2xl border border-white/8 bg-white/[0.02] pl-9 pr-3 text-sm text-white outline-none transition-all duration-200 placeholder:text-white/28 focus:border-white/18 focus:bg-white/[0.04]"
+            />
+          </motion.div>
+
+          <motion.button
+            whileHover={{ y: -1 }}
+            whileTap={{ scale: 0.98 }}
+            onClick={onStartNewChat}
+            className="relative flex w-full items-center gap-3 rounded-2xl bg-white/[0.03] px-4 py-3 text-left text-sm text-white/80 transition-all duration-200 hover:bg-white/[0.06]"
+          >
+            {filteredConversations.length === 0 && (
+              <span className="absolute right-3 top-3 h-2 w-2 rounded-full bg-[#ff8a3d]" />
+            )}
+            <GlowingPlusIcon />
+            <div className="min-w-0">
+              <p className="truncate text-[13px] font-semibold text-white">New chat</p>
+              <p className="truncate text-[11px] text-white/60">Start a fresh conversation</p>
+            </div>
+          </motion.button>
+        </motion.div>
+      )}
+
+      {/* ── Conversation list ── */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-2 pt-1">
+        {loadingSessions && filteredConversations.length === 0 ? (
+          <div className="flex items-center gap-2 rounded-xl px-3 py-3 text-sm text-white/40">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading conversations...
+          </div>
+        ) : filteredConversations.length === 0 ? (
+          <div className="rounded-xl px-3 py-3 text-xs text-white/32">
+            No conversations yet. Start a new chat to begin.
+          </div>
+        ) : (
+          filteredConversations.map((conversation) => {
+            const isSelected = selectedSessionId === conversation.id;
+
+            if (isSidebarCollapsed) return null;
+
+            return (
+              <motion.div
+                key={conversation.id}
+                whileHover={{ x: 1 }}
+                className={[
+                  "group mb-2 flex w-full items-stretch gap-2 rounded-xl px-3 py-3 text-sm transition-all duration-150",
+                  isSelected
+                    ? "bg-white/[0.06] text-white"
+                    : "bg-transparent text-white/75 hover:bg-white/[0.04]",
+                ].join(" ")}
+              >
+                <span
+                  className={[
+                    "mt-0.5 h-9 w-0.5 rounded-full bg-transparent transition-colors duration-200",
+                    isSelected ? "bg-[#ff8a3d]" : "group-hover:bg-white/18",
+                  ].join(" ")}
+                />
+
+                <div className="flex min-w-0 flex-1 gap-3">
+                  <button
+                    onClick={() => onOpenSession(conversation.id)}
+                    className="min-w-0 flex-1 text-left"
+                    title={conversation.title}
+                  >
+                    <div className="flex items-baseline justify-between gap-2">
+                      <p className="truncate text-[13px] font-medium text-white/92">
+                        {conversation.title || "Untitled"}
+                      </p>
+                      {conversation.updatedAt && (
+                        <span className="shrink-0 text-[11px] text-white/32">
+                          {conversation.updatedAt}
+                        </span>
+                      )}
+                    </div>
+                    {conversation.preview && (
+                      <p className="mt-1 truncate text-[11px] leading-5 text-white/40">
+                        {conversation.preview}
+                      </p>
+                    )}
+                  </button>
+                </div>
+
+                <div className="relative ml-1 flex items-start justify-end">
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setMenuForId((prev) =>
+                        prev === conversation.id ? null : conversation.id
+                      );
+                    }}
+                    className="rounded-lg p-1 text-white/28 opacity-0 transition-all duration-150 group-hover:opacity-100 hover:bg-white/[0.05] hover:text-white/80"
+                    title="More actions"
+                    aria-label="More actions"
+                  >
+                    <MoreVertical className="h-4 w-4" />
+                  </button>
+
+                  {menuForId === conversation.id && (
+                    <div
+                      className="absolute right-0 top-7 z-20 w-32 rounded-lg border border-white/10 bg-[#1b1b1b] py-1 text-xs text-white/80 shadow-lg"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <button
+                        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-white/[0.06]"
+                        onClick={() => {
+                          setMenuForId(null);
+                          onDeleteSession(conversation.id);
+                        }}
+                      >
+                        <Trash2 className="h-3.5 w-3.5 text-red-400" />
+                        <span>Delete</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              </motion.div>
+            );
+          })
+        )}
+      </div>
+
+      {/* ── Footer / user ── */}
+      <div className="px-3 py-3">
+        <button className="flex w-full items-center gap-3 rounded-xl bg-white/[0.02] px-3 py-2.5 text-left text-sm text-white/80 transition-all duration-200 hover:bg-white/[0.05]">
+          <div className="flex h-8 w-8 items-center justify-center rounded-lg border border-white/10 bg-white/[0.06]">
+            <User className="h-4 w-4 text-white/80" />
+          </div>
+          {!isSidebarCollapsed && (
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-[13px] font-medium text-white">Kian</p>
+              <p className="truncate text-[11px] text-white/40">Free plan</p>
+            </div>
+          )}
+        </button>
+      </div>
+    </motion.aside>
+  );
+}

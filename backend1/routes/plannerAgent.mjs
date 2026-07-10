@@ -45,6 +45,10 @@ import { loadMemoryIndex, writeAgentMemory } from "../services/agentMemory.mjs";
 
 const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
 
+// Per-session in-flight lock — prevents two concurrent requests for the same session
+// from interleaving their graph runs and corrupting each other's file edits.
+const activeSessionRequests = new Map(); // sessionId → requestId
+
 // ── Helpers ───────────────────────────────────────────────────
 
 async function loadSettings() {
@@ -231,11 +235,28 @@ export default async function plannerAgentRoute(fastify) {
                          : isRealPath(memFile) ? memFile
                          : "";
 
+    // Always include the "Conversation memory:" label so the cleanMessage split
+    // in agentic_explore / plan_changes reliably strips everything below it —
+    // including the "Agent memory:" section whose filenames would otherwise
+    // pollute the name-match fast-path word list.
     const plannerContextMessage = [
       effectiveMessage,
-      memoryContext     ? `Conversation memory:\n${memoryContext}`      : "",
+      `Conversation memory:\n${memoryContext || "(none)"}`,
       agentMemoryIndex  ? `Agent memory:\n${agentMemoryIndex}`          : "",
     ].filter(Boolean).join("\n\n");
+
+    // ── Concurrent-request guard ──────────────────────────────────────────────
+    // If this session already has a request in-flight, reject immediately.
+    // Two parallel graph runs share file state and corrupt each other's patches.
+    if (activeSessionRequests.has(sessionId)) {
+      const existingId = activeSessionRequests.get(sessionId);
+      console.warn(`[PlannerAgent] Session ${sessionId} busy (${existingId}) — rejecting duplicate`);
+      return reply.code(409).send({
+        ok: false,
+        error: "A request is already processing for this session. Please wait for it to complete.",
+      });
+    }
+    activeSessionRequests.set(sessionId, requestId);
 
     const sessionLabel = normalizeSessionLabel(message, []);
     createSession(sessionId, userId, sessionLabel);
@@ -289,7 +310,7 @@ export default async function plannerAgentRoute(fastify) {
     }
 
         // ── Run the LangGraph (with hard timeout so SSE always closes) ───────────
-    const GRAPH_TIMEOUT_MS = 10 * 60 * 1000; // 10 minutes max
+    const GRAPH_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes max (multi-task needs headroom)
 
     // Client disconnect handling
     const controller = new AbortController();
@@ -320,7 +341,7 @@ export default async function plannerAgentRoute(fastify) {
 
     if (raceResult.timedOut) {
       console.warn("[Agent] ⏱️ Graph timeout — closing SSE stream");
-      // Emit content so the message is non-empty (prevents UI from showing "Running agent…")
+      activeSessionRequests.delete(sessionId);
       emit({ type: "content", content: "The task is taking longer than expected. Please try again." });
       emit({ type: "done", request_id: requestId, summary: "",
              metadata: { type: "graph", request_id: requestId, ...modelMeta } });
@@ -331,6 +352,7 @@ export default async function plannerAgentRoute(fastify) {
     if (!raceResult.ok) {
       const graphError = raceResult.error;
       console.error("❌ LangGraph error:", graphError);
+      activeSessionRequests.delete(sessionId);
       emit({ type: "error", error: "Graph execution failed", details: graphError.message });
       reply.raw.end();
       saveMessage(sessionId, userId, "assistant", `Error: ${graphError.message}`, "error");
@@ -398,7 +420,8 @@ export default async function plannerAgentRoute(fastify) {
       targetFile:       editedFiles[0] || "",
     });
 
-    // Cleanup abort listener to prevent memory leaks
+    // Release session lock and cleanup abort listener
+    activeSessionRequests.delete(sessionId);
     request.raw.removeListener("close", abortListener);
 
     return reply;

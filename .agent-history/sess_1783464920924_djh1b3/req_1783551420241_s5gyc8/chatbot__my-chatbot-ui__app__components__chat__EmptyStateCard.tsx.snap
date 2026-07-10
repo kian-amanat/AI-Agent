@@ -1,0 +1,73 @@
+"use client";
+
+import { motion } from "framer-motion";
+
+const container = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.1,
+    },
+  },
+};
+
+const item = {
+  hidden: { opacity: 0, y: 20 },
+  show: { opacity: 1, y: 0 },
+};
+
+export default function EmptyStateCard() {
+  const suggestions = [
+    "How do I start?",
+    "Explain quantum physics",
+    "Write a poem about AI",
+    "Debug my code",
+  ];
+
+  return (
+    <div className="relative flex min-h-screen w-full items-center justify-center overflow-hidden bg-[#0a0a0a]">
+      {/* Ambient Background Effects */}
+      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-[#ff8a3d]/20 via-[#0a0a0a] to-[#0a0a0a]" />
+      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[500px] w-[500px] rounded-full bg-[#ff5e4d]/10 blur-[100px]" />
+
+      <motion.div
+        variants={container}
+        initial="hidden"
+        animate="show"
+        className="relative z-10 mx-auto max-w-3xl px-6 text-center"
+      >
+        {/* Greeting */}
+        <motion.h1
+          variants={item}
+          className="mb-4 text-5xl font-extrabold tracking-tight text-white sm:text-7xl md:text-8xl"
+        >
+          Good morning, <span className="bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d] bg-clip-text text-transparent">Kian</span>
+        </motion.h1>
+
+        <motion.p
+          variants={item}
+          className="mb-12 text-lg text-gray-400 sm:text-xl"
+        >
+          What can we create together today?
+        </motion.p>
+
+        {/* Suggestion Chips */}
+        <motion.div
+          variants={item}
+          className="flex flex-wrap justify-center gap-3"
+        >
+          {suggestions.map((suggestion, index) => (
+            <button
+              key={index}
+              className="group relative overflow-hidden rounded-full border border-white/10 bg-white/5 px-6 py-3 text-sm font-medium text-white/80 backdrop-blur-md transition-all duration-300 hover:border-[#ff8a3d]/50 hover:bg-[#ff8a3d]/10 hover:text-white hover:shadow-[0_0_20px_rgba(255,138,61,0.3)]"
+            >
+              <span className="relative z-10">{suggestion}</span>
+              <div className="absolute inset-0 -z-0 translate-x-[-100%] bg-gradient-to-r from-[#ff8a3d]/20 to-[#ff5e4d]/20 transition-transform duration-300 group-hover:translate-x-0" />
+            </button>
+          ))}
+        </motion.div>
+      </motion.div>
+    </div>
+  );
+}

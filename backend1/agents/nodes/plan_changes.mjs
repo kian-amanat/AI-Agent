@@ -25,7 +25,7 @@ const MAX_TOTAL_CONTEXT_CHARS = 20000;
 
 // ── Self-healing: load missing files when the plan is all read_only ────────────
 
-const SKIP_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", ".turbo", "uploads", ".agent-history", ".kodo"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", ".turbo", "uploads", ".agent-history"]);
 const CODE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
 
 async function findWorkspaceFiles(projectRoot, dir = projectRoot, depth = 0) {
@@ -73,8 +73,10 @@ async function selfHealLoadMissingFiles(plan, fileContext, root, userMsg, emit) 
     }
   }
 
-  // Fallback: "user message" with no component found → load the main page
-  if (newFiles.length === 0 && /user.?message|chat.?bubble|message.?bubble/i.test(descriptions + " " + (userMsg || ""))) {
+  // Fallback: "user message" with no component found → load the main page.
+  // Skip if the file context is backend-focused (loading page.tsx would confuse the planner).
+  const isBackendTask = (fileContext || []).some(f => /\bbackend\b|\broutes?\b|\bserver\.mjs\b/i.test(f?.path || ""));
+  if (newFiles.length === 0 && !isBackendTask && /user.?message|chat.?bubble|message.?bubble/i.test(descriptions + " " + (userMsg || ""))) {
     const pageTsx = allFiles.find(f => path.basename(f) === "page.tsx" && f.includes("app/page"));
     if (pageTsx && !loadedPaths.has(pageTsx)) {
       try {
@@ -127,8 +129,8 @@ function isMultiTaskRequest(msg) {
   if (/\b(two|three|four|five|2|3|4|5)\s+(things?|changes?|tasks?|items?|fixes?|improvements?|updates?)\b/i.test(m)) return true;
   // Multiple conjunctions connecting distinct actions
   if (/\b(also|additionally|furthermore|moreover|plus|as well as|on top of that)\b/i.test(m)) return true;
-  // Comma-separated actions — expanded verb list (includes create/build/implement/design/move/refactor)
-  if (/\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite)\b.{3,80},\s+(?:and\s+)?\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite)\b/i.test(m)) return true;
+  // Comma-separated actions — expanded verb list (includes give/show/display/set/enable)
+  if (/\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite|give|show|display|set|enable)\b.{3,80},\s+(?:and\s+)?\b(create|make|add|fix|change|update|remove|improve|build|implement|design|move|refactor|rewrite|give|show|display|set|enable)\b/i.test(m)) return true;
   // "I want X things"
   if (/\bi\s+(?:want|need|would like)\s+(?:to\s+(?:have\s+)?)?\d+\b/i.test(m)) return true;
   // "Edit these 2 files", "update 3 files"
@@ -954,7 +956,7 @@ async function generatePlanWithRetry({ system, content, modelRoute, mode = "surg
   const heartbeat = emit
     ? setInterval(() => {
         secondsWaiting += 15;
-        emit({ type: "progress", stage: "planning", message: `⏳ Still designing... (${secondsWaiting}s)` });
+        emit({ type: "progress", stage: "planning", message: `Still designing... (${secondsWaiting}s)` });
       }, 15_000)
     : null;
 
@@ -1186,6 +1188,20 @@ export async function planChangesNode(state) {
   if (!parsed?.plan) {
     const preview = rawResponse.trim().slice(0, 600);
     console.warn("[PlanChanges] JSON parse failed. Raw response chars:", rawResponse.length, preview ? `— preview: ${preview}` : "— EMPTY (model returned no content)");
+
+    // Empty response = quota exhausted. Return a clean user-facing error immediately —
+    // do NOT fall through to self-heal, which would inject page.tsx and produce
+    // anchor mismatches on files the user never asked to change.
+    if (rawResponse.trim().length === 0) {
+      const errMsg = "⚠️ The AI model returned an empty response — your API token quota may be exhausted. Please check your quota at your API provider and try again.";
+      console.warn("[PlanChanges] Empty response — aborting plan (no self-heal).");
+      return {
+        plan: [],
+        finalAnswer: errMsg,
+        messages: [new AIMessage(errMsg)],
+      };
+    }
+
     const fallback = buildFallbackPlan({
       fileContext,
       rememberedTargetFile,
