@@ -23,9 +23,47 @@ const MAX_PROMPT_FILES = 5;
 const MAX_FILE_CHARS = 15000; // raised from 10000 so 12-15KB files aren't truncated
 const MAX_TOTAL_CONTEXT_CHARS = 20000;
 
+// ── Model-aware context budget ──────────────────────────────────────────────────
+// These constants were previously used as flat limits for EVERY model, from an
+// 8k-token small model up to a 128k+-token large one — wasting most of a capable
+// model's context and forcing needless truncation (which is what caused the
+// keyword-windowing bug in shortenContentSmart to matter in the first place).
+// Claude Code sizes its context usage to what the active model can actually hold;
+// this resolves the same way, using the model name from modelRoute as a signal.
+const MODEL_CONTEXT_TOKENS = [
+  { pattern: /qwen3-coder|qwen.?3.*coder/i, tokens: 128_000 },
+  { pattern: /gpt-5|gpt-4\.1|gpt-4o/i,      tokens: 128_000 },
+  { pattern: /claude|opus|sonnet|haiku/i,   tokens: 180_000 },
+  { pattern: /gemini/i,                     tokens: 128_000 },
+  { pattern: /deepseek/i,                   tokens: 64_000 },
+  { pattern: /llama-3\.[13]/i,              tokens: 128_000 },
+  { pattern: /qwen/i,                       tokens: 32_000 }, // other qwen variants — conservative middle ground
+];
+const DEFAULT_CONTEXT_TOKENS = 8_000; // unknown model — matches this codebase's prior hardcoded assumption
+const CHARS_PER_TOKEN = 3.5; // conservative for code (denser than prose)
+
+function resolveContextBudget(modelRoute) {
+  const modelName = String(modelRoute?.model || "").toLowerCase();
+  const match = MODEL_CONTEXT_TOKENS.find((m) => m.pattern.test(modelName));
+  const contextTokens = match?.tokens || DEFAULT_CONTEXT_TOKENS;
+
+  // Reserve room for the system prompt, conversation history, and the JSON plan
+  // output itself (patches can be large — always keep headroom for the response).
+  const reservedTokens = 4500;
+  const availableTokens = Math.max(contextTokens - reservedTokens, 3000);
+  const totalContextChars = Math.floor(availableTokens * CHARS_PER_TOKEN);
+
+  // Never regress below the previous hardcoded defaults for small/unknown models,
+  // and cap each file's share so one huge file can't eat the whole budget alone.
+  const boundedTotal = Math.max(totalContextChars, MAX_TOTAL_CONTEXT_CHARS);
+  const maxFileChars = Math.max(Math.floor(boundedTotal * 0.7), MAX_FILE_CHARS);
+
+  return { maxFileChars, totalContextChars: boundedTotal };
+}
+
 // ── Self-healing: load missing files when the plan is all read_only ────────────
 
-const SKIP_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", ".turbo", "uploads", ".agent-history"]);
+const SKIP_DIRS = new Set(["node_modules", ".git", ".next", "dist", "build", "coverage", ".turbo", "uploads", ".agent-history", ".kodo", ".claude", ".vscode", ".idea"]);
 const CODE_EXTS = new Set([".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs"]);
 
 async function findWorkspaceFiles(projectRoot, dir = projectRoot, depth = 0) {
@@ -268,13 +306,31 @@ function shortenContentSmart(content, maxChars, userMsg) {
 
     const maxScore = Math.max(...scores);
     if (maxScore > 0) {
-      const bestLine = scores.indexOf(maxScore);
-      const windowLines = Math.floor(maxChars / charsPerLine);
-      const halfWindow = Math.floor(windowLines / 2);
+      const windowLines = Math.max(1, Math.floor(maxChars / charsPerLine));
 
-      const headLines = Math.min(25, bestLine);
-      const windowStart = Math.max(headLines, bestLine - halfWindow);
-      const windowEnd = Math.min(lines.length, windowStart + windowLines);
+      // Pick the window with the highest TOTAL keyword density, not just the single
+      // highest-scoring line. A lone decoy line (e.g. a Tailwind "transition-opacity"
+      // utility incidentally matching keyword "transition") can outscore the real
+      // target if we only look at peaks — the real target is usually a cluster of
+      // several relevant lines (button JSX + its handlers/state), which wins on
+      // summed density even if no single line in it is the highest scorer.
+      const clampedWindowLines = Math.min(windowLines, lines.length);
+      const prefixSum = new Array(lines.length + 1).fill(0);
+      for (let i = 0; i < scores.length; i++) prefixSum[i + 1] = prefixSum[i] + scores[i];
+
+      let windowStart = 0;
+      let bestSum = -1;
+      for (let start = 0; start <= lines.length - clampedWindowLines; start++) {
+        const sum = prefixSum[start + clampedWindowLines] - prefixSum[start];
+        if (sum > bestSum) {
+          bestSum = sum;
+          windowStart = start;
+        }
+      }
+
+      const headLines = Math.min(25, windowStart);
+      windowStart = Math.max(headLines, windowStart);
+      const windowEnd = Math.min(lines.length, windowStart + clampedWindowLines);
 
       const parts = [];
       if (headLines > 0) {
@@ -591,7 +647,7 @@ CSS LAYOUT RULES (Tailwind / absolute positioning)
 If you cannot confidently fix the issue, return a read_only step explaining the exact blocker.`;
 }
 
-function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToRemembered, mode, investigation, retryErrors = [], maxFileChars = MAX_FILE_CHARS) {
+function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToRemembered, mode, investigation, retryErrors = [], maxFileChars = MAX_FILE_CHARS, totalContextChars = MAX_TOTAL_CONTEXT_CHARS) {
   const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
 
   const filesToShow = pickFilesForPrompt(fileContext, cleanMsg, rememberedTargetFile, investigation, mode);
@@ -603,8 +659,26 @@ function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToR
   // output budget. gapgpt-qwen-3.6 has ~8192 total tokens; with 2 files at 10k chars
   // each the input alone uses ~6k tokens and the JSON plan gets truncated mid-write.
   // 5000 chars per file leaves ~4000 tokens for the plan output (enough for 2 patches).
-  const totalBudget = MAX_TOTAL_CONTEXT_CHARS;
-  const perFileBudget = mode === "multi" ? 5000 : maxFileChars;
+  //
+  // Reference-copy mode ("make File B look like File A") needs BOTH files' real
+  // content, not a keyword-windowed guess: shortenContentSmart's window picker
+  // scores by keyword density per line, and generic Tailwind/JSX boilerplate near
+  // the top of a file (many className/style/icon-bearing lines) can out-score the
+  // one real target block, landing the window on the wrong section entirely — this
+  // was verified empirically against real files, not a theoretical concern. Rather
+  // than trust windowing, give both files enough budget to show in full (most
+  // React components are well under 22k chars) — same "always show full content"
+  // approach already used for multi-mode's sequential single-file planner below.
+  //
+  // maxFileChars/totalContextChars come from resolveContextBudget(modelRoute) — scaled
+  // to the ACTIVE model's real context window instead of one flat constant for every
+  // model. 46000/22000 are floors verified against real files for small/unknown models;
+  // a model with a larger resolved budget gets more, never less.
+  const referenceCopy = isReferenceCopyRequest(cleanMsg);
+  const totalBudget = referenceCopy ? Math.max(totalContextChars, 46000) : totalContextChars;
+  const perFileBudget = mode === "multi" ? 5000
+    : referenceCopy ? Math.max(maxFileChars, 22000)
+    : maxFileChars;
 
   for (const f of filesToShow) {
     const outline = buildJsxOutline(f.content, f.path);
@@ -870,6 +944,39 @@ function applyPathCanonicalization(plan, fileContext, rememberedTargetFile) {
   });
 }
 
+// A single plan can contain multiple "edit" steps for the same file (multi-task mode
+// especially). All patches in a plan are generated in one shot against the same
+// pre-execution file snapshot — if two separate steps both target regions of the same
+// file, the second step's search anchor can already be stale by the time execute_changes
+// gets to it (the first step's patch may have shifted or rewritten that exact text).
+// execute_changes.mjs already applies multiple patches WITHIN one step cumulatively
+// (each patch's output feeds the next), so merging same-path edit steps into one step
+// makes every same-file edit go through that same safe, sequential path instead of two
+// independently-applied steps racing against a snapshot that's stale by step two.
+function mergeSameFileEditSteps(plan) {
+  const merged = [];
+  const editIndexByPath = new Map();
+
+  for (const step of plan || []) {
+    if (step.action === "edit" && step.path && editIndexByPath.has(step.path)) {
+      const target = merged[editIndexByPath.get(step.path)];
+      target.patches.push(...(step.patches || []));
+      target.edits.push(...(step.edits || []));
+      target.description = target.description
+        ? `${target.description}; ${step.description}`
+        : step.description;
+      continue;
+    }
+
+    if (step.action === "edit" && step.path) {
+      editIndexByPath.set(step.path, merged.length);
+    }
+    merged.push(step);
+  }
+
+  return merged;
+}
+
 
 
 // Build a focused single-file user prompt for the sequential planner.
@@ -1038,6 +1145,10 @@ function buildFallbackPlan({ fileContext, rememberedTargetFile, mode, emptyRespo
     };
   }
 
+  // These read_only descriptions surface directly in the chat as the final answer
+  // (verify.mjs copies them into summaryLines) — write them for the USER, not for
+  // internal debugging. Say plainly: nothing was changed, here's the likely cause,
+  // here's what to do.
   if (mode === "debug") {
     return {
       reasoning: "The planner timed out, so the safest fallback is to inspect the target file and the files directly related to the request.",
@@ -1047,7 +1158,7 @@ function buildFallbackPlan({ fileContext, rememberedTargetFile, mode, emptyRespo
         {
           action: "read_only",
           path: target.path,
-          description: `Planner fallback: inspect ${target.path} because the model call timed out before producing JSON.`,
+          description: `The AI model did not return a usable plan (timeout or invalid response), so no files were changed. Please try again — if this keeps happening, check your API provider status.`,
           patches: [],
         },
       ],
@@ -1056,8 +1167,8 @@ function buildFallbackPlan({ fileContext, rememberedTargetFile, mode, emptyRespo
 
   if (target.content && target.content.length > 0) {
     const description = emptyResponse
-      ? `Token quota may be exhausted — the model returned no content. Retry with a more specific request targeting "${target.path}".`
-      : `Inspect ${target.path} and retry planning with a smaller prompt.`;
+      ? `The AI model returned no content — your API token quota may be exhausted or the provider may be rejecting requests. No files were changed. Check your provider account and try again.`
+      : `The AI model did not return a usable plan (timeout or invalid response), so no files were changed. Please try the same request again.`;
     return {
       reasoning: emptyResponse
         ? "Model returned empty response, likely due to token quota exhaustion during the exploration phase."
@@ -1081,7 +1192,7 @@ function buildFallbackPlan({ fileContext, rememberedTargetFile, mode, emptyRespo
       {
         action: "read_only",
         path: "",
-        description: "Planner fallback failed.",
+        description: "The AI model did not produce a plan for this request — no files were changed. Please try again, or rephrase with the specific file or component you want edited.",
         patches: [],
       },
     ],
@@ -1153,12 +1264,12 @@ export async function planChangesNode(state) {
   let rawResponse = "";
   let plannerError = null;
 
-  // Retry: raise the per-file budget so the LLM sees the full file when escalating
-  // to rewrite_file. With MAX_FILE_CHARS = 15000, a 20KB file is truncated — the LLM
-  // writes a partial rewrite that's missing the bottom 25% of the file. On retry,
-  // gapgpt-qwen-3.6's 8192-token context is the hard cap; 22000 chars ≈ 5500 tokens,
-  // leaving ~2700 tokens for the JSON plan output which is enough for a rewrite.
-  const effectiveMaxFileChars = isRetry ? Math.min(MAX_FILE_CHARS * 1.5, 22000) : MAX_FILE_CHARS;
+  // Budget sized to the ACTIVE model's real context window, not one flat constant
+  // for every model (see resolveContextBudget). On retry, raise the per-file share
+  // further so the LLM sees the full file when escalating to rewrite_file — a
+  // truncated retry produces a partial rewrite missing the tail of the file.
+  const { maxFileChars: baseMaxFileChars, totalContextChars } = resolveContextBudget(modelRoute);
+  const effectiveMaxFileChars = isRetry ? Math.floor(baseMaxFileChars * 1.5) : baseMaxFileChars;
 
   // Multi mode (first attempt only): plan each file separately so each LLM call
   // sees one file's FULL content instead of two truncated halves. This is the
@@ -1214,7 +1325,8 @@ export async function planChangesNode(state) {
     mode,
     investigation,
     retryErrors,
-    effectiveMaxFileChars
+    effectiveMaxFileChars,
+    totalContextChars
   );
 
   try {
@@ -1302,6 +1414,7 @@ export async function planChangesNode(state) {
   }));
 
   plan = applyPathCanonicalization(plan, fileContext || [], rememberedTargetFile);
+  plan = mergeSameFileEditSteps(plan);
 
   if (mode === "lint" || mode === "scoped") {
     plan = plan.map((item) => {
@@ -1403,7 +1516,7 @@ export async function planChangesNode(state) {
           ? { ...f, content: f.content + "\n\n" + f._readMoreSnippet }
           : f
       );
-      const retryContent = buildUserPrompt(userMessage, supplemented, rememberedTargetFile, lockToRemembered, mode, investigation, [], effectiveMaxFileChars);
+      const retryContent = buildUserPrompt(userMessage, supplemented, rememberedTargetFile, lockToRemembered, mode, investigation, [], effectiveMaxFileChars, totalContextChars);
       const retryResult = await generatePlanWithRetry({ system, content: retryContent, modelRoute, mode, emit });
       if (retryResult.parsed?.plan) {
         const retryPlan = applyPathCanonicalization(

@@ -15,6 +15,7 @@
 import path from "path";
 import { fileURLToPath } from "url";
 import { readFileSync } from "fs";
+import { readFile } from "fs/promises";
 import OpenAI from "openai";
 import { AIMessage } from "@langchain/core/messages";
 
@@ -383,8 +384,16 @@ export async function multiTaskRunnerNode(state) {
 
   // ── Phase 2b: Execute + Verify sequentially ──────────────────────────────
   // File writes must be sequential to avoid concurrent edits to the same file.
+  // Plans were generated in parallel against the same pre-execution snapshot, so
+  // when task 1 writes a file that task 2 also targets, task 2's search anchors
+  // are stale before it even starts (its anchor may quote the exact text task 1
+  // just changed). Track written files; before executing a task whose context
+  // includes one, re-read the current content from disk and RE-PLAN against it —
+  // fresh anchors from fresh content, the same read-before-edit rule the explore
+  // prompt already enforces for the model.
   const taskOutcomes  = [];
   const allExecResults = [];
+  const filesWrittenSoFar = new Set();
 
   for (let i = 0; i < tasks.length; i++) {
     if (abortSignal?.aborted) break;
@@ -407,6 +416,30 @@ export async function multiTaskRunnerNode(state) {
     let taskOk    = false;
     let taskError = null;
     const thisExecResults = [];
+
+    // Stale-context guard: if an earlier task wrote a file this task also holds in
+    // context, its parallel-generated plan was made against outdated content. Reload
+    // the current bytes from disk and force a re-plan so anchors match reality.
+    const staleFiles = (taskState.fileContext || []).filter(f => f?.path && filesWrittenSoFar.has(f.path));
+    if (staleFiles.length > 0) {
+      console.log(`[MultiTaskRunner] Task ${i + 1}: ${staleFiles.length} file(s) changed by earlier tasks — refreshing content and re-planning`);
+      const refreshed = await Promise.all((taskState.fileContext || []).map(async (f) => {
+        if (!f?.path || !filesWrittenSoFar.has(f.path)) return f;
+        try {
+          const current = await readFile(path.resolve(workspaceRoot, f.path), "utf-8");
+          return { ...f, content: current, size: current.length };
+        } catch { return f; }
+      }));
+      taskState = { ...taskState, fileContext: refreshed, _escalate: false };
+      try {
+        const replan = await planChangesNode({ ...taskState, retryCount: 0 });
+        taskState = { ...taskState, ...replan, retryCount: 0 };
+      } catch (err) {
+        taskError = `Re-plan after earlier task's write failed: ${err.message}`;
+        taskOutcomes.push({ description: tasks[i].description, ok: false, error: taskError, executionResults: [] });
+        continue;
+      }
+    }
 
     // If the parallel plan was all read_only, do one escalated re-plan before the loop
     if (taskState._escalate) {
@@ -452,6 +485,10 @@ export async function multiTaskRunnerNode(state) {
         execResult = await executeChangesNode({ ...taskState, retryCount: attempt });
         taskState  = { ...taskState, ...execResult, retryCount: attempt };
         thisExecResults.push(...(execResult.executionResults || []));
+        // Record successful writes so later tasks holding these files re-plan with fresh content
+        for (const r of execResult.executionResults || []) {
+          if (r.success && r.path && r.action !== "read_only") filesWrittenSoFar.add(r.path);
+        }
       } catch (err) {
         taskError = `Execute failed: ${err.message}`;
         break;

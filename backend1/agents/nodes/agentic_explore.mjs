@@ -25,6 +25,9 @@ const MAX_TOOL_OUTPUT_CHARS = 8_000;
 const IGNORE_DIRS = new Set([
   "node_modules", ".git", ".next", "dist", "build",
   "coverage", ".turbo", ".cache", "out", ".agent-history", ".kodo", "uploads",
+  // Tool-config dirs — never edit targets. ".claude/settings.local.json" once got
+  // loaded as the target file because "local" in a user message name-matched it.
+  ".claude", ".vscode", ".idea",
 ]);
 
 const CODE_EXTENSIONS = new Set([
@@ -489,7 +492,10 @@ export async function agenticExploreNode(state) {
 
     // Phase 1b: path-qualified filename mentions like "/setting page.tsx" or "/settings/page.tsx".
     // Handles typos (singular "setting" → directory "settings") by also checking stripped-'s' forms.
-    if (loadedFiles.size === 0) {
+    // Runs even when Phase 1 already found a match — reference-copy tasks ("make File B
+    // look like File A") name TWO files in one message, and every mentioned file needs its
+    // real content loaded, not just the first one matched.
+    {
       // Matches: /dir/file.tsx  or  /dir file.tsx  (slash or space between dir and file)
       const PATH_FILE_RE = /\/(\w[\w-]*)[/\s]+(\w[\w\-.]+\.(?:tsx?|jsx?|mjs|cjs|css|scss|json))\b/gi;
       for (const m of [...cleanMessage.matchAll(PATH_FILE_RE)]) {
@@ -504,7 +510,7 @@ export async function agenticExploreNode(state) {
             (dirHint.endsWith("s") && dirHint.slice(0, -1) === s) // "settings" hint matches "setting"
           );
         });
-        if (candidates.length === 1) {
+        if (candidates.length === 1 && !loadedFiles.has(candidates[0].path)) {
           const absPath = path.resolve(root, candidates[0].path);
           const content = await readFileSafe(absPath);
           if (content) {
@@ -515,10 +521,12 @@ export async function agenticExploreNode(state) {
       }
     }
 
-    // Phase 2: if no full paths matched, try bare filenames with disambiguation.
+    // Phase 2: try bare filenames with disambiguation, additive to whatever Phase 1/1b
+    // already loaded — a message can reference a target file by full path AND a second
+    // file (e.g. a design reference) by bare name only. Both need real content.
     // When multiple files share a basename, prefer the one with more path
     // segments that appear in the message, then fewer total segments (shallower).
-    if (loadedFiles.size === 0) {
+    {
       const BARE_FILE_RE = /\b([\w\-.]+\.(tsx?|jsx?|mjs|cjs|css|scss|json))\b/gi;
       const mentionedBases = [...new Set([...cleanMessage.matchAll(BARE_FILE_RE)].map(m => m[1].toLowerCase()))];
 
