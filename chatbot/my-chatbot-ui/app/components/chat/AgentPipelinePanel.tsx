@@ -259,6 +259,29 @@ export default function AgentPipelinePanel({
                 exit={{ height: 0, opacity: 0 }}
                 transition={{ duration: 0.24, ease: [0.25, 0.46, 0.45, 0.94] }}
               >
+                {/* Live log list — scrollable checklist of recent actions */}
+                {events.filter(e => e.type === "log" || e.type === "file_update").length > 0 && (
+                  <div className="mt-3 max-h-28 overflow-y-auto rounded-xl border border-white/[0.04] bg-white/[0.015] px-3 py-2 space-y-1">
+                    {events
+                      .filter(e => e.type === "log" || e.type === "file_update")
+                      .slice(-12)
+                      .map((e, i) => {
+                        const isFile = e.type === "file_update";
+                        const text   = isFile ? `${(e as any).operation === "create" ? "Created" : "Updated"} ${(e as any).path}` : (e as any).message || "";
+                        return (
+                          <div key={i} className="flex items-start gap-2">
+                            <span
+                              className="mt-[3px] h-[5px] w-[5px] shrink-0 rounded-full"
+                              style={{ background: isFile ? colors.arc[0] : "rgba(255,255,255,0.18)" }}
+                            />
+                            <span className="text-[11px] leading-[1.5] text-white/38 truncate">{truncate(text, 100)}</span>
+                          </div>
+                        );
+                      })
+                    }
+                  </div>
+                )}
+
                 {/* Stage cards */}
                 <div className="mt-4 grid grid-cols-5 gap-1.5">
                   {STAGES.map((stage, idx) => {

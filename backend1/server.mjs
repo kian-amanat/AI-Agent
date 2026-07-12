@@ -6,6 +6,7 @@ import { pipeline } from "stream/promises";
 import settingsRoute from "./routes/settings.mjs";
 import plannerAgentRoute from "./routes/plannerAgent.mjs";
 import authRoute from "./routes/auth.mjs";
+import workspaceRoute from "./routes/workspace.mjs";
 
 
 const fastify = Fastify({
@@ -139,6 +140,10 @@ await fastify.register(settingsRoute, {
 
 await fastify.register(authRoute, {
   prefix: "/api/auth",
+});
+
+await fastify.register(workspaceRoute, {
+  prefix: "/api/workspace",
 });
 
 // Global error handler: ensures every unhandled error returns consistent JSON

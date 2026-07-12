@@ -75,8 +75,11 @@ async function selfHealLoadMissingFiles(plan, fileContext, root, userMsg, emit) 
 
   // Fallback: "user message" with no component found → load the main page.
   // Skip if the file context is backend-focused (loading page.tsx would confuse the planner).
+  // Use the CLEAN message only — conversation memory often contains "user message" from prior
+  // turns and incorrectly triggers this fallback when editing unrelated files.
   const isBackendTask = (fileContext || []).some(f => /\bbackend\b|\broutes?\b|\bserver\.mjs\b/i.test(f?.path || ""));
-  if (newFiles.length === 0 && !isBackendTask && /user.?message|chat.?bubble|message.?bubble/i.test(descriptions + " " + (userMsg || ""))) {
+  const cleanUserMsgForHeal = String(userMsg || "").split(/conversation memory:/i)[0].trim();
+  if (newFiles.length === 0 && !isBackendTask && /\buser.?message\b|\bchat.?bubble\b|\bmessage.?bubble\b/i.test(descriptions + " " + cleanUserMsgForHeal)) {
     const pageTsx = allFiles.find(f => path.basename(f) === "page.tsx" && f.includes("app/page"));
     if (pageTsx && !loadedPaths.has(pageTsx)) {
       try {
@@ -139,7 +142,21 @@ function isMultiTaskRequest(msg) {
 }
 
 function isCreativeRequest(msg) {
+  // If the user pasted explicit Tailwind/CSS class values (e.g. "bg-emerald-400/80",
+  // "text-slate-900"), this is a surgical edit — the exact styles are already specified.
+  // Don't classify as creative just because the message contains "style" or "design".
+  if (/\b(?:bg|text|border|shadow|ring|from|to|via)-[\w]+-\d{2,3}/.test(String(msg || ""))) return false;
   return /\b(creative|exciting|beautiful|stunning|amazing|cool|fancy|animate|animation|gradient|glow|shadow|color|colour|design|be creative|advanced|premium|modern|sleek|vibrant|dynamic|make it (pop|shine|stand out))\b/i.test(
+    String(msg || "")
+  );
+}
+
+// Reference-copy: user points at File A and says "make File B look like that".
+// These tasks must NOT use creative mode — the instruction is "copy exactly", not "be bold".
+// Pattern covers: "as the design reference", "as reference", "reuse the existing",
+// "same success state/style/pattern/animation", "same as [component]", "same design".
+function isReferenceCopyRequest(msg) {
+  return /\bas (?:the )?(?:design )?reference\b|\breuse the existing\b|\bsame (?:success )?(?:style|design|pattern|animation|state)\b|\bsame as\b/i.test(
     String(msg || "")
   );
 }
@@ -574,7 +591,7 @@ CSS LAYOUT RULES (Tailwind / absolute positioning)
 If you cannot confidently fix the issue, return a read_only step explaining the exact blocker.`;
 }
 
-function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToRemembered, mode, investigation, retryErrors = []) {
+function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToRemembered, mode, investigation, retryErrors = [], maxFileChars = MAX_FILE_CHARS) {
   const cleanMsg = String(userMessage).split(/conversation memory:/i)[0].trim();
 
   const filesToShow = pickFilesForPrompt(fileContext, cleanMsg, rememberedTargetFile, investigation, mode);
@@ -587,7 +604,7 @@ function buildUserPrompt(userMessage, fileContext, rememberedTargetFile, lockToR
   // each the input alone uses ~6k tokens and the JSON plan gets truncated mid-write.
   // 5000 chars per file leaves ~4000 tokens for the plan output (enough for 2 patches).
   const totalBudget = MAX_TOTAL_CONTEXT_CHARS;
-  const perFileBudget = mode === "multi" ? 5000 : MAX_FILE_CHARS;
+  const perFileBudget = mode === "multi" ? 5000 : maxFileChars;
 
   for (const f of filesToShow) {
     const outline = buildJsxOutline(f.content, f.path);
@@ -1105,7 +1122,7 @@ export async function planChangesNode(state) {
   else if (isBugFixRequest(cleanMsg)) mode = "debug";
   else if (isMultiTaskRequest(cleanMsg)) mode = "multi";
   else if (isScopedChange(cleanMsg) && !isCreativeRequest(cleanMsg)) mode = "scoped";
-  else if (isCreativeRequest(cleanMsg)) mode = "creative";
+  else if (isCreativeRequest(cleanMsg) && !isReferenceCopyRequest(cleanMsg)) mode = "creative";
 
   if (lockToRemembered) console.log(`[PlanChanges] Locked to: ${rememberedTargetFile}`);
   console.log(`[PlanChanges] Mode: ${mode}${isRetry ? ` (retry ${retryCount})` : ""}`);
@@ -1136,6 +1153,13 @@ export async function planChangesNode(state) {
   let rawResponse = "";
   let plannerError = null;
 
+  // Retry: raise the per-file budget so the LLM sees the full file when escalating
+  // to rewrite_file. With MAX_FILE_CHARS = 15000, a 20KB file is truncated — the LLM
+  // writes a partial rewrite that's missing the bottom 25% of the file. On retry,
+  // gapgpt-qwen-3.6's 8192-token context is the hard cap; 22000 chars ≈ 5500 tokens,
+  // leaving ~2700 tokens for the JSON plan output which is enough for a rewrite.
+  const effectiveMaxFileChars = isRetry ? Math.min(MAX_FILE_CHARS * 1.5, 22000) : MAX_FILE_CHARS;
+
   // Multi mode (first attempt only): plan each file separately so each LLM call
   // sees one file's FULL content instead of two truncated halves. This is the
   // Claude Code approach — avoids JSON truncation and stale-anchor failures.
@@ -1158,14 +1182,39 @@ export async function planChangesNode(state) {
   }
 
   if (!parsed) {
+  // For reference-copy tasks: the target file must come FIRST so it gets the full
+  // token budget. The reference file (mentioned "as the design reference") comes second
+  // and is truncated to the remaining budget — but shortenContentSmart will focus it
+  // on the relevant section (e.g. the Revert button) using message keywords.
+  // Without this, rememberedTargetFile boosts the reference file to first position and
+  // the target file (settings/page.tsx) gets only ~5k chars, hiding the Save Changes button.
+  let promptFileContext = fileContext || [];
+  if (isReferenceCopyRequest(cleanMsg) && !isRetry && promptFileContext.length >= 2) {
+    const msgLower = cleanMsg.toLowerCase();
+    let latestPos = -1, targetIdx = 0;
+    promptFileContext.forEach((f, i) => {
+      const base = f.path.split("/").pop().replace(/\.[a-z]+$/, "").toLowerCase();
+      const pos = msgLower.lastIndexOf(base);
+      if (pos > latestPos) { latestPos = pos; targetIdx = i; }
+    });
+    if (targetIdx !== 0) {
+      const ordered = [...promptFileContext];
+      const [target] = ordered.splice(targetIdx, 1);
+      ordered.unshift(target);
+      promptFileContext = ordered;
+      console.log(`[PlanChanges] Reference-copy: target first=${promptFileContext[0].path.split('/').pop()}, ref=${promptFileContext[1]?.path.split('/').pop()}`);
+    }
+  }
+
   const content = buildUserPrompt(
     userMessage,
-    fileContext || [],
+    promptFileContext,
     rememberedTargetFile,
     lockToRemembered,
     mode,
     investigation,
-    retryErrors
+    retryErrors,
+    effectiveMaxFileChars
   );
 
   try {
@@ -1228,6 +1277,15 @@ export async function planChangesNode(state) {
         ],
       };
     }
+  }
+
+  // When the LLM explicitly returns plan:[] (valid JSON, empty array), it means it
+  // couldn't determine what to change. Fall back to the deterministic plan so the
+  // user gets a useful message instead of the generic "could not determine" fallback.
+  if (Array.isArray(parsed.plan) && parsed.plan.length === 0) {
+    console.warn("[PlanChanges] LLM returned empty plan[] — using fallback");
+    const fallback = buildFallbackPlan({ fileContext, rememberedTargetFile, mode });
+    if (fallback?.plan?.length) parsed = fallback;
   }
 
   let plan = (parsed.plan || []).map((item) => ({
@@ -1345,7 +1403,7 @@ export async function planChangesNode(state) {
           ? { ...f, content: f.content + "\n\n" + f._readMoreSnippet }
           : f
       );
-      const retryContent = buildUserPrompt(userMessage, supplemented, rememberedTargetFile, lockToRemembered, mode, investigation, []);
+      const retryContent = buildUserPrompt(userMessage, supplemented, rememberedTargetFile, lockToRemembered, mode, investigation, [], effectiveMaxFileChars);
       const retryResult = await generatePlanWithRetry({ system, content: retryContent, modelRoute, mode, emit });
       if (retryResult.parsed?.plan) {
         const retryPlan = applyPathCanonicalization(
@@ -1393,14 +1451,23 @@ export async function planChangesNode(state) {
       for (const ref of (fileContext || [])) {
         if (!ref?.content) continue;
         const refLines = ref.content.split("\n");
-        const patternIdx = refLines.findIndex(l =>
-          /copyToClipboard|group-hover:opacity|Copy.*className|clipboard/i.test(l)
-        );
+        // Extract keywords from the user message to find the relevant section of the reference file.
+        // Generic: works for any component ("Revert button", "copy button", "send button", etc.)
+        const refKeywords = String(userMsg || "").split(/conversation memory:/i)[0]
+          .toLowerCase().replace(/[^a-z0-9\s]/g, " ").split(/\s+/)
+          .filter(w => w.length >= 4 && !["this","that","with","from","have","will","just","what","your","into","over","then","them","they","make","also","same","style","file","button","class","code","after"].includes(w));
+        // Find the line in the reference file most relevant to the user's request
+        const scoredLines = refLines.map((l, idx) => ({
+          idx,
+          score: refKeywords.reduce((s, kw) => s + (l.toLowerCase().includes(kw) ? 1 : 0), 0),
+        }));
+        const best = scoredLines.reduce((a, b) => b.score > a.score ? b : a, { idx: -1, score: 0 });
+        const patternIdx = best.score > 0 ? best.idx : -1;
         if (patternIdx >= 0) {
           const start = Math.max(0, patternIdx - 5);
-          const snippet = refLines.slice(start, Math.min(refLines.length, start + 30)).join("\n");
+          const snippet = refLines.slice(start, Math.min(refLines.length, start + 40)).join("\n");
           userMessageForSeq = `${userMessage}\n\n// Pattern to follow from ${ref.path}:\n${snippet}`;
-          console.log(`[PlanChanges] Self-heal: injecting reference pattern from ${ref.path}`);
+          console.log(`[PlanChanges] Self-heal: injecting reference pattern from ${ref.path} (score=${best.score}, line=${patternIdx + 1})`);
           break;
         }
       }

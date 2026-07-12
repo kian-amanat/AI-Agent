@@ -1,0 +1,381 @@
+"use client";
+
+import { useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { motion, AnimatePresence } from "framer-motion";
+import {
+  ArrowLeft, CheckCircle2, ChevronDown, Eye, EyeOff,
+  Loader2, Save, Shield, Sparkles, Upload, Wifi, WifiOff, X, Zap,
+} from "lucide-react";
+import {
+  fetchCurrentSettings, saveSettings, testConnection,
+  type Capabilities,
+} from "../lib/api";
+
+const DEFAULT_BASE_URL = "https://api.gapgpt.app/v1";
+
+function Input({ label, value, onChange, placeholder, password = false, mono = false }: {
+  label: string; value: string; onChange: (v: string) => void;
+  placeholder?: string; password?: boolean; mono?: boolean;
+}) {
+  const [show, setShow] = useState(false);
+  return (
+    <motion.div initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.3 }}>
+      <label className="mb-1.5 block text-[11px] font-medium uppercase tracking-wider text-white/35">{label}</label>
+      <div className="relative group">
+        <input
+          type={password && !show ? "password" : "text"}
+          value={value} onChange={(e) => onChange(e.target.value)} placeholder={placeholder}
+          className={`w-full rounded-2xl border border-white/[0.06] bg-white/[0.025] px-4 py-3 ${password ? "pr-11" : ""} text-sm text-white/90 placeholder:text-white/15 transition-all duration-300 focus:border-[#ff8a3d]/40 focus:bg-white/[0.05] focus:shadow-[0_0_20px_rgba(255,138,61,0.08)] focus:outline-none group-hover:border-white/[0.1] ${mono ? "font-mono text-[13px]" : ""}`}
+        />
+        {password && (
+          <button type="button" onClick={() => setShow((p) => !p)}
+            className="absolute right-3.5 top-1/2 -translate-y-1/2 text-white/20 transition-colors hover:text-white/50"
+          >
+            {show ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+          </button>
+        )}
+        <div className="absolute inset-0 -z-10 rounded-2xl opacity-0 transition-opacity duration-300 group-focus-within:opacity-100" style={{ background: "radial-gradient(ellipse at center, rgba(255,138,61,0.04) 0%, transparent 70%)" }} />
+      </div>
+    </motion.div>
+  );
+}
+
+function StatusCard({ active, icon: Icon, title, subtitle }: {
+  active: boolean; icon: any; title: string; subtitle: string;
+}) {
+  return (
+    <motion.div
+      initial={{ opacity: 0, scale: 0.95 }} animate={{ opacity: 1, scale: 1 }}
+      transition={{ duration: 0.4, type: "spring" }}
+      className={`flex items-center gap-3 rounded-2xl border px-4 py-3 backdrop-blur-sm transition-all duration-500 ${
+        active
+          ? "border-emerald-500/20 bg-emerald-500/[0.06] shadow-[0_0_30px_rgba(16,185,129,0.08)]"
+          : "border-white/[0.05] bg-white/[0.02]"
+      }`}
+    >
+      <div className={`flex h-8 w-8 items-center justify-center rounded-xl transition-all duration-500 ${
+        active ? "bg-emerald-500/15 text-emerald-400" : "bg-white/[0.04] text-white/20"
+      }`}>
+        <Icon className="h-3.5 w-3.5" />
+      </div>
+      <div>
+        <p className="text-xs font-medium text-white/75">{title}</p>
+        <p className="text-[10px] text-white/35">{subtitle}</p>
+      </div>
+    </motion.div>
+  );
+}
+
+export default function SettingsPage() {
+  const router = useRouter();
+
+  const [capabilities, setCapabilities] = useState<Capabilities | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  const [textModel, setTextModel] = useState("");
+  const [textApiKey, setTextApiKey] = useState("");
+  const [textBaseUrl, setTextBaseUrl] = useState(DEFAULT_BASE_URL);
+  const [showBaseUrl, setShowBaseUrl] = useState(false);
+
+  const [visionEnabled, setVisionEnabled] = useState(false);
+  const [sameKey, setSameKey] = useState(true);
+  const [visionModel, setVisionModel] = useState("");
+  const [visionApiKey, setVisionApiKey] = useState("");
+  const [visionBaseUrl, setVisionBaseUrl] = useState(DEFAULT_BASE_URL);
+  const [showVisionBaseUrl, setShowVisionBaseUrl] = useState(false);
+
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
+  const [testStatus, setTestStatus] = useState<"idle" | "success" | "error">("idle");
+  const [testMsg, setTestMsg] = useState("");
+  const [saveError, setSaveError] = useState("");
+
+  useEffect(() => {
+    async function load() {
+      try {
+        const { settings, capabilities: c } = await fetchCurrentSettings();
+        setCapabilities(c);
+        if (settings) {
+          setTextModel(settings.textModel || "");
+          setTextBaseUrl(settings.textBaseUrl || DEFAULT_BASE_URL);
+          if (settings.visionModel) {
+            setVisionEnabled(true);
+            setVisionModel(settings.visionModel);
+            setVisionBaseUrl(settings.visionBaseUrl || DEFAULT_BASE_URL);
+          }
+        }
+      } catch {}
+      finally { setLoading(false); }
+    }
+    load();
+  }, []);
+
+  async function handleTest() {
+    if (!textModel || !textApiKey) return;
+    setTesting(true); setTestStatus("idle"); setTestMsg("");
+    try {
+      const msg = await testConnection(textModel, textApiKey, textBaseUrl);
+      setTestStatus("success"); setTestMsg(msg);
+    } catch (err) {
+      setTestStatus("error"); setTestMsg(err instanceof Error ? err.message : "Failed");
+    } finally { setTesting(false); setTimeout(() => setTestStatus("idle"), 4000); }
+  }
+
+  async function handleSave() {
+    if (!textModel || !textApiKey) return;
+    setSaving(true); setSaveStatus("idle"); setSaveError("");
+    try {
+      const caps = await saveSettings({
+        textModel, textApiKey, textBaseUrl,
+        visionModel: visionEnabled ? visionModel : null,
+        visionApiKey: visionEnabled ? (sameKey ? textApiKey : visionApiKey) : null,
+        visionBaseUrl: visionEnabled ? (sameKey ? textBaseUrl : visionBaseUrl) : null,
+        useVisionSameKey: sameKey,
+      });
+      setCapabilities(caps); setSaveStatus("success");
+      setTimeout(() => setSaveStatus("idle"), 3000);
+    } catch (err) {
+      setSaveStatus("error"); setSaveError(err instanceof Error ? err.message : "Failed");
+    } finally { setSaving(false); }
+  }
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-[#08080a] p-4">
+      {/* ambient */}
+      <div className="pointer-events-none fixed inset-0 overflow-hidden">
+        <motion.div animate={{ scale: [1, 1.1, 1], opacity: [0.06, 0.1, 0.06] }}
+          transition={{ duration: 8, repeat: Infinity, ease: "easeInOut" }}
+          className="absolute -left-60 -top-60 h-[700px] w-[700px] rounded-full bg-[#ff5e4d] blur-[160px]" />
+        <motion.div animate={{ scale: [1, 1.15, 1], opacity: [0.05, 0.09, 0.05] }}
+          transition={{ duration: 10, repeat: Infinity, ease: "easeInOut", delay: 2 }}
+          className="absolute -bottom-60 -right-60 h-[700px] w-[700px] rounded-full bg-[#ff8a3d] blur-[160px]" />
+      </div>
+
+      <motion.div
+        initial={{ opacity: 0, y: 30, rotateX: 2 }}
+        animate={{ opacity: 1, y: 0, rotateX: 0 }}
+        transition={{ duration: 0.7, ease: [0.22, 1, 0.36, 1] }}
+        className="relative w-full max-w-3xl overflow-hidden rounded-[28px] border border-white/[0.05]"
+        style={{
+          background: "linear-gradient(145deg, rgba(22,20,28,0.98) 0%, rgba(14,12,18,0.99) 100%)",
+          boxShadow: "0 50px_140px rgba(0,0,0,0.7), 0 0 80px rgba(255,138,61,0.06), inset 0 1px 0 rgba(255,255,255,0.03)",
+          transform: "perspective(1400px) rotateX(0.3deg)",
+        }}
+      >
+        <div className="grid grid-cols-1 md:grid-cols-[280px_1fr]">
+
+          {/* ── Left ────────────────────────────────────────────────────── */}
+          <div className="relative flex flex-col items-center justify-center overflow-hidden p-8 md:min-h-[640px]">
+            <div className="absolute inset-0" style={{ background: "radial-gradient(ellipse at 35% 30%, rgba(255,80,55,0.28) 0%, rgba(255,120,50,0.12) 50%, rgba(14,12,18,0.98) 100%)" }} />
+            <div className="absolute inset-0 bg-gradient-to-b from-transparent to-black/30" />
+            <div className="absolute left-0 right-0 top-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
+
+            <motion.div animate={{ y: [0, -6, 0] }} transition={{ duration: 5, repeat: Infinity, ease: "easeInOut" }}
+              className="absolute right-6 top-10 h-16 w-16 rounded-full bg-[#ff6a3d]/15 blur-2xl" />
+            <motion.div animate={{ y: [0, 8, 0] }} transition={{ duration: 7, repeat: Infinity, ease: "easeInOut", delay: 1.5 }}
+              className="absolute bottom-14 left-8 h-12 w-12 rounded-full bg-[#ff8a3d]/10 blur-2xl" />
+
+            <div className="relative z-10 flex flex-col items-center gap-6 text-center">
+              <motion.div
+                initial={{ scale: 0.7, opacity: 0 }}
+                animate={{ scale: 1, opacity: 1 }}
+                transition={{ delay: 0.2, duration: 0.6, type: "spring", stiffness: 200 }}
+                className="flex h-14 w-14 items-center justify-center rounded-2xl"
+                style={{ background: "linear-gradient(135deg, #ff6a3d 0%, #ffa03d 100%)", boxShadow: "0 0 50px rgba(255,138,61,0.5), 0 0 100px rgba(255,90,50,0.2)" }}
+              >
+                <Sparkles className="h-6 w-6 text-white" />
+              </motion.div>
+
+              <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
+                <h1 className="text-xl font-bold tracking-tight text-white">Kodo Agent</h1>
+                <p className="mt-1 text-xs text-white/35">Model configuration</p>
+              </motion.div>
+
+              {!loading && capabilities && (
+                <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }}
+                  className="w-full space-y-2">
+                  <StatusCard active={capabilities.chatEnabled} icon={capabilities.chatEnabled ? Wifi : WifiOff}
+                    title="Chat" subtitle={capabilities.chatEnabled ? capabilities.textModel?.model || "" : "Not configured"} />
+                  <StatusCard active={capabilities.uploadEnabled} icon={Upload}
+                    title="File Upload" subtitle={capabilities.uploadEnabled ? capabilities.visionModel?.model || "" : "Add vision model"} />
+                  <StatusCard active={false} icon={Shield} title="Local only" subtitle="Keys never leave your machine" />
+                </motion.div>
+              )}
+
+              {loading && <Loader2 className="h-5 w-5 animate-spin text-white/25" />}
+            </div>
+          </div>
+
+          {/* ── Right ───────────────────────────────────────────────────── */}
+          <div className="flex flex-col gap-5 border-l border-white/[0.04] p-7">
+
+            <motion.button whileHover={{ x: -3 }} whileTap={{ scale: 0.97 }}
+              onClick={() => router.push("/")}
+              className="flex w-fit items-center gap-1.5 text-xs text-white/30 transition-colors hover:text-white/60"
+            >
+              <ArrowLeft className="h-3 w-3" /> Back to chat
+            </motion.button>
+
+            {/* ── Text Model ──────────────────────────────────────────── */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <div className="h-px flex-1 bg-white/[0.04]" />
+                <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.15em] text-white/25">
+                  <Zap className="h-2.5 w-2.5 text-[#ff8a3d]" /> Text Model
+                </span>
+                <div className="h-px flex-1 bg-white/[0.04]" />
+              </div>
+
+              <Input label="Model" value={textModel} onChange={setTextModel} placeholder="e.g. gapgpt-qwen-3.6, claude-sonnet-4-6" mono />
+              <Input label="API Key" value={textApiKey} onChange={setTextApiKey} placeholder="sk-..." password />
+
+              {/* collapsible base url */}
+              <button type="button" onClick={() => setShowBaseUrl((p) => !p)}
+                className="flex items-center gap-1 text-[10px] text-white/20 transition-colors hover:text-white/40"
+              >
+                <ChevronDown className={`h-2.5 w-2.5 transition-transform duration-200 ${showBaseUrl ? "rotate-180" : ""}`} />
+                {showBaseUrl ? "Hide" : "Custom"} base URL
+              </button>
+              <AnimatePresence>
+                {showBaseUrl && (
+                  <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} transition={{ duration: 0.2 }}>
+                    <Input label="Base URL" value={textBaseUrl} onChange={setTextBaseUrl} placeholder={DEFAULT_BASE_URL} mono />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <div className="flex items-center gap-2.5">
+                <motion.button whileHover={{ scale: 1.02 }} whileTap={{ scale: 0.96 }}
+                  onClick={handleTest} disabled={testing || !textModel || !textApiKey}
+                  className="flex items-center gap-1.5 rounded-xl border border-white/[0.06] bg-white/[0.03] px-3.5 py-2 text-xs text-white/45 transition-all duration-200 hover:bg-white/[0.06] hover:text-white/70 disabled:opacity-30 disabled:cursor-not-allowed"
+                >
+                  {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <Wifi className="h-3 w-3" />}
+                  Test
+                </motion.button>
+
+                <AnimatePresence>
+                  {testStatus !== "idle" && (
+                    <motion.span initial={{ opacity: 0, x: -6, scale: 0.9 }} animate={{ opacity: 1, x: 0, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }}
+                      className={`flex items-center gap-1 rounded-lg px-2.5 py-1 text-[10px] ${
+                        testStatus === "success" ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20" : "bg-red-500/10 text-red-400 border border-red-500/20"
+                      }`}
+                    >
+                      {testStatus === "success" ? <CheckCircle2 className="h-2.5 w-2.5" /> : <X className="h-2.5 w-2.5" />}
+                      {testMsg}
+                    </motion.span>
+                  )}
+                </AnimatePresence>
+              </div>
+            </div>
+
+            {/* ── Vision Model ────────────────────────────────────────── */}
+            <div className="space-y-3">
+              <div className="flex items-center gap-2">
+                <div className="h-px flex-1 bg-white/[0.04]" />
+                <span className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.15em] text-white/25">
+                  <Upload className="h-2.5 w-2.5 text-[#ff8a3d]" /> Vision Model
+                  <span className="text-[9px] normal-case text-white/15">optional</span>
+                </span>
+                <div className="h-px flex-1 bg-white/[0.04]" />
+              </div>
+
+              <div className="flex items-center justify-between rounded-2xl border border-white/[0.04] bg-white/[0.02] px-4 py-3">
+                <div>
+                  <p className="text-xs text-white/55">Enable file uploads</p>
+                  <p className="text-[10px] text-white/20">For images and document analysis</p>
+                </div>
+                <motion.button whileTap={{ scale: 0.9 }} type="button" onClick={() => setVisionEnabled((p) => !p)}
+                  className={`relative h-6 w-11 rounded-full transition-all duration-400 ${
+                    visionEnabled ? "bg-gradient-to-r from-[#ff6a3d] to-[#ffa03d] shadow-[0_0_16px_rgba(255,138,61,0.5)]" : "bg-white/[0.08]"
+                  }`}
+                >
+                  <motion.span layout className={`absolute top-[3px] h-[18px] w-[18px] rounded-full bg-white shadow-md ${visionEnabled ? "left-[calc(100%-21px)]" : "left-[3px]"}`} />
+                </motion.button>
+              </div>
+
+              <AnimatePresence>
+                {visionEnabled && (
+                  <motion.div
+                    initial={{ opacity: 0, height: 0, y: -8 }}
+                    animate={{ opacity: 1, height: "auto", y: 0 }}
+                    exit={{ opacity: 0, height: 0, y: -8 }}
+                    transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
+                    className="space-y-3 overflow-hidden"
+                  >
+                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.1 }}
+                      className="flex items-center gap-2.5 rounded-xl border border-white/[0.04] bg-white/[0.015] px-3.5 py-2">
+                      <motion.button whileTap={{ scale: 0.85 }} type="button" onClick={() => setSameKey((p) => !p)}
+                        className={`flex h-4 w-4 items-center justify-center rounded-md border transition-all duration-300 ${
+                          sameKey ? "border-[#ff8a3d] bg-[#ff8a3d] shadow-[0_0_8px_rgba(255,138,61,0.4)]" : "border-white/15 bg-transparent"
+                        }`}
+                      >
+                        {sameKey && <CheckCircle2 className="h-2.5 w-2.5 text-white" />}
+                      </motion.button>
+                      <span className="text-[11px] text-white/40">Same API key & endpoint as text model</span>
+                    </motion.div>
+
+                    <Input label="Vision Model" value={visionModel} onChange={setVisionModel} placeholder="e.g. gpt-5.2, claude-opus-4-6" mono />
+
+                    {!sameKey && (
+                      <>
+                        <Input label="Vision API Key" value={visionApiKey} onChange={setVisionApiKey} placeholder="sk-..." password />
+                        <button type="button" onClick={() => setShowVisionBaseUrl((p) => !p)}
+                          className="flex items-center gap-1 text-[10px] text-white/20 transition-colors hover:text-white/40"
+                        >
+                          <ChevronDown className={`h-2.5 w-2.5 transition-transform duration-200 ${showVisionBaseUrl ? "rotate-180" : ""}`} />
+                          {showVisionBaseUrl ? "Hide" : "Custom"} base URL
+                        </button>
+                        <AnimatePresence>
+                          {showVisionBaseUrl && (
+                            <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}>
+                              <Input label="Vision Base URL" value={visionBaseUrl} onChange={setVisionBaseUrl} placeholder={DEFAULT_BASE_URL} mono />
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* ── Save ────────────────────────────────────────────────── */}
+            <div className="mt-auto space-y-2 pt-3">
+              <AnimatePresence>
+                {saveStatus === "error" && saveError && (
+                  <motion.p initial={{ opacity: 0, y: -4 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
+                    className="text-[11px] text-red-400/70">{saveError}</motion.p>
+                )}
+              </AnimatePresence>
+
+              <motion.button
+                whileHover={{ scale: 1.01, y: -1 }}
+                whileTap={{ scale: 0.98 }}
+                onClick={handleSave}
+                disabled={saving || !textModel || !textApiKey}
+                className="flex w-full items-center justify-center gap-2 rounded-2xl py-3.5 text-sm font-semibold text-white transition-all duration-400 disabled:cursor-not-allowed disabled:opacity-40"
+                style={{
+                  background: saving || saveStatus === "success"
+                    ? "linear-gradient(135deg, #10b981 0%, #059669 100%)"
+                    : "linear-gradient(135deg, #ff6a3d 0%, #ffa03d 100%)",
+                  boxShadow: saving
+                    ? "0 0 40px rgba(16,185,129,0.35)"
+                    : saveStatus === "success"
+                      ? "0 0 40px rgba(16,185,129,0.35)"
+                      : "0 0 40px rgba(255,138,61,0.35), 0 8px 30px rgba(255,90,50,0.2)",
+                }}
+              >
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" />
+                  : saveStatus === "success" ? <CheckCircle2 className="h-4 w-4" />
+                  : <Save className="h-4 w-4" />}
+                {saving ? "Saving..." : saveStatus === "success" ? "Saved!" : "Save Settings"}
+              </motion.button>
+            </div>
+          </div>
+        </div>
+      </motion.div>
+    </div>
+  );
+}

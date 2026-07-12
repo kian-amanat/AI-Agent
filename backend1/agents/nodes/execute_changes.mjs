@@ -498,7 +498,7 @@ async function saveUndoSnapshot(workspacePath, sessionId, requestId, plan) {
 const ACTION_ICON = { edit: "✏️", create: "➕", delete: "🗑️", read_only: "👁️" };
 
 export async function executeChangesNode(state) {
-  const { plan, workspacePath, emit, retryCount, sessionId, requestId } = state;
+  const { plan, workspacePath, emit, retryCount, sessionId, requestId, permissionMode, approvalPromise } = state;
   const root = workspacePath || PROJECT_ROOT;
 
   if (!Array.isArray(plan) || plan.length === 0) {
@@ -512,6 +512,27 @@ export async function executeChangesNode(state) {
     console.warn(`[Execute] ⚠️ Plan has no actionable steps (all read_only). Descriptions: ${descriptions.slice(0, 300)}`);
     emit?.({ type: "progress", stage: "execute_skip", message: "ℹ️ Read-only — no file changes." });
     return { executionResults: [] };
+  }
+
+  // In "ask" permission mode: emit a plan_preview event so the UI can show an
+  // Approve/Cancel prompt, then pause until the user confirms (or rejects).
+  if (permissionMode === "ask" && approvalPromise && retryCount === 0) {
+    emit?.({
+      type: "plan_preview",
+      steps: actionable.map((s) => ({
+        action:      s.action,
+        path:        s.path,
+        description: s.description || "",
+      })),
+    });
+    try {
+      await approvalPromise;
+      emit?.({ type: "progress", stage: "executing", message: "✅ Plan approved — applying changes…" });
+    } catch {
+      emit?.({ type: "progress", stage: "cancelled", message: "🚫 Plan cancelled by user." });
+      emit?.({ type: "content", content: "Plan was cancelled. No files were changed." });
+      return { executionResults: [] };
+    }
   }
 
   if (sessionId && requestId) {

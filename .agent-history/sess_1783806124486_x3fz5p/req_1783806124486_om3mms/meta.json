@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess_1783806124486_x3fz5p",
+  "requestId": "req_1783806124486_om3mms",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-11T21:42:35.296Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/components/chat/AssistantMessage.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/components/chat/AssistantMessage.tsx",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783806124486_x3fz5p/req_1783806124486_om3mms/chatbot__my-chatbot-ui__app__components__chat__AssistantMessage.tsx.snap"
+    }
+  ]
+}

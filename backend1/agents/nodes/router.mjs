@@ -18,8 +18,17 @@ const GREETING_PATTERNS = [
 ];
 
 const QUESTION_PATTERNS = [
-  /^(what|how|why|when|where|who|which|can you|could you|would you|do you|is it|are you|should i|explain|describe|tell me)/i,
-  /\b(what is|what are|how do|how does|how can|why does|why is|explain|describe|difference between|pros and cons|best practice|recommend)\b/i,
+  /^(what|how|why|when|where|who|which|can you|could you|would you|do you|is it|are you|should i|explain|describe|tell me|summarize|summarise|summary|overview|walk me|guide me)/i,
+  /\b(what is|what are|how do|how does|how can|why does|why is|explain|describe|difference between|pros and cons|best practice|recommend|summarize|summarise|summary of|i want to know|i need to know|tell me about|walk me through)\b/i,
+];
+
+// User explicitly signals they do NOT want code changes — must win over all other signals.
+const NO_ACTION_PATTERNS = [
+  /\b(just\s+tell\s+me|only\s+tell\s+me|just\s+explain|only\s+explain|just\s+describe|just\s+show\s+me)\b/i,
+  /\bwithout\s+(any\s+)?(action|edit|editing|change|changing|modification|modifying|touching|doing\s+anything)\b/i,
+  /\bdon'?t\s+(edit|change|modify|touch|do|make|apply|write|create|delete|remove)\b/i,
+  /\b(no\s+changes?|no\s+action|no\s+edit|no\s+code)\b/i,
+  /\b(should\s+i|do\s+you\s+think|what\s+do\s+you\s+think|is\s+(it|this|now)\s+(a\s+good|the\s+right)\s+time)\b/i,
 ];
 
 const INSTALL_PATTERNS = [
@@ -128,6 +137,9 @@ function classifyByHeuristic(message) {
     if (p.test(cleanMsg)) return "answer";
   }
 
+  // Explicit no-action guard — user says "just tell me" / "without any changes" etc.
+  if (NO_ACTION_PATTERNS.some((p) => p.test(cleanMsg))) return "answer";
+
   // Numbered list (1- ... 2- ...) checked BEFORE pipeline patterns.
   // Pipeline patterns fire on keywords like "claude code" that appear in design references
   // ("make it look like claude code") — a numbered list is almost always a multi-task edit,
@@ -140,7 +152,10 @@ function classifyByHeuristic(message) {
     if (p.test(cleanMsg)) return "pipeline";
   }
 
-  const isQuestion = QUESTION_PATTERNS.some((p) => p.test(cleanMsg));
+  // Strip leading @file mentions before checking question patterns — they're context
+  // refs (not verbs), and the ^ anchor fails when the message leads with "@path/file.mjs".
+  const intentMsg = cleanMsg.replace(/^(@[\w./\\-]+\s*)+/, "").trim() || cleanMsg;
+  const isQuestion = QUESTION_PATTERNS.some((p) => p.test(intentMsg));
 
   // Multi-task requests with named files win over install/debug checks.
   // Route to multi_task_runner which uses LLM decomposition — not regex — to split tasks.
@@ -161,9 +176,9 @@ function classifyByHeuristic(message) {
   // Second multi-task check: catches patterns without a file extension in the early check
   if (isMultiTaskRequest(cleanMsg) && (hasFilePath || hasComponentName || hasCodeEditVerb || EDIT_VERB.test(cleanMsg))) return "multi_task";
 
-  if (hasFileExtension) return "explore";
-  if (hasFilePath) return "explore";
-  if (hasComponentName) return "explore";
+  if (hasFileExtension && !isQuestion) return "explore";
+  if (hasFilePath && !isQuestion) return "explore";
+  if (hasComponentName && !isQuestion) return "explore";
   if (hasCodeEditVerb) return "explore";
 
   if (wordCount <= 40 && EDIT_VERB.test(cleanMsg) && !isQuestion) {

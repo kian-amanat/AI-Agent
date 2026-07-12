@@ -95,7 +95,7 @@ export default function ChatSidebar({
       transition={{ type: "spring", stiffness: 260, damping: 30 }}
       onMouseEnter={() => setIsSidebarHovered(true)}
       onMouseLeave={() => setIsSidebarHovered(false)}
-            className={`ml-4 mt-4 mb-4 relative flex h-[calc(100vh-2rem)] shrink-0 flex-col rounded-2xl border border-white/8 shadow-[0_10px_40px_rgba(0,0,0,0.35)] ${isSidebarCollapsed ? 'bg-[#151515]' : 'bg-[#1a1a1a]'}`}
+            className={`ml-4 mt-4 mb-4 relative flex h-[calc(100vh-2rem)] shrink-0 flex-col rounded-2xl border border-white/8 shadow-[0_8px_32px_rgba(4,4,4,0.18)] ${isSidebarCollapsed ? 'bg-[#151515]' : 'bg-[#1a1a1a]'}`}
     >
       {/* ── Header ── */}
       <div className="flex items-center justify-between gap-2 px-3 py-3">
