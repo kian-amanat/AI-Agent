@@ -80,6 +80,7 @@ export default function ChatSidebar({
   onOpenSession: (sessionId: string) => void;
   onDeleteSession: (sessionId: string) => void;
   loadingSessions: boolean;
+  userName?: string;
 }) {
     const [menuForId, setMenuForId] = useState<string | null>(null);
   const [isSidebarHovered, setIsSidebarHovered] = useState(false);

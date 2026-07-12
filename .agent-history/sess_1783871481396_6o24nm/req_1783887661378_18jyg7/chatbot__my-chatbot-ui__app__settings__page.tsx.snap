@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 
 import {
   ArrowLeft, Check, CheckCircle2, ChevronDown, Eye, EyeOff,
-  Loader2, Lock, MessageSquare, Save, Upload, Wifi, X, Zap,
+  Loader2, Save, Shield, ShieldCheck, Sparkles, Upload, Wifi, WifiOff, X, Zap,
   type LucideIcon,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -62,8 +62,8 @@ function StatusCard({ active, icon: Icon, title, subtitle }: {
       <div className={`flex h-8 w-8 items-center justify-center rounded-xl transition-all duration-500 ${
         active ? "bg-emerald-500/15 text-emerald-400" : "bg-white/[0.04] text-white/20"
       }`}>
-        <Icon className="h-3.5 w-3.5" />
-      </div>
+        <img src="/icon.png" className="h-full w-full" />
+        </div>
       <div>
         <p className="text-xs font-medium text-white/75">{title}</p>
         <p className="text-[10px] text-white/35">{subtitle}</p>
@@ -173,7 +173,7 @@ export default function SettingsPage() {
 
           {/* ── Left ────────────────────────────────────────────────────── */}
           <div className="relative flex flex-col items-center justify-center overflow-hidden p-8 md:min-h-[640px]">
-            <div className="absolute inset-0" style={{ background: "radial-gradient(ellipse at 35% 30%, rgba(255,80,55,0.28) 0%, rgba(255,120,50,0.12) 50%, rgba(14,12,18,0.98) 100%)" }} />
+            
             <div className="absolute inset-0 bg-gradient-to-b from-transparent to-black/30" />
             <div className="absolute left-0 right-0 top-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />
 
@@ -187,9 +187,10 @@ export default function SettingsPage() {
                 initial={{ scale: 0.7, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 transition={{ delay: 0.2, duration: 0.6, type: "spring", stiffness: 200 }}
-                className="flex h-14 w-14 items-center justify-center"
+                className="flex h-14 w-14 items-center justify-center rounded-2xl"
+                style={{ boxShadow: "0 0 50px rgba(255,138,61,0.5), 0 0 100px rgba(255,90,50,0.2)" }}
               >
-                <img src="/icon.png" className="h-14 w-14" alt="App icon" />
+                                 <img src="/icon.png" className="h-8 w-8 text-white" alt="App icon" />
               </motion.div>
 
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
@@ -200,11 +201,11 @@ export default function SettingsPage() {
               {!loading && capabilities && (
                 <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }}
                   className="w-full space-y-2">
-                  <StatusCard active={capabilities.chatEnabled} icon={MessageSquare}
-                    title="Chat" subtitle={capabilities.chatEnabled ? capabilities.textModel?.model || "" : "Not configured"} />
+                  <StatusCard active={capabilities.chatEnabled} icon={Sparkles}
+                  title="Chat" subtitle={capabilities.chatEnabled ? capabilities.textModel?.model || "" : "Not configured"} />
                   <StatusCard active={capabilities.uploadEnabled} icon={Upload}
                     title="File Upload" subtitle={capabilities.uploadEnabled ? capabilities.visionModel?.model || "" : "Add vision model"} />
-                  <StatusCard active={false} icon={Lock} title="Local only" subtitle="Keys never leave your machine" />
+                                     <StatusCard active={false} icon={Shield} title="Local only" subtitle="Keys never leave your machine" />
                 </motion.div>
               )}
 

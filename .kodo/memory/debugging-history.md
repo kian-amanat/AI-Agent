@@ -1,15 +1,9 @@
 ---
-updated: 2026-07-12T00:39:18.702Z
+updated: 2026-07-12T20:20:30.592Z
 ---
 
-- **Bug**: Font not applied in chat UI.
-  - **Root Cause**: Hardcoded `Arial` font-family in `body` rule of `globals.css` was overriding the Tailwind theme variable.
-  - **Fixes**:
-    - Replaced hardcoded font with Tailwind theme variable to apply Geist font.
-    - Updated `globals.css` `@theme` block to include fallback font stacks for `--font-sans` and `--font-mono` to ensure reliable cross-browser application.
-- **Bug**: Broken Tailwind class `font-['Space Grotesk',sans-serif]` in `ChatSidebar.tsx`.
-  - **Root Cause**: Unescaped space inside the arbitrary value breaks Tailwind's class parser, preventing font-family rule generation.
-  - **Fix**: Replaced inline arbitrary value with `font-space-grotesk` utility (mapped to `--font-space-grotesk` theme token).
-- **Bug**: Naming collision between Next.js `next/font` injected variable and Tailwind theme token (`--font-space-grotesk`).
-  - **Root Cause**: Self-referential loop / conflict when both use the same CSS variable name.
-  - **Fix**: Renamed Next.js injected variable to `--font-space-grotesk-sans` in `layout.tsx` and updated `globals.css` `@theme` token to reference the renamed variable.
+### Bug: Missing `userName` property in ChatSidebar type
+- **Root Cause**: Type definition for ChatSidebar props doesn't include required `userName` field
+- **Fix**: Add `userName: string` to the props interface in `ChatSidebar.tsx`
+- **Location**: `app/components/chat/ChatSidebar.tsx(71,3)`
+- **Validation**: Run `npm run typecheck` to confirm resolution

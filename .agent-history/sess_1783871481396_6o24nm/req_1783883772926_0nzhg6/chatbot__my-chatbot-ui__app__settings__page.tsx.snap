@@ -6,7 +6,7 @@ import { useEffect, useState } from "react";
 
 import {
   ArrowLeft, Check, CheckCircle2, ChevronDown, Eye, EyeOff,
-  Loader2, Lock, MessageSquare, Save, Upload, Wifi, X, Zap,
+  Loader2, Save, Shield, ShieldCheck, Sparkles, Upload, Wifi, WifiOff, X, Zap,
   type LucideIcon,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
@@ -187,9 +187,10 @@ export default function SettingsPage() {
                 initial={{ scale: 0.7, opacity: 0 }}
                 animate={{ scale: 1, opacity: 1 }}
                 transition={{ delay: 0.2, duration: 0.6, type: "spring", stiffness: 200 }}
-                className="flex h-14 w-14 items-center justify-center"
+                className="flex h-14 w-14 items-center justify-center rounded-2xl"
+                style={{ background: "linear-gradient(135deg, #ff6a3d 0%, #ffa03d 100%)", boxShadow: "0 0 50px rgba(255,138,61,0.5), 0 0 100px rgba(255,90,50,0.2)" }}
               >
-                <img src="/icon.png" className="h-14 w-14" alt="App icon" />
+                <Sparkles className="h-6 w-6 text-white" />
               </motion.div>
 
               <motion.div initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} transition={{ delay: 0.3 }}>
@@ -200,11 +201,11 @@ export default function SettingsPage() {
               {!loading && capabilities && (
                 <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={{ delay: 0.5 }}
                   className="w-full space-y-2">
-                  <StatusCard active={capabilities.chatEnabled} icon={MessageSquare}
+                  <StatusCard active={capabilities.chatEnabled} icon={capabilities.chatEnabled ? Wifi : WifiOff}
                     title="Chat" subtitle={capabilities.chatEnabled ? capabilities.textModel?.model || "" : "Not configured"} />
                   <StatusCard active={capabilities.uploadEnabled} icon={Upload}
                     title="File Upload" subtitle={capabilities.uploadEnabled ? capabilities.visionModel?.model || "" : "Add vision model"} />
-                  <StatusCard active={false} icon={Lock} title="Local only" subtitle="Keys never leave your machine" />
+                  <StatusCard active={false} icon={ShieldCheck} title="Local only" subtitle="Keys never leave your machine" />
                 </motion.div>
               )}
 
@@ -361,40 +362,27 @@ export default function SettingsPage() {
                 disabled={saving || !textModel || !textApiKey}
                 className={`
                   flex w-full items-center justify-center gap-2 rounded-2xl py-3.5 text-sm font-semibold text-white
-                  transition-all duration-500 ease-in-out disabled:cursor-not-allowed disabled:opacity-40
+                  transition-all duration-300 ease-out disabled:cursor-not-allowed disabled:opacity-40
                   ${saveStatus === "success"
                     ? "border border-emerald-400/80 bg-emerald-400/10 text-emerald-50 shadow-[0_0_18px_rgba(16,185,129,0.25)]"
-                    : "bg-gradient-to-r from-[#ff5e4d] to-[#ffa03d] shadow-[0_0_12px_rgba(255,138,61,0.4)] hover:shadow-[0_0_20px_rgba(255,138,61,0.6)] claude-border-glow"}
-                  ${saving ? "animate-pulse-glow" : ""}
+                    : ""}
                 `}
-
+                style={{
+                  background: saving 
+                    ? "linear-gradient(135deg, #10b981 0%, #059669 100%)" 
+                    : saveStatus === "success" 
+                      ? "transparent" 
+                      : "linear-gradient(135deg, #ff6a3d 0%, #ffa03d 100%)",
+                  boxShadow: saving
+                    ? "0 0 40px rgba(16,185,129,0.35)"
+                    : saveStatus === "success"
+                      ? "0 0 18px rgba(16,185,129,0.25)"
+                      : "0 0 40px rgba(255,138,61,0.35), 0 8px 30px rgba(255,90,50,0.2)",
+                }}
               >
-                {saving ? (
-                <motion.div
-                animate={{ rotate: 360, scale: [1, 1.2, 1] }}
-                transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
-                className="h-4 w-4"
-                >
-                <Loader2 className="h-4 w-4" />
-                </motion.div>
-                ) : saveStatus === "success" ? (
-                <motion.div
-                initial={{ scale: 0, rotate: -15 }}
-                animate={{ scale: 1, rotate: 0 }}
-                transition={{ type: "spring", stiffness: 400, damping: 15 }}
-                className="h-4 w-4"
-                >
-                <Check className="h-4 w-4" />
-                </motion.div>
-                ) : (
-                <motion.div
-                animate={{ scale: [1, 1.1, 1] }}
-                transition={{ duration: 0.6, repeat: Infinity, repeatType: "reverse" }}
-                className="h-4 w-4"
-                >
-                <Save className="h-4 w-4" />
-                </motion.div>
-                )}
+                {saving ? <Loader2 className="h-4 w-4 animate-spin" />
+                  : saveStatus === "success" ? <Check className="h-4 w-4" />
+                  : <Save className="h-4 w-4" />}
                 {saving ? "Saving..." : saveStatus === "success" ? "Saved!" : "Save Settings"}
               </motion.button>
             </div>

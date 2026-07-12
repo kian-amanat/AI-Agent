@@ -73,15 +73,121 @@ function validateSyntax(content, absPath) {
   try {
     const srcFile = ts.createSourceFile("validate" + ext, content, ts.ScriptTarget.ESNext, true, scriptKind);
     const diags = srcFile.parseDiagnostics;
-    if (!Array.isArray(diags) || diags.length === 0) return null;
-    return diags.slice(0, 3).map(d => {
-      try {
-        const lc = srcFile.getLineAndCharacterOfPosition(d.start || 0);
-        const msg = typeof d.messageText === "string" ? d.messageText : d.messageText?.messageText || "parse error";
-        return `L${lc.line + 1}: ${msg}`;
-      } catch { return "parse error"; }
-    }).join("; ");
+    if (Array.isArray(diags) && diags.length > 0) {
+      return diags.slice(0, 3).map(d => {
+        try {
+          const lc = srcFile.getLineAndCharacterOfPosition(d.start || 0);
+          const msg = typeof d.messageText === "string" ? d.messageText : d.messageText?.messageText || "parse error";
+          return `L${lc.line + 1}: ${msg}`;
+        } catch { return "parse error"; }
+      }).join("; ");
+    }
+
+    // Beyond grammar: catch the mistakes patch-based edits are most prone to.
+    // None of these are parse errors — TS happily parses all of them — so they
+    // need their own AST walks. Duplicate imports first (applies to all JS/TS):
+    // a patch meant to REPLACE an import block often lands as insert_before,
+    // leaving the old block in place — 40 "Duplicate identifier" typecheck errors
+    // downstream, caught here before the broken content ever reaches disk.
+    const dupImport = checkDuplicateImports(ts, srcFile);
+    if (dupImport) return dupImport;
+
+    // JSX-only: a prop applied twice on the same element, and a capitalized JSX
+    // tag that isn't imported or declared anywhere in the file.
+    if (ext === ".tsx" || ext === ".jsx") {
+      return checkJsxStructuralIssues(ts, srcFile);
+    }
+
+    return null;
   } catch { return null; }
+}
+
+function checkDuplicateImports(ts, srcFile) {
+  const seen = new Map(); // imported local name -> first line
+  for (const stmt of srcFile.statements) {
+    if (!ts.isImportDeclaration(stmt) || !stmt.importClause) continue;
+    const names = [];
+    if (stmt.importClause.name) names.push(stmt.importClause.name);
+    const bindings = stmt.importClause.namedBindings;
+    if (bindings) {
+      if (ts.isNamespaceImport(bindings)) names.push(bindings.name);
+      else if (ts.isNamedImports(bindings)) {
+        for (const spec of bindings.elements) names.push(spec.name);
+      }
+    }
+    for (const nameNode of names) {
+      const name = nameNode.text;
+      const lc = srcFile.getLineAndCharacterOfPosition(nameNode.getStart(srcFile));
+      if (seen.has(name)) {
+        return `L${lc.line + 1}: duplicate import "${name}" (already imported at L${seen.get(name)}) — the patch likely added a new import block instead of replacing the existing one`;
+      }
+      seen.set(name, lc.line + 1);
+    }
+  }
+  return null;
+}
+
+function checkJsxStructuralIssues(ts, srcFile) {
+  // 1. Duplicate JSX attribute on the same element.
+  let dupError = null;
+  function visitDup(node) {
+    if (dupError) return;
+    if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
+      const seen = new Set();
+      for (const attr of node.attributes.properties) {
+        if (ts.isJsxAttribute(attr) && attr.name) {
+          const name = attr.name.getText(srcFile);
+          if (seen.has(name)) {
+            const lc = srcFile.getLineAndCharacterOfPosition(attr.getStart(srcFile));
+            dupError = `L${lc.line + 1}: duplicate JSX attribute "${name}" on the same element`;
+            return;
+          }
+          seen.add(name);
+        }
+      }
+    }
+    ts.forEachChild(node, visitDup);
+  }
+  visitDup(srcFile);
+  if (dupError) return dupError;
+
+  // 2. Capitalized JSX tag used without being imported or declared anywhere in the file.
+  // Lowercase tags (div, span, button...) are intrinsic HTML elements — never flagged.
+  // Declaration collection is intentionally scope-blind (any declaration anywhere in the
+  // file counts) — this is a cheap "did the patch forget an import" check, not a real
+  // type-checker, so it should never block a legitimate write on a scoping technicality.
+  const declared = new Set([
+    "React", "Fragment", "console", "window", "document", "Math", "JSON",
+    "Object", "Array", "Promise", "Error", "Date", "Map", "Set",
+  ]);
+  function collectDeclarations(node) {
+    if (ts.isImportClause(node) && node.name) declared.add(node.name.text);
+    if (ts.isImportSpecifier(node) || ts.isNamespaceImport(node)) declared.add(node.name.text);
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) declared.add(node.name.text);
+    if ((ts.isFunctionDeclaration(node) || ts.isClassDeclaration(node)) && node.name) declared.add(node.name.text);
+    if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node) || ts.isEnumDeclaration(node)) declared.add(node.name.text);
+    if (ts.isBindingElement(node) && ts.isIdentifier(node.name)) declared.add(node.name.text);
+    if (ts.isParameter(node) && ts.isIdentifier(node.name)) declared.add(node.name.text);
+    if (ts.isExportSpecifier(node)) declared.add((node.propertyName || node.name).text);
+    ts.forEachChild(node, collectDeclarations);
+  }
+  collectDeclarations(srcFile);
+
+  let undefError = null;
+  function visitTag(node) {
+    if (undefError) return;
+    if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && ts.isIdentifier(node.tagName)) {
+      const name = node.tagName.text;
+      if (/^[A-Z]/.test(name) && !declared.has(name)) {
+        const lc = srcFile.getLineAndCharacterOfPosition(node.getStart(srcFile));
+        undefError = `L${lc.line + 1}: "<${name}>" is used as a JSX component but is not imported or declared in this file`;
+        return;
+      }
+    }
+    ts.forEachChild(node, visitTag);
+  }
+  visitTag(srcFile);
+  return undefError;
 }
 
 function normalizeId(prefix, id) {
@@ -140,7 +246,7 @@ async function findFileByPartialPath(root, partialPath) {
     }
 
     for (const entry of entries) {
-      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === ".next" || entry.name === ".agent-history" || entry.name === ".kodo") continue;
+      if (entry.name === "node_modules" || entry.name === ".git" || entry.name === ".next" || entry.name === ".agent-history" || entry.name === ".kodo" || entry.name === ".claude") continue;
 
       const abs = path.join(dir, entry.name);
       if (entry.isDirectory()) {
@@ -430,11 +536,30 @@ async function saveUndoSnapshot(workspacePath, sessionId, requestId, plan) {
 
     await fs.mkdir(snapshotDir, { recursive: true });
 
+    // Retries and multi-task runs call executeChangesNode several times with the SAME
+    // requestId. The first call snapshots the true pre-request state; a later call must
+    // NOT re-snapshot a file it already captured — by then the file holds attempt-1's
+    // modifications, and "restoring" that makes the Undo button appear to do nothing.
+    // Merge: keep existing entries untouched, snapshot only files not yet captured.
+    const metaPath = path.join(snapshotDir, "meta.json");
+    let existingFiles = [];
+    try {
+      const existingMeta = JSON.parse(await fs.readFile(metaPath, "utf-8"));
+      if (Array.isArray(existingMeta?.files)) existingFiles = existingMeta.files;
+    } catch { /* no prior snapshot for this request — fresh capture */ }
+    const alreadySnapshotted = new Set(existingFiles.map((f) => f.relativePath));
+
     const writableSteps = plan.filter((p) =>
-      (p.action === "edit" || p.action === "create" || p.action === "delete" || p.action === "rewrite_file") && p.path
+      (p.action === "edit" || p.action === "create" || p.action === "delete" || p.action === "rewrite_file") &&
+      p.path && !alreadySnapshotted.has(p.path)
     );
 
-    const metaFiles = [];
+    if (writableSteps.length === 0 && existingFiles.length > 0) {
+      console.log(`[Execute] Undo snapshot already covers all files for ${normRequest} — keeping original pre-request state`);
+      return;
+    }
+
+    const metaFiles = [...existingFiles];
 
     for (const step of writableSteps) {
       let absPath = safeResolvePath(workspacePath, step.path);
@@ -474,7 +599,7 @@ async function saveUndoSnapshot(workspacePath, sessionId, requestId, plan) {
     }
 
     await fs.writeFile(
-      path.join(snapshotDir, "meta.json"),
+      metaPath,
       JSON.stringify(
         {
           sessionId: normSession,
@@ -672,7 +797,18 @@ export async function executeChangesNode(state) {
 
             const appliedCount = patchResults.filter(Boolean).length;
 
-            if (appliedCount > 0) {
+            if (appliedCount > 0 && working === original) {
+              // Patches "applied" but produced identical content (search === replace,
+              // or edits that cancel out). The file already satisfies the request —
+              // report that honestly instead of a fake "Successfully applied" with a
+              // diff whose before and after are the same bytes. No write, no diff.
+              console.log(`[Execute] No-op edit on ${step.path} — content already matches the request`);
+              result = {
+                success: true,
+                noop: true,
+                note: "file already matched the requested state — no changes were needed",
+              };
+            } else if (appliedCount > 0) {
               const syntaxErr = validateSyntax(working, absPath);
               if (syntaxErr) {
                 console.warn(`[Execute] 🚫 Syntax error in ${step.path} after patching — write aborted: ${syntaxErr}`);
@@ -748,6 +884,7 @@ export async function executeChangesNode(state) {
       error: result.error || null,
       description: step.description,
       note: result.note,
+      noop: result.noop || undefined,
       // failedPatches lets verify.mjs include the exact search anchors in retry context
       failedPatches: failedPatchDetails.length > 0 ? failedPatchDetails : undefined,
     });
