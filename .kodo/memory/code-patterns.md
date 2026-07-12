@@ -1,28 +1,7 @@
 ---
-updated: 2026-07-10T21:06:19.670Z
+updated: 2026-07-12T09:43:06.125Z
 ---
 
-- **ChatSidebar Toggle Icon (Collapsed State)**: 
-  - Uses `Plus` icon from `@mui/icons-material/Plus`.
-  - Located in `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
-  - **Styling**: Orange color (`#ff6b2b`), subtle default background, no border. Removed conditional centering.
-  - **Layout**: Search icon is positioned **above** the plus icon.
-  - **Sizing**: Plus icon background reduced.
-  - **Shape**: Collapsed sidebar icon buttons use `rounded-full`.
-- **ChatSidebar History Icon**: 
-  - Clock icon size updated to `h-4 w-4`.
-  - **Background Removal**: Removed persistent `bg-white/[0.06]` class.
-  - File: `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
-- **ChatSidebar Search Input**: 
-  - Added a search input to filter chat sessions.
-  - Uses a `ref` to focus the input when the sidebar opens.
-- **ChatSidebar Header**: 
-  - Displays the current user's name.
-  - Accesses user profile data to render the name in the header section.
-  - File: `chatbot/my-chatbot-ui/app/components/chat/ChatSidebar.tsx`.
-- **ChatSidebar Chat List**: 
-  - Implements a loading skeleton for the chat list.
-  - Skeleton mimics the layout of session items.
-- **ChatSidebar Session Item**: 
-  - Displays only the session title; preview text is hidden.
-  - Compact vertical padding/sizing relative to the title font size.
+- **Success-State Button Design**: `chatbot/my-chatbot-ui/app/components/chat/AssistantMessage.tsx` is the reference implementation for clicked/success button styling.
+- The Revert button's success-state classes and feedback content are exported reusable primitives.
+- Reuse these primitives for equivalent success states, including Copy and the settings Save Changes button, to preserve animations, colors, transitions, iconography, and spacing.

@@ -1,110 +1,107 @@
 "use client";
 
-import { useState } from "react";
-import { Send } from "lucide-react";
+import React, { useMemo } from "react";
+import Image from "next/image";
 import { motion } from "framer-motion";
 
-const container = {
+function getGreeting() {
+  const h = new Date().getHours();
+  if (h < 5)  return "Good night";
+  if (h < 12) return "Good morning";
+  if (h < 17) return "Good afternoon";
+  if (h < 21) return "Good evening";
+  return      "Good night";
+}
+
+const CHIPS = [
+  "Explain this codebase",
+  "Fix the bug in @file",
+  "Add TypeScript types",
+  "Write tests for this",
+  "Refactor to modern patterns",
+];
+
+const stagger = {
   hidden: { opacity: 0 },
+  show: { opacity: 1, transition: { staggerChildren: 0.08, delayChildren: 0.05 } },
+};
+
+const up = {
+  hidden: { opacity: 0, y: 12 },
   show: {
     opacity: 1,
-    transition: {
-      staggerChildren: 0.1,
-    },
+    y: 0,
+    transition: { duration: 0.4, ease: [0.22, 1, 0.36, 1] as [number, number, number, number] },
   },
 };
 
-const item = {
-  hidden: { opacity: 0, y: 20 },
-  show: { opacity: 1, y: 0 },
-};
-
-export default function EmptyStateCard() {
-    const [inputValue, setInputValue] = useState("");
-
-  const suggestions = [
-    "How do I start?",
-    "Explain quantum physics",
-    "Write a poem about AI",
-    "Debug my code",
-  ];
+export default function EmptyStateCard({
+  onSuggestion,
+}: {
+  onSuggestion?: (text: string) => void;
+}) {
+  const greeting = useMemo(getGreeting, []);
 
   return (
-    <div className="relative flex min-h-screen w-full items-center justify-center overflow-hidden bg-[#0a0a0a]">
-      {/* Ambient Background Effects */}
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-[#ff8a3d]/20 via-[#0a0a0a] to-[#0a0a0a]" />
-      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[500px] w-[500px] rounded-full bg-[#ff5e4d]/10 blur-[100px]" />
-
-      <motion.div
-        variants={container}
-        initial="hidden"
-        animate="show"
-        className="relative z-10 mx-auto max-w-3xl px-6 text-center"
-      >
-        {/* Greeting */}
-        <motion.h1
-          variants={item}
-          className="mb-4 text-5xl font-extrabold tracking-tight text-white sm:text-7xl md:text-8xl"
-        >
-          Good evening, <span className="bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d] bg-clip-text text-transparent">Kian</span>
-        </motion.h1>
-
-        <motion.p
-          variants={item}
-          className="mb-12 text-lg text-gray-400 sm:text-xl"
-        >
-          What can we create together today?
-        </motion.p>
-
-        {/* Suggestion Chips */}
-        <motion.div
-          variants={item}
-          className="flex flex-wrap justify-center gap-3"
-        >
-          {suggestions.map((suggestion, index) => (
-            <button
-              key={index}
-              className="group relative overflow-hidden rounded-full border border-white/10 bg-white/5 px-6 py-3 text-sm font-medium text-white/80 backdrop-blur-md transition-all duration-300 hover:border-[#ff8a3d]/50 hover:bg-[#ff8a3d]/10 hover:text-white hover:shadow-[0_0_20px_rgba(255,138,61,0.3)]"
-            >
-              <span className="relative z-10">{suggestion}</span>
-              <div className="absolute inset-0 -z-0 translate-x-[-100%] bg-gradient-to-r from-[#ff8a3d]/20 to-[#ff5e4d]/20 transition-transform duration-300 group-hover:translate-x-0" />
-            </button>
-          ))}
-                </motion.div>
-
-        {/* Message Input */}
-        <motion.div variants={item} className="mt-8 max-w-xl mx-auto">
-          <div className="relative rounded-full border border-white/10 bg-white/5 backdrop-blur-md transition-all duration-300 focus-within:border-[#ff8a3d]/50 focus-within:bg-white/[0.08]">
-            <textarea
-              value={inputValue}
-              onChange={(e) => setInputValue(e.target.value)}
-              placeholder="Type a message..."
-              rows={1}
-              className="w-full resize-none rounded-full bg-transparent px-5 py-3 pr-14 text-sm text-white placeholder:text-white/30 focus:outline-none"
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                }
-              }}
-            />
-            <button
-              disabled={!inputValue.trim()}
-              className={`absolute right-2 top-1/2 -translate-y-1/2 rounded-full p-2 transition-all duration-300 ${
-                inputValue.trim()
-                  ? "bg-[#ff8a3d] text-black shadow-[0_0_15px_rgba(255,138,61,0.4)] animate-pulse"
-                  : "bg-white/10 text-white/30 cursor-not-allowed"
-              }`}
-            >
-              <Send className="h-4 w-4" />
-            </button>
-          </div>
-          <div className="mt-2 flex justify-end">
-            <span className="text-[11px] text-white/20">
-              {inputValue.length} characters
-            </span>
-          </div>
-        </motion.div>
+    <motion.div
+      variants={stagger}
+      initial="hidden"
+      animate="show"
+      className="mx-auto flex w-full max-w-xl flex-col items-center px-4 pb-8 pt-8 text-center"
+    >
+      {/* Icon */}
+      <motion.div variants={up} className="mb-6">
+        <Image
+          src="/icon.png"
+          alt="Kodo"
+          width={52}
+          height={52}
+          className="rounded-[14px]"
+          style={{ boxShadow: "0 4px 20px rgba(255,120,50,0.22)" }}
+          priority
+        />
       </motion.div>
-    </div>
+
+      {/* Greeting */}
+      <motion.h1
+        variants={up}
+        className="mb-1.5 text-[28px] font-semibold tracking-[-0.02em] text-white sm:text-[34px]"
+      >
+        {greeting},{" "}
+        <span className="bg-gradient-to-r from-[#ff9a5c] to-[#ff4d3d] bg-clip-text text-transparent">
+          Kian
+        </span>
+      </motion.h1>
+
+      <motion.p variants={up} className="mb-8 text-[14px] text-white/35">
+        What are we building today?
+      </motion.p>
+
+      {/* Chips */}
+      <motion.div variants={up} className="flex flex-wrap justify-center gap-2">
+        {CHIPS.map((chip) => (
+          <button
+            key={chip}
+            onClick={() => onSuggestion?.(chip)}
+            className="rounded-full border border-white/[0.07] bg-white/[0.03] px-4 py-2 text-[12.5px] text-white/45 transition-all duration-150 hover:border-[#ff8a3d]/30 hover:bg-[#ff8a3d]/8 hover:text-white/75"
+          >
+            {chip}
+          </button>
+        ))}
+      </motion.div>
+
+      {/* Hint */}
+      <motion.p variants={up} className="mt-8 text-[11px] text-white/18">
+        <Kbd>/</Kbd> commands &nbsp;·&nbsp; <Kbd>@file</Kbd> to target &nbsp;·&nbsp; <Kbd>⌘↵</Kbd> send
+      </motion.p>
+    </motion.div>
+  );
+}
+
+function Kbd({ children }: { children: React.ReactNode }) {
+  return (
+    <kbd className="rounded bg-white/[0.05] px-1.5 py-[2px] font-mono text-[10px] text-white/28">
+      {children}
+    </kbd>
   );
 }

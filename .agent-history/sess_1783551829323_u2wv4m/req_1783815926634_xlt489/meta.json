@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess_1783551829323_u2wv4m",
+  "requestId": "req_1783815926634_xlt489",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-12T00:25:30.729Z",
+  "files": [
+    {
+      "relativePath": "backend1/agents/nodes/agentic_explore.mjs",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/agents/nodes/agentic_explore.mjs",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783551829323_u2wv4m/req_1783815926634_xlt489/backend1__agents__nodes__agentic_explore.mjs.snap"
+    }
+  ]
+}

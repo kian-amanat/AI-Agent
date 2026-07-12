@@ -16,7 +16,7 @@ function getGraph() {
 
 export async function runKodoGraph({
   userMessage,
-  rememberedTargetFile = "",   // ★ NEW: last file the user worked on
+  rememberedTargetFile = "",
   sessionId,
   requestId,
   userId,
@@ -25,6 +25,8 @@ export async function runKodoGraph({
   attachmentPaths = [],
   emit,
   abortSignal = null,
+  permissionMode = "auto",
+  approvalPromise = null,
 }) {
   const graph = getGraph();
 
@@ -32,7 +34,7 @@ export async function runKodoGraph({
     messages:        [new HumanMessage(userMessage)],
     intent:          "",
     userMessage,
-    rememberedTargetFile,        // ★ passed into explore node
+    rememberedTargetFile,
     workspacePath,
     fileContext:     [],
     plan:            [],
@@ -44,9 +46,11 @@ export async function runKodoGraph({
     requestId,
     userId,
     modelRoute,
-        attachmentPaths,
+    attachmentPaths,
     emit,
     abortSignal,
+    permissionMode,
+    approvalPromise,
   };
 
   console.log(`[KodoGraph] 🚀 session=${sessionId} request=${requestId}`);
