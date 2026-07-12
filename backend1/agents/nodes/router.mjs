@@ -124,21 +124,25 @@ function isDebugReport(msg) {
   );
 }
 
-function classifyByHeuristic(message) {
+// Returns { intent, confident }. "confident" means a clear, well-tested signal fired —
+// callers can trust it outright. When nothing but the bare fallback matched, confident
+// is false: the message is genuinely ambiguous for regex (no file ref, no edit verb, no
+// question phrasing) and callers should prefer an LLM judgment call over guessing "answer".
+function classifyByHeuristicDetailed(message) {
   const msg = String(message || "").trim();
-  if (!msg) return "answer";
+  if (!msg) return { intent: "answer", confident: true };
 
   const cleanMsg = msg.split(/conversation memory:/i)[0].trim();
-  if (!cleanMsg) return "answer";
+  if (!cleanMsg) return { intent: "answer", confident: true };
 
   const wordCount = cleanMsg.split(/\s+/).filter(Boolean).length;
 
   for (const p of GREETING_PATTERNS) {
-    if (p.test(cleanMsg)) return "answer";
+    if (p.test(cleanMsg)) return { intent: "answer", confident: true };
   }
 
   // Explicit no-action guard — user says "just tell me" / "without any changes" etc.
-  if (NO_ACTION_PATTERNS.some((p) => p.test(cleanMsg))) return "answer";
+  if (NO_ACTION_PATTERNS.some((p) => p.test(cleanMsg))) return { intent: "answer", confident: true };
 
   // Numbered list (1- ... 2- ...) checked BEFORE pipeline patterns.
   // Pipeline patterns fire on keywords like "claude code" that appear in design references
@@ -146,10 +150,10 @@ function classifyByHeuristic(message) {
   // never a full-project scaffold, so it must win over pipeline classification.
   const numberedListItem = /(?:^|[\n\r])\s*(?:\*{1,2})?[1-5][.\-\)]\s*\S/;
   const numberedListSecond = /(?:^|[\n\r])\s*(?:\*{1,2})?[2-5][.\-\)]\s*\S/;
-  if (numberedListItem.test(cleanMsg) && numberedListSecond.test(cleanMsg)) return "multi_task";
+  if (numberedListItem.test(cleanMsg) && numberedListSecond.test(cleanMsg)) return { intent: "multi_task", confident: true };
 
   for (const p of PIPELINE_PATTERNS) {
-    if (p.test(cleanMsg)) return "pipeline";
+    if (p.test(cleanMsg)) return { intent: "pipeline", confident: true };
   }
 
   // Strip leading @file mentions before checking question patterns — they're context
@@ -161,12 +165,12 @@ function classifyByHeuristic(message) {
   // Route to multi_task_runner which uses LLM decomposition — not regex — to split tasks.
   const hasFileExtensionEarly = FILE_EXTENSION.test(cleanMsg);
   const hasComponentNameEarly = COMPONENT_NAME.test(cleanMsg);
-  if (isMultiTaskRequest(cleanMsg) && (hasFileExtensionEarly || hasComponentNameEarly)) return "multi_task";
+  if (isMultiTaskRequest(cleanMsg) && (hasFileExtensionEarly || hasComponentNameEarly)) return { intent: "multi_task", confident: true };
 
-  if (INSTALL_PATTERNS.some((p) => p.test(cleanMsg))) return "install";
-  if (TEST_PATTERNS.some((p) => p.test(cleanMsg))) return "test";
+  if (INSTALL_PATTERNS.some((p) => p.test(cleanMsg))) return { intent: "install", confident: true };
+  if (TEST_PATTERNS.some((p) => p.test(cleanMsg))) return { intent: "test", confident: true };
 
-  if (isDebugReport(cleanMsg)) return "investigate";
+  if (isDebugReport(cleanMsg)) return { intent: "investigate", confident: true };
 
   const hasFileExtension = FILE_EXTENSION.test(cleanMsg);
   const hasFilePath = FILE_PATH.test(cleanMsg);
@@ -174,29 +178,74 @@ function classifyByHeuristic(message) {
   const hasCodeEditVerb = CODE_EDIT_VERB.test(cleanMsg);
 
   // Second multi-task check: catches patterns without a file extension in the early check
-  if (isMultiTaskRequest(cleanMsg) && (hasFilePath || hasComponentName || hasCodeEditVerb || EDIT_VERB.test(cleanMsg))) return "multi_task";
+  if (isMultiTaskRequest(cleanMsg) && (hasFilePath || hasComponentName || hasCodeEditVerb || EDIT_VERB.test(cleanMsg))) return { intent: "multi_task", confident: true };
 
-  if (hasFileExtension && !isQuestion) return "explore";
-  if (hasFilePath && !isQuestion) return "explore";
-  if (hasComponentName && !isQuestion) return "explore";
-  if (hasCodeEditVerb) return "explore";
+  if (hasFileExtension && !isQuestion) return { intent: "explore", confident: true };
+  if (hasFilePath && !isQuestion) return { intent: "explore", confident: true };
+  if (hasComponentName && !isQuestion) return { intent: "explore", confident: true };
+  if (hasCodeEditVerb) return { intent: "explore", confident: true };
 
   if (wordCount <= 40 && EDIT_VERB.test(cleanMsg) && !isQuestion) {
-    return "explore";
+    return { intent: "explore", confident: true };
   }
 
-  if (wordCount <= 8 && !hasFileExtension && !hasFilePath) return "answer";
-  if (isQuestion) return "answer";
+  if (wordCount <= 8 && !hasFileExtension && !hasFilePath) return { intent: "answer", confident: true };
+  if (isQuestion) return { intent: "answer", confident: true };
 
+  // Nothing matched — genuinely ambiguous (no file/component reference, no edit verb,
+  // no question phrasing, too long to be a trivial chat message). Regex has no real
+  // signal here; let the caller fall back to an LLM judgment instead of guessing.
+  return { intent: "answer", confident: false };
+}
+
+function classifyByHeuristic(message) {
+  return classifyByHeuristicDetailed(message).intent;
+}
+
+// LLM fallback for the genuinely ambiguous middle ground the regex heuristic can't
+// resolve. Claude Code doesn't pre-classify at all — every message goes through the
+// same agentic judgment. We can't afford an LLM call on every message (latency/cost
+// for the ~95% of messages the regex handles confidently), but for the rare ambiguous
+// case, one cheap classification call beats silently defaulting to "answer" and missing
+// an edit request, or defaulting to "explore" and running a needless write pipeline.
+async function classifyIntentWithLLM(message, modelRoute) {
+  try {
+    const { callLLM } = await import("../../services/llm.mjs");
+    const cleanMsg = String(message || "").split(/conversation memory:/i)[0].trim().slice(0, 500);
+
+    const result = await callLLM({
+      system: `Classify the user's message as exactly one word: "answer" or "explore".
+"answer" — the user is asking a question, wants an explanation, or is making conversation. No files should be changed.
+"explore" — the user wants code changed, a bug fixed, or a feature added/modified in the codebase.
+Respond with ONLY the single word "answer" or "explore" — nothing else.`,
+      messages: [{ role: "user", content: cleanMsg }],
+      modelRoute,
+      maxTokens: 5,
+      temperature: 0,
+    });
+
+    const raw = String(result?.content || "").trim().toLowerCase();
+    if (raw.includes("explore")) return "explore";
+    if (raw.includes("answer")) return "answer";
+  } catch (err) {
+    console.warn("[Router] LLM fallback classification failed:", String(err?.message || err).slice(0, 120));
+  }
+  // If the LLM call itself fails, keep the heuristic's own default rather than crash routing.
   return "answer";
 }
 
 const CONTEXTUAL_EDIT_RE = /\b(that\s+(page|file|function|component|module|class|script)|on\s+it|to\s+it|in\s+it)\b/i;
 
 export async function routerNode(state) {
-  const { userMessage, emit, rememberedTargetFile } = state;
+  const { userMessage, emit, rememberedTargetFile, modelRoute } = state;
 
-  let intent = classifyByHeuristic(userMessage);
+  const heuristic = classifyByHeuristicDetailed(userMessage);
+  let intent = heuristic.intent;
+
+  if (!heuristic.confident) {
+    console.log(`[Router] Heuristic uncertain for: "${String(userMessage).slice(0, 80)}" — falling back to LLM classification`);
+    intent = await classifyIntentWithLLM(userMessage, modelRoute);
+  }
 
   // If heuristic says "answer" but there's a remembered file and the user
   // refers to it contextually ("that page", "on it", etc.), treat as an edit.
@@ -206,7 +255,7 @@ export async function routerNode(state) {
       intent = "explore";
     }
   }
-  console.log(`[Router] intent="${intent}" for: "${String(userMessage).slice(0, 80)}"`);
+  console.log(`[Router] intent="${intent}"${heuristic.confident ? "" : " (LLM fallback)"} for: "${String(userMessage).slice(0, 80)}"`);
 
   emit?.({
     type: "progress",

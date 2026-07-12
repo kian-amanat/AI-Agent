@@ -1,5 +1,5 @@
 ---
-updated: 2026-07-12T09:48:37.230Z
+updated: 2026-07-12T15:53:41.255Z
 ---
 
 - Send Button Behavior: Disabled when input length is 0. Exception: Enabled when AI is responding (`isSending` is true) to allow aborting the stream.
@@ -12,3 +12,4 @@ updated: 2026-07-12T09:48:37.230Z
 - Chat Sidebar Behavior: Collapsed shows orange `Plus` icon
 - ChatSidebar Height: Reduced to `h-[calc(100vh-6rem)]`
 - Chat Sidebar Box Shadow: Reduced to a slightly lower intensity for subtle elevation
+- Tooltip Usage: Expects tooltips on interactive elements like buttons for clarity; e.g., added `title="Save your model configuration"` to the Save Changes button in settings.
