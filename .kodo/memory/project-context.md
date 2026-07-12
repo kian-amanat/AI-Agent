@@ -1,5 +1,5 @@
 ---
-updated: 2026-07-08T17:34:38.195Z
+updated: 2026-07-12T00:39:18.699Z
 ---
 
 - **Backend Integration Pattern**:
@@ -21,5 +21,4 @@ updated: 2026-07-08T17:34:38.195Z
   - Tracks how many agent runs each session has made.
   - Function added to increment request count and modify session tracking to include this counter.
 - **API Headers**:
-  - **Req
-- **Error Handling Standard**: Unhandled backend errors must return a consistent JSON response with a `message` and `status_code` field.
+  - **Request Headers**: Include necessary authentication and content type headers.

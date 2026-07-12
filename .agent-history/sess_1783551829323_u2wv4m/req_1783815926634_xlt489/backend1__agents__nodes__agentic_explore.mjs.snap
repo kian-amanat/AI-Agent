@@ -3,6 +3,17 @@
  *
  * Agentic exploration loop: the model iteratively calls tools to gather
  * exactly the context it needs, then signals when it is ready to plan.
+ *
+ * Each tool result feeds directly into the model's next decision — nothing
+ * is pre-scripted. The model decides whether to grep for a symbol, read a
+ * specific file, follow an import, or declare "ready" based solely on what
+ * it has seen so far. This is the same dynamic the Claude Code agentic loop
+ * uses: gather context → take action → verify results, all driven by the
+ * model rather than fixed node sequences.
+ *
+ * Replaces the rigid chain:
+ *   investigate/explore → workspace_index → stacktrace_parser →
+ *   symbol_search → grep_workspace → dependency_context
  */
 
 import path from "path";
@@ -409,7 +420,7 @@ export async function agenticExploreNode(state) {
     fileContext: existingContext = [],
   } = state;
 
-  emit?.({ type: "progress", stage: "exploring", message: "Exploring workspace..." });
+  emit?.({ type: "progress", stage: "exploring", message: "🔍 Exploring workspace..." });
 
   const root = workspacePath || PROJECT_ROOT;
   const cleanMessage = String(userMessage).split(/conversation memory:/i)[0].trim();
@@ -746,7 +757,7 @@ export async function agenticExploreNode(state) {
         emit?.({
           type: "progress",
           stage: "explored",
-          message: `Context gathered — ${readySignal.summary.slice(0, 100)}`,
+          message: `✅ Context gathered — ${readySignal.summary.slice(0, 100)}`,
         });
 
         toolResults.push({
@@ -777,15 +788,15 @@ export async function agenticExploreNode(state) {
 
       // SSE progress for the UI
       if (toolName === "grep_code") {
-        emit?.({ type: "progress", stage: "exploring", message: `grep "${args.query}" — ${result.count ?? 0} match(es)` });
+        emit?.({ type: "progress", stage: "exploring", message: `🔍 grep "${args.query}" → ${result.count ?? 0} match(es)` });
       } else if (toolName === "read_file") {
-        emit?.({ type: "progress", stage: "exploring", message: `read ${args.path}` });
+        emit?.({ type: "progress", stage: "exploring", message: `📖 read ${args.path}` });
       } else if (toolName === "list_files") {
-        emit?.({ type: "progress", stage: "exploring", message: `ls ${args.dir || "."}` });
+        emit?.({ type: "progress", stage: "exploring", message: `📂 ls ${args.dir || "."}` });
       } else if (toolName === "list_memory_topics") {
-        emit?.({ type: "progress", stage: "exploring", message: `listing memory topics` });
+        emit?.({ type: "progress", stage: "exploring", message: `🧠 listing memory topics` });
       } else if (toolName === "read_memory_topic") {
-        emit?.({ type: "progress", stage: "exploring", message: `recall: ${args.topic}` });
+        emit?.({ type: "progress", stage: "exploring", message: `🧠 recall: ${args.topic}` });
       }
 
       // Cap tool output so we don't blow up the context window
@@ -815,7 +826,7 @@ export async function agenticExploreNode(state) {
   // run against empty context and silently produce nothing useful.
   if (loadedFiles.size === 0 && !readySignal && (existingContext || []).length === 0) {
     const errMsg =
-      "Could not gather workspace context — the AI model returned no response (possible API timeout or quota exhaustion). Please try again.";
+      "⚠️ Could not gather workspace context — the AI model returned no response (possible API timeout or quota exhaustion). Please try again.";
     console.warn("[AgenticExplore] Loop ended with 0 files and no ready signal — aborting early.");
     emit?.({ type: "content", content: errMsg });
     return {

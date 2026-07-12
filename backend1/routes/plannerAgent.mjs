@@ -49,6 +49,10 @@ const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
 // from interleaving their graph runs and corrupting each other's file edits.
 const activeSessionRequests = new Map(); // sessionId → requestId
 
+// Plan approval promises — when permissionMode === "ask", execution pauses here
+// until the user clicks Approve (POST /confirm/:requestId) or Cancel (POST /reject/:requestId)
+const pendingApprovals = new Map(); // requestId → { resolve, reject }
+
 // ── Helpers ───────────────────────────────────────────────────
 
 async function loadSettings() {
@@ -187,6 +191,9 @@ export default async function plannerAgentRoute(fastify) {
       ...toStringArray(body.files),
     ]);
 
+    const permissionMode =
+      body.permission_mode === "ask" ? "ask" : "auto";
+
     const workspacePath = authSession.workspace_path || "";
 
     const settings       = await loadSettings();
@@ -320,6 +327,26 @@ export default async function plannerAgentRoute(fastify) {
     let finalAnswer = "";
     let editedFiles = [];
 
+    // In "ask" mode create a promise that execute_changes awaits before writing files.
+    // It resolves when POST /confirm/:requestId arrives, rejects on POST /reject/:requestId.
+    let approvalPromise = null;
+    let approvalTimeoutId = null;
+    if (permissionMode === "ask") {
+      approvalPromise = new Promise((resolve, reject) => {
+        pendingApprovals.set(requestId, { resolve, reject });
+        approvalTimeoutId = setTimeout(() => {
+          if (pendingApprovals.has(requestId)) {
+            pendingApprovals.delete(requestId);
+            reject(new Error("Plan approval timed out"));
+          }
+        }, 5 * 60 * 1000);
+      });
+      // Prevent unhandled rejection crash if the graph finishes without ever awaiting this
+      // (e.g. intent routed to "answer" instead of "explore"). The rejection is handled
+      // internally when runKodoGraph awaits it; this suppresses the dangling-promise crash.
+      approvalPromise.catch(() => {});
+    }
+
     const graphPromise = runKodoGraph({
       userMessage:          plannerContextMessage,
       rememberedTargetFile: rememberedFile,
@@ -331,6 +358,8 @@ export default async function plannerAgentRoute(fastify) {
       attachmentPaths: attachment_paths,
       emit,
       abortSignal: controller.signal,
+      permissionMode,
+      approvalPromise,
     }).then(r => ({ ok: true, result: r })).catch(e => ({ ok: false, error: e }));
 
     const timeoutPromise = new Promise(resolve =>
@@ -338,6 +367,11 @@ export default async function plannerAgentRoute(fastify) {
     );
 
     const raceResult = await Promise.race([graphPromise, timeoutPromise]);
+
+    // Always clean up so the 5-min timer can't fire after this handler exits
+    // and crash the process with an unhandled rejection.
+    if (approvalTimeoutId !== null) clearTimeout(approvalTimeoutId);
+    pendingApprovals.delete(requestId);
 
     if (raceResult.timedOut) {
       console.warn("[Agent] ⏱️ Graph timeout — closing SSE stream");
@@ -529,6 +563,63 @@ export default async function plannerAgentRoute(fastify) {
       return reply.send({ ok: true, session_id: sessionId, request_id: requestId_, result });
     } catch (err) {
       return reply.code(500).send({ ok: false, error: "Failed to undo changes", details: err.message });
+    }
+  });
+
+  // ── Plan approval (permission mode = "ask") ─────────────────
+  fastify.post("/confirm/:requestId", async (request, reply) => {
+    setCors(reply);
+    const { requestId } = request.params;
+    const pending = pendingApprovals.get(requestId);
+    if (!pending) {
+      return reply.code(404).send({ ok: false, error: "No pending plan approval for this request" });
+    }
+    pending.resolve();
+    pendingApprovals.delete(requestId);
+    return { ok: true };
+  });
+
+  fastify.post("/reject/:requestId", async (request, reply) => {
+    setCors(reply);
+    const { requestId } = request.params;
+    const pending = pendingApprovals.get(requestId);
+    if (!pending) {
+      return reply.code(404).send({ ok: false, error: "No pending plan approval for this request" });
+    }
+    pending.reject(new Error("User cancelled the plan"));
+    pendingApprovals.delete(requestId);
+    return { ok: true };
+  });
+
+  // ── Compact conversation ─────────────────────────────────────
+  // Returns a plain-text summary of the session messages so the UI can
+  // replace its message list with a compact placeholder.
+  fastify.post("/compact", async (request, reply) => {
+    setCors(reply);
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+    try {
+      const body      = await parseIncomingPayload(request);
+      const sessionId = typeof body.session_id === "string" ? body.session_id.trim() : null;
+      if (!sessionId) return reply.code(400).send({ ok: false, error: "session_id required" });
+
+      const messages = getSessionMessages(sessionId, authSession.user_id);
+      if (!messages.length) return { ok: true, summary: "(empty conversation)", messageCount: 0 };
+
+      // Build a condensed transcript — last 20 messages, 400 chars each
+      const transcript = messages.slice(-20).map((m) => {
+        const role    = m.role === "user" ? "User" : "Assistant";
+        const snippet = String(m.content || "").replace(/\s+/g, " ").slice(0, 400);
+        return `${role}: ${snippet}`;
+      }).join("\n\n");
+
+      const summary =
+        `[Compacted — ${messages.length} message${messages.length === 1 ? "" : "s"} in this conversation]\n\n` +
+        `Recent context:\n${transcript}`;
+
+      return { ok: true, summary, messageCount: messages.length };
+    } catch (err) {
+      return reply.code(500).send({ ok: false, error: "Failed to compact", details: err.message });
     }
   });
 }

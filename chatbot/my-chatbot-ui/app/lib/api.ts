@@ -5,11 +5,12 @@
  * Everything else (auth, sessions, upload, settings) is identical.
  */
 
-const BASE_URL      = "http://localhost:9000/api/agent";
-const UPLOAD_URL    = `${BASE_URL}/upload`;
-const TRANSCRIBE_URL= `${BASE_URL}/transcribe`;
-const SETTINGS_URL  = "http://localhost:9000/api/settings";
-const AUTH_URL      = "http://localhost:9000/api/auth";
+const BASE_URL        = "http://localhost:9000/api/agent";
+const UPLOAD_URL      = `${BASE_URL}/upload`;
+const TRANSCRIBE_URL  = `${BASE_URL}/transcribe`;
+const SETTINGS_URL    = "http://localhost:9000/api/settings";
+const AUTH_URL        = "http://localhost:9000/api/auth";
+const WORKSPACE_URL   = "http://localhost:9000/api/workspace";
 
 export interface Session {
   id:            string;
@@ -64,11 +65,22 @@ export type SSEEvent =
   | { type: "done";         sessionId: string; requestId?: string | null }
   | { type: "progress";     stage?: string; message?: string }
   | { type: "plan_metadata"; raw: any }
-  // ★ NEW LangGraph events
   | { type: "plan";         reasoning: string; steps: PlanStep[]; message?: string }
   | { type: "file_context"; files: WorkspaceFile[] }
   | { type: "file_change";  action: string; path: string; success: boolean; error?: string | null }
-  | { type: "file_diff";    action: string; path: string; language: string; hunks: DiffHunk[] };
+  | { type: "file_diff";    action: string; path: string; language: string; hunks: DiffHunk[] }
+  | { type: "plan_preview"; steps: PlanStep[] };
+
+export interface GitStatus {
+  branch: string;
+  dirty:  boolean;
+  ahead:  number;
+}
+
+export interface WorkspaceFileEntry {
+  path: string;
+  type: "file" | "dir";
+}
 
 export type UndoStats = {
   total: number; restored: number; deleted: number; no_op: number; failed: number;
@@ -213,6 +225,13 @@ async function parseSSE(
               });
               break;
 
+            case "plan_preview":
+              onEvent({
+                type:  "plan_preview",
+                steps: Array.isArray(parsed.steps) ? parsed.steps : [],
+              });
+              break;
+
             case "done": {
               if (parsed.metadata?.request_id && !returnedRequestId) {
                 returnedRequestId = String(parsed.metadata.request_id);
@@ -247,16 +266,22 @@ async function parseSSE(
 
 // ─── sendMessage (unchanged interface) ────────────────────────
 
-type RunPayload = { message: string; session_id?: string; attachment_paths?: string[] };
+type RunPayload = {
+  message:          string;
+  session_id?:      string;
+  attachment_paths?: string[];
+  permission_mode?: "auto" | "ask";
+};
 
 export function sendMessage(
-  message:   string,
-  file:      File | File[] | null,
-  sessionId: string | null,
-  onEvent:   (event: SSEEvent) => void,
-  onDone:    (sessionId: string, requestId?: string | null) => void,
-  onError:   (err: string) => void,
-  signal?:    AbortSignal
+  message:        string,
+  file:           File | File[] | null,
+  sessionId:      string | null,
+  onEvent:        (event: SSEEvent) => void,
+  onDone:         (sessionId: string, requestId?: string | null) => void,
+  onError:        (err: string) => void,
+  signal?:        AbortSignal,
+  permissionMode: "auto" | "ask" = "auto"
 ): () => void {
   const controller = new AbortController();
   if (signal) {
@@ -275,8 +300,9 @@ export function sendMessage(
 
       const payload: RunPayload = {
         message,
-        ...(sessionId          ? { session_id:       sessionId      } : {}),
+        ...(sessionId             ? { session_id:       sessionId      } : {}),
         ...(attachmentPaths.length ? { attachment_paths: attachmentPaths } : {}),
+        ...(permissionMode === "ask" ? { permission_mode: "ask" }         : {}),
       };
 
       const token = typeof window !== "undefined" ? localStorage.getItem("kodo_token") : null;
@@ -478,3 +504,48 @@ export async function apiMe(): Promise<User | null> {
 }
 
 export function isLoggedIn(): boolean { return !!getToken(); }
+
+// ─── Workspace ────────────────────────────────────────────────
+
+export async function fetchGitStatus(): Promise<GitStatus> {
+  const res  = await fetch(`${WORKSPACE_URL}/git`, { headers: authHeaders(), cache: "no-store" });
+  const data = await readJson<{ ok: boolean } & GitStatus>(res);
+  if (!res.ok || !data.ok) throw new Error("Failed to fetch git status");
+  return { branch: data.branch, dirty: data.dirty, ahead: data.ahead };
+}
+
+export async function fetchWorkspaceFiles(): Promise<WorkspaceFileEntry[]> {
+  const res  = await fetch(`${WORKSPACE_URL}/files`, { headers: authHeaders(), cache: "no-store" });
+  const data = await readJson<{ ok: boolean; files: WorkspaceFileEntry[] }>(res);
+  if (!res.ok || !data.ok) throw new Error("Failed to fetch workspace files");
+  return Array.isArray(data.files) ? data.files : [];
+}
+
+// ─── Plan approval ────────────────────────────────────────────
+
+export async function confirmPlan(requestId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/confirm/${encodeURIComponent(requestId)}`, {
+    method: "POST", headers: authHeaders(),
+  });
+  const data = await readJson<{ ok: boolean; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Failed to confirm plan");
+}
+
+export async function rejectPlan(requestId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/reject/${encodeURIComponent(requestId)}`, {
+    method: "POST", headers: authHeaders(),
+  });
+  const data = await readJson<{ ok: boolean; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Failed to reject plan");
+}
+
+// ─── Compact ──────────────────────────────────────────────────
+
+export async function compactConversation(sessionId: string): Promise<{ summary: string; messageCount: number }> {
+  const res  = await fetch(`${BASE_URL}/compact`, {
+    method: "POST", headers: authHeaders(), body: JSON.stringify({ session_id: sessionId }),
+  });
+  const data = await readJson<{ ok: boolean; summary: string; messageCount: number; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Failed to compact");
+  return { summary: data.summary, messageCount: data.messageCount };
+}
