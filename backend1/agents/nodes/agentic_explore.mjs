@@ -139,7 +139,145 @@ const EXPLORATION_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "web_search",
+      description:
+        "Search the web. Use when the user asks to research something, find examples, or locate a reference website. Returns titles, URLs, and snippets — follow up with fetch_url on the most relevant result. Do NOT use for questions about this codebase.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "Search query" },
+        },
+        required: ["query"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "fetch_url",
+      description:
+        "Fetch a web page and extract its readable text plus design signals (title, description, hex colors, fonts, gradients). Use when the user references an external website (e.g. 'make it look like example.com') or to open a web_search result.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "Full http(s) URL to fetch" },
+        },
+        required: ["url"],
+      },
+    },
+  },
 ];
+
+// ── Web tools (Claude Code approach: WebFetch + WebSearch for the agent loop) ──
+
+const WEB_TIMEOUT_MS = 15_000;
+const MAX_WEB_BYTES = 600_000;
+const MAX_WEB_TEXT_CHARS = 12_000;
+const WEB_UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36 KodoAgent/1.0";
+
+function htmlToText(html) {
+  return String(html)
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ")
+    .replace(/<!--[\s\S]*?-->/g, " ")
+    .replace(/<\/(p|div|section|article|li|h[1-6]|tr|br|header|footer|nav)>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n[ \t]*/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+// Harvest the visual language of a fetched page — same idea as the local
+// design-token extractor, but for external reference sites the user points at.
+function extractDesignSignals(html) {
+  const uniq = (arr, cap) => [...new Set(arr)].slice(0, cap);
+  return {
+    title: (html.match(/<title[^>]*>([^<]{1,150})/i) || [])[1]?.trim() || "",
+    description: (html.match(/<meta[^>]+name=["']description["'][^>]+content=["']([^"']{1,250})/i) || [])[1] || "",
+    colors: uniq(html.match(/#[0-9a-fA-F]{6}\b/g) || [], 12),
+    gradients: uniq((html.match(/linear-gradient\([^)]{10,90}\)|radial-gradient\([^)]{10,90}\)/g) || []).map((g) => g.replace(/\s+/g, " ")), 4),
+    fonts: uniq((html.match(/font-family:\s*([^;"'}<>]{3,60})/gi) || []).map((f) => f.replace(/font-family:\s*/i, "").trim()), 5),
+  };
+}
+
+async function fetchUrl(rawUrl) {
+  let url;
+  try { url = new URL(String(rawUrl).trim()); } catch { return { success: false, error: `Invalid URL: ${rawUrl}` }; }
+  if (!/^https?:$/.test(url.protocol)) return { success: false, error: "Only http/https URLs are allowed" };
+
+  try {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+      redirect: "follow",
+      headers: { "user-agent": WEB_UA, accept: "text/html,application/xhtml+xml,application/json,*/*" },
+    });
+    let body = await res.text();
+    if (body.length > MAX_WEB_BYTES) body = body.slice(0, MAX_WEB_BYTES);
+
+    const contentType = res.headers.get("content-type") || "";
+    if (/json/i.test(contentType)) {
+      return { success: true, url: url.href, status: res.status, content_type: "json", text: body.slice(0, MAX_WEB_TEXT_CHARS) };
+    }
+
+    const signals = extractDesignSignals(body);
+    return {
+      success: true,
+      url: url.href,
+      status: res.status,
+      ...signals,
+      text: htmlToText(body).slice(0, MAX_WEB_TEXT_CHARS),
+    };
+  } catch (err) {
+    return { success: false, error: `Fetch failed for ${url.href}: ${String(err?.message || err).slice(0, 120)}` };
+  }
+}
+
+// Key-free web search via DuckDuckGo's HTML endpoint. Results carry redirect
+// links (/l/?uddg=<encoded-target>) — decode them back to the real URLs.
+async function webSearch(query) {
+  const q = String(query || "").trim().slice(0, 200);
+  if (!q) return { success: false, error: "query is required" };
+
+  try {
+    const res = await fetch(`https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`, {
+      signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
+      headers: { "user-agent": WEB_UA, accept: "text/html" },
+    });
+    const html = await res.text();
+
+    const stripTags = (s) => htmlToText(s).replace(/\n+/g, " ").trim();
+    const results = [];
+    const linkRe = /<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/g;
+    const snippetRe = /class="result__snippet"[^>]*>([\s\S]*?)<\/a>/g;
+    const snippets = [...html.matchAll(snippetRe)].map((m) => stripTags(m[1]));
+
+    let i = 0;
+    for (const m of html.matchAll(linkRe)) {
+      let target = m[1];
+      const uddg = target.match(/[?&]uddg=([^&]+)/);
+      if (uddg) { try { target = decodeURIComponent(uddg[1]); } catch { /* keep raw */ } }
+      if (/duckduckgo\.com\/y\.js|ad_domain=/.test(m[1])) { i++; continue; } // skip ads
+      results.push({ title: stripTags(m[2]), url: target, snippet: snippets[i] || "" });
+      i++;
+      if (results.length >= 5) break;
+    }
+
+    if (results.length === 0) return { success: false, error: "No results (the search endpoint may have changed or blocked the request)" };
+    return { success: true, query: q, results };
+  } catch (err) {
+    return { success: false, error: `Search failed: ${String(err?.message || err).slice(0, 120)}` };
+  }
+}
 
 // ── Filesystem helpers ────────────────────────────────────────────────────────
 
@@ -340,6 +478,12 @@ async function executeTool(name, args, root, workspaceSnapshot) {
         return { success: true, topic, content: content.slice(0, MAX_TOOL_OUTPUT_CHARS) };
       }
 
+      case "web_search":
+        return await webSearch(args.query);
+
+      case "fetch_url":
+        return await fetchUrl(args.url);
+
       default:
         return { success: false, error: `Unknown tool: ${name}` };
     }
@@ -375,6 +519,8 @@ TOOLS:
 • ready_to_plan      — call when you have enough context; ends exploration
 • list_memory_topics — see what Kodo has learned about this project in past sessions
 • read_memory_topic  — load full details for a memory topic (patterns, preferences, context)
+• web_search         — search the web (research, examples, reference sites); follow up with fetch_url
+• fetch_url          — fetch a web page: readable text + design signals (colors, fonts, gradients)
 ${memorySection}
 STRATEGIES BY REQUEST TYPE:
 
@@ -383,6 +529,7 @@ EDIT/REFACTOR: find the target file → read it → read its imports if relevant
 UI CHANGE: read the component AND its nearest layout/styles file
 FEATURE: grep for similar existing code → read it → identify all files to touch
 REPEAT TASK: if memory shows you've worked here before, load the relevant topic first
+WEB REFERENCE: if the user mentions an external website or asks to research something, use web_search / fetch_url — the fetched design signals (colors, fonts, gradients) become the reference for the change. Never use web tools for questions about this codebase.
 
 RULES:
 1. Read every file you intend to modify — never guess contents
@@ -416,6 +563,31 @@ export async function agenticExploreNode(state) {
 
   const root = workspacePath || PROJECT_ROOT;
   const cleanMessage = String(userMessage).split(/conversation memory:/i)[0].trim();
+
+  // URL pre-fetch: when the message references an external site ("make it look like
+  // https://x.com"), fetch it up-front and carry it as a pseudo-file in fileContext.
+  // This must NOT rely on the tool loop — the file fast-paths below skip the loop
+  // entirely, and a design-reference URL usually arrives WITH a file target.
+  const webRefs = [];
+  const urlMentions = [...cleanMessage.matchAll(/https?:\/\/[^\s"'<>)\]]+/g)].map((m) => m[0]).slice(0, 2);
+  for (const url of urlMentions) {
+    emit?.({ type: "progress", stage: "exploring", message: `fetch ${url.slice(0, 80)}` });
+    const fetched = await fetchUrl(url);
+    if (fetched.success) {
+      const signalLines = [
+        fetched.title && `Title: ${fetched.title}`,
+        fetched.description && `Description: ${fetched.description}`,
+        fetched.colors?.length && `Colors: ${fetched.colors.join(" ")}`,
+        fetched.gradients?.length && `Gradients: ${fetched.gradients.join(" | ")}`,
+        fetched.fonts?.length && `Fonts: ${fetched.fonts.join(" | ")}`,
+      ].filter(Boolean).join("\n");
+      const content = `[EXTERNAL WEB REFERENCE — design signals and readable text fetched from ${url}]\n${signalLines}\n\n${fetched.text || ""}`;
+      webRefs.push({ path: url, content, size: content.length, score: 180, summary: "External web reference from the user's message — use as the design/content reference, not an editable file." });
+      console.log(`[AgenticExplore] Web reference fetched: ${url} (${content.length} chars)`);
+    } else {
+      console.warn(`[AgenticExplore] Web reference fetch failed: ${fetched.error}`);
+    }
+  }
 
   // Single workspace walk, reused everywhere below (system prompt, fast-paths, grep,
   // list_files) instead of re-walking the tree at each of those call sites.
@@ -476,10 +648,28 @@ export async function agenticExploreNode(state) {
   // verbatim in the message (substring match). This is unambiguous — if the user
   // wrote "chatbot/my-chatbot-ui/app/page.tsx", only that exact file matches,
   // not "connection/page.tsx" or any other file that shares a basename.
-  if (intent === "explore") {
+  if (intent === "explore" || intent === "pipeline") {
     const msgLower = cleanMessage.toLowerCase();
     const allFiles = workspaceSnapshot;
     const codeFiles = allFiles.filter(f => !f.isDir);
+
+    // Paths the user explicitly wrote that DON'T exist in the workspace are files to
+    // be CREATED, not found. Their basenames must be excluded from the bare-filename
+    // fallback (Phase 2) — otherwise "create app/landing/page.tsx" fast-paths onto
+    // some OTHER existing page.tsx and the agent edits the wrong page instead of
+    // creating the new one. (This happened: a landing-page request rewrote the chat
+    // page because "page.tsx" matched app/page.tsx.)
+    const existingPaths = new Set(codeFiles.map(f => f.path.toLowerCase()));
+    const EXPLICIT_PATH_RE = /\b([\w.-]+(?:\/[\w.-]+)+\.(?:tsx?|jsx?|mjs|cjs|css|scss|json))\b/gi;
+    const createTargetBasenames = new Set(
+      [...cleanMessage.matchAll(EXPLICIT_PATH_RE)]
+        .map(m => m[1].toLowerCase().replace(/^@/, ""))
+        .filter(p => !existingPaths.has(p) && ![...existingPaths].some(ep => ep.endsWith(p)))
+        .map(p => p.split("/").pop())
+    );
+    if (createTargetBasenames.size > 0) {
+      console.log(`[AgenticExplore] Non-existent explicit path(s) mentioned — treating as create targets, excluding basename(s) from bare-name matching: ${[...createTargetBasenames].join(", ")}`);
+    }
 
     // Phase 1: full-path substring match (preferred — unambiguous)
     for (const file of codeFiles) {
@@ -528,7 +718,10 @@ export async function agenticExploreNode(state) {
     // segments that appear in the message, then fewer total segments (shallower).
     {
       const BARE_FILE_RE = /\b([\w\-.]+\.(tsx?|jsx?|mjs|cjs|css|scss|json))\b/gi;
-      const mentionedBases = [...new Set([...cleanMessage.matchAll(BARE_FILE_RE)].map(m => m[1].toLowerCase()))];
+      const mentionedBases = [...new Set([...cleanMessage.matchAll(BARE_FILE_RE)].map(m => m[1].toLowerCase()))]
+        // Basenames of explicitly-mentioned NON-existent paths are create targets —
+        // never resolve them onto a different existing file with the same name.
+        .filter(base => !createTargetBasenames.has(base));
 
       for (const base of mentionedBases) {
         const candidates = codeFiles.filter(f => path.basename(f.path).toLowerCase() === base);
@@ -578,6 +771,46 @@ export async function agenticExploreNode(state) {
   // appear in both frontend component names and backend API concerns, and the LLM
   // loop correctly finds backend files via grep while name-match would load ChatHeader.tsx.
   const isBackendDomain = /\b(api|routes?|middleware|backend|server\.mjs|endpoint|handler|response\s+header|request\s+header|http\s+header|cors|jwt|authenticat|authori[sz]|database|\.service\.|\.controller\.|express|fastify|prisma|mongoose|req\b|res\b)\b/i.test(cleanMessage);
+
+  // ── Remembered-file continuation ──────────────────────────────────────────
+  // The dominant real-world pattern: successive edits to the same file ("add a
+  // section to the landing page" right after creating app/landing/page.tsx). If a
+  // distinctive path segment of the remembered file appears in the message, that
+  // file IS the target — load it and skip bare-word name matching entirely.
+  // Name-match is dangerous here: the CONTENT the user wants written can mention
+  // codebase words (a landing page describing Kodo's pipeline says "explore",
+  // "execute", "verify", "kodo" — and name-match once loaded kodo_graph.mjs,
+  // execute_changes.mjs, and verify.mjs as edit targets instead of the page).
+  const GENERIC_PATH_SEGMENTS = new Set([
+    "page", "pages", "app", "src", "components", "component", "index", "main",
+    "styles", "style", "lib", "libs", "hooks", "utils", "chatbot", "backend",
+  ]);
+  if ((intent === "explore" || intent === "pipeline") && loadedFiles.size === 0 && rememberedTargetFile) {
+    const msgLowerCont = cleanMessage.toLowerCase();
+    const rememberedEntry = workspaceSnapshot.find(
+      f => !f.isDir && (f.path === rememberedTargetFile || f.path.endsWith(rememberedTargetFile))
+    );
+    if (rememberedEntry) {
+      const distinctive = rememberedEntry.path.toLowerCase()
+        .replace(/\.[a-z0-9]+$/, "")
+        .split(/[^a-z0-9]+/)
+        .filter(s => s.length >= 4 && !GENERIC_PATH_SEGMENTS.has(s));
+      const matched = distinctive.find(s => msgLowerCont.includes(s));
+      if (matched) {
+        const content = await readFileSafe(path.resolve(root, rememberedEntry.path));
+        if (content) {
+          loadedFiles.set(rememberedEntry.path, { path: rememberedEntry.path, content, size: content.length, score: 250 });
+          console.log(`[AgenticExplore] Remembered-file continuation: loaded "${rememberedEntry.path}" (message references "${matched}")`);
+          readySignal = {
+            summary: `Continuing work on ${rememberedEntry.path}`,
+            priorityFiles: [rememberedEntry.path],
+            rootCause: null,
+          };
+          iteration = MAX_LOOP_ITERATIONS; // target resolved — skip LLM loop and name-match
+        }
+      }
+    }
+  }
   // In multi-task mode, use the original user message for name-match (not the LLM task description).
   // The task description is verbose and contains verbs that match wrong files ("message" → AssistantMessage.tsx).
   // The original message is concise — "sidebar" reliably maps to ChatSidebar.tsx.
@@ -794,6 +1027,10 @@ export async function agenticExploreNode(state) {
         emit?.({ type: "progress", stage: "exploring", message: `listing memory topics` });
       } else if (toolName === "read_memory_topic") {
         emit?.({ type: "progress", stage: "exploring", message: `recall: ${args.topic}` });
+      } else if (toolName === "web_search") {
+        emit?.({ type: "progress", stage: "exploring", message: `web search: "${String(args.query || "").slice(0, 60)}" — ${result.results?.length ?? 0} result(s)` });
+      } else if (toolName === "fetch_url") {
+        emit?.({ type: "progress", stage: "exploring", message: `fetch ${String(args.url || "").slice(0, 80)}` });
       }
 
       // Cap tool output so we don't blow up the context window
@@ -821,7 +1058,7 @@ export async function agenticExploreNode(state) {
   // If the loop ended with 0 files and no ready signal (all iterations failed —
   // e.g. repeated 504 timeouts), return a clear error rather than letting plan_changes
   // run against empty context and silently produce nothing useful.
-  if (loadedFiles.size === 0 && !readySignal && (existingContext || []).length === 0) {
+  if (loadedFiles.size === 0 && !readySignal && (existingContext || []).length === 0 && webRefs.length === 0) {
     const errMsg =
       "Could not gather workspace context — the AI model returned no response (possible API timeout or quota exhaustion). Please try again.";
     console.warn("[AgenticExplore] Loop ended with 0 files and no ready signal — aborting early.");
@@ -846,6 +1083,12 @@ export async function agenticExploreNode(state) {
   // Add everything the model read this turn
   for (const [p, f] of loadedFiles) {
     fileContextMap.set(p, { ...f, score: 150 });
+  }
+
+  // External web references from URLs in the user's message — design/content
+  // ground truth for the planner, never edit targets.
+  for (const w of webRefs) {
+    fileContextMap.set(w.path, w);
   }
 
   // Eagerly load priority files listed in ready_to_plan that weren't read yet

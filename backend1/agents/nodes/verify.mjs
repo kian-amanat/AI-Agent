@@ -207,8 +207,110 @@ async function groupTouchedFilesByProject(root, touchedFilePaths) {
   return projectDirs;
 }
 
+// ── Named-technique contracts ───────────────────────────────────────────────────
+// When a request names an API or technique, the shipped code must actually contain
+// it. This catches the "silently downgraded" failure: scroll-jacking requested,
+// plain overflow-x-auto delivered, reported as Done. Enforced only for explicit
+// mentions, so ordinary requests are never blocked.
+const TECHNIQUE_CONTRACTS = [
+  { mention: /\buseScroll\b/i,     expect: /\buseScroll\b/,   label: "useScroll" },
+  { mention: /\buseTransform\b/i,  expect: /\buseTransform\b/, label: "useTransform" },
+  { mention: /\buseSpring\b/i,     expect: /\buseSpring\b/,   label: "useSpring" },
+  { mention: /\bwhileInView\b/i,   expect: /\bwhileInView\b/, label: "whileInView" },
+  { mention: /scroll[- ]?jack/i,   expect: /useScroll|sticky/i, label: "scroll-jacking (useScroll + sticky pinning)" },
+  { mention: /sticky pinning|pins? to the viewport/i, expect: /sticky/i, label: "sticky viewport pinning" },
+  { mention: /IntersectionObserver/i, expect: /IntersectionObserver/, label: "IntersectionObserver" },
+];
+
+async function checkTechniqueContracts(userMessage, touchedFiles, root) {
+  const msg = String(userMessage || "").split(/conversation memory:/i)[0];
+  const demanded = TECHNIQUE_CONTRACTS.filter((t) => t.mention.test(msg));
+  if (demanded.length === 0 || touchedFiles.size === 0) return [];
+
+  let combined = "";
+  for (const fp of touchedFiles) {
+    try { combined += (await readFileSafe(safeResolvePath(root, fp))) || ""; } catch { /* skip */ }
+  }
+  if (!combined) return [];
+
+  return demanded
+    .filter((t) => !t.expect.test(combined))
+    .map((t) =>
+      `Requested technique "${t.label}" is NOT present in the edited code. The user named it explicitly — ` +
+      `implement it for real, do not substitute a simpler pattern.`
+    );
+}
+
+// ── Render smoke check (visual verification, level 1) ──────────────────────────
+// Typecheck/lint pass on plenty of visually-broken pages (frozen spinners, deleted
+// gradients) and on ALL THREE app-wide build breaks this project has suffered
+// (client layout + metadata, corrupted CSS, destroyed page). Actually requesting
+// the route from the running dev server catches build/runtime breakage the static
+// checks cannot. Skips silently when no dev server is up.
+async function renderSmokeCheck(root, touchedFiles, emit) {
+  const routes = new Set();
+  for (const fp of touchedFiles) {
+    const norm = String(fp).replace(/\\/g, "/");
+    const m = norm.match(/app\/(.+?)\/page\.(tsx|jsx|ts|js)$/);
+    if (m) {
+      routes.add("/" + m[1].split("/").filter((seg) => !seg.startsWith("(")).join("/"));
+    } else if (/app\/page\.(tsx|jsx|ts|js)$/.test(norm) || /app\/layout\.(tsx|jsx)$/.test(norm) || /globals\.css$/.test(norm)) {
+      routes.add("/");
+    }
+  }
+  if (routes.size === 0) return [];
+
+  const base = process.env.KODO_DEV_URL || "http://localhost:3000";
+  const issues = [];
+
+  for (const route of routes) {
+    try {
+      const res = await fetch(base + route, {
+        signal: AbortSignal.timeout(10_000),
+        headers: { accept: "text/html" },
+      });
+      const html = await res.text();
+      const errorMarker = html.match(/(CssSyntaxError|SyntaxError|ReferenceError|TypeError|Build Error|Ecmascript file had an error|Unhandled Runtime Error)[^<\n]{0,160}/);
+
+      if (res.status >= 500 || errorMarker) {
+        issues.push(
+          `Render check failed: GET ${route} → HTTP ${res.status}` +
+          (errorMarker ? ` — ${errorMarker[0].trim()}` : "") +
+          ` — the page does not load in the browser even though static checks passed.`
+        );
+      } else if (res.status === 404 && route !== "/") {
+        issues.push(`Render check failed: GET ${route} → 404 — the route did not register (page file may be in the wrong directory).`);
+      } else {
+        emit?.({ type: "progress", stage: "verified", message: `🌐 Render check passed: ${route}` });
+      }
+    } catch (err) {
+      // Dev server not running (or unreachable) — this check is best-effort only.
+      console.log(`[Verify] Render check skipped (${base}${route}): ${String(err?.message || err).slice(0, 80)}`);
+      break;
+    }
+  }
+
+  return issues;
+}
+
+// Recognizable validation-error patterns mapped to fix hints. The retry planner
+// receives issues verbatim — a concrete "write it like THIS" hint converts a
+// failure the model repeats forever into one it fixes on the first retry.
+const VALIDATION_FIX_HINTS = [
+  [/TS2339: Property 'style' does not exist on type 'EventTarget'|TS18047: 'e\.currentTarget' is possibly 'null'/,
+   `Hint: type the event parameter, e.g. onPointerMove={(e: React.PointerEvent<HTMLDivElement>) => { const card = e.currentTarget; ... }} — a typed handler makes currentTarget a real element with .style and .getBoundingClientRect.`],
+  [/react\/no-unescaped-entities/,
+   `Hint: escape apostrophes inside JSX text as &apos; ("it's" → "it&apos;s").`],
+  [/TS2307: Cannot find module/,
+   `Hint: the import path is wrong or the dependency is not installed — check the exact path/name before re-importing.`],
+  [/TS7031: Binding element .+ implicitly has an 'any' type/,
+   `Hint: type destructured component props inline, e.g. const FeatureCard = ({ title, description, index }: { title: string; description: string; index: number }) => { ... }.`],
+  [/TS2686: 'React' refers to a UMD global|ReferenceError: React is not defined/,
+   `Hint: the file uses React.something (e.g. React.useRef) without importing React. Either add \`import React from 'react'\` or — better — import the hook directly: \`import { useRef } from 'react'\` and call useRef(null).`],
+];
+
 export async function verifyNode(state) {
-  const { executionResults, plan, workspacePath, emit, retryCount } = state;
+  const { executionResults, plan, workspacePath, emit, retryCount, userMessage } = state;
 
   emit?.({ type: "progress", stage: "verifying", message: "🔍 Verifying changes..." });
 
@@ -397,10 +499,23 @@ export async function verifyNode(state) {
         if (combinedOutput.trim()) {
           issues.push(combinedOutput.trim());
         }
+        // Attach concrete fix hints for recognizable error patterns — the retry
+        // planner sees issues verbatim, and a "write it like THIS" hint turns a
+        // failure the model repeats forever into a one-retry fix.
+        for (const [pattern, hint] of VALIDATION_FIX_HINTS) {
+          if (pattern.test(combinedOutput)) issues.push(hint);
+        }
         break;
       }
     }
   }
+
+  // Named-technique contracts: explicitly-requested APIs/techniques must exist in
+  // the shipped code — catches silent downgrades that all other checks pass.
+  issues.push(...await checkTechniqueContracts(userMessage, touchedFiles, root));
+
+  // Render smoke check: does the touched route actually load in the dev server?
+  issues.push(...await renderSmokeCheck(root, touchedFiles, emit));
 
   const ok = issues.length === 0;
   // MAX_RETRIES must match kodo_graph.mjs's verifyEdge, and canRetry must be computed
