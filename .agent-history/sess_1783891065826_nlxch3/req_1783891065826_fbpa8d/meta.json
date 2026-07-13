@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess_1783891065826_nlxch3",
+  "requestId": "req_1783891065826_fbpa8d",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-12T21:18:37.127Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/app/landing/page.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/app/landing/page.tsx",
+      "existedBefore": false,
+      "snapshotPath": null
+    }
+  ]
+}

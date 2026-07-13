@@ -1,21 +1,17 @@
 ---
-updated: 2026-07-12T20:23:08.582Z
+updated: 2026-07-13T20:17:43.524Z
 ---
 
-### Icon Styling Requirements
-- **Background Removal**: Settings page buttons must use only `icon.png` without additional backgrounds. Check parent elements for background classes (e.g., `bg-*`, `rounded-*`) that may require removal.
-- **Size Adjustment**: Icon requires explicit sizing (e.g., `h-12 w-12` or `style={{width: '48px', height: '48px'}}`). Avoid relying on container padding for perceived size.
-- **Component Update**: Use `Sparkles` component instead of Lucide icons for settings page buttons
-- **Material UI Integration**: For semantic icons, replace current components with Material UI equivalents (e.g., `ChatIcon`, `UploadIcon`, `AddPhotoAlternateIcon`, `LockIcon`, `DesktopWindowsIcon`)
-- **New Semantic Icons**: User requested specific mappings for:
-  - Chat → `ChatIcon`
-  - File Upload → `UploadIcon`
-  - Add vision model → `AddPhotoAlternateIcon`
-  - Local only → `DesktopWindowsIcon`
-  - Keys never leave → `LockIcon`
-
-### Success-State Button Design
-- `chatbot/my-chatbot-ui/app/components/chat/AssistantMessage.tsx` remains reference for clicked/success button styling
-- Reuse Revert button's success-state classes and feedback content for consistent animations
-- **Enhancement Focus**: Save Changes button in `/settings/page.tsx` now features:
-  - Premium red-orange
+### Motion Component Patterns
+- Local class utility (cn):
+  ```ts
+  const cn = (...classes: (string | undefined | false)[]) => classes.filter(Boolean).join(" ");
+  ```
+- GSAP Integration: Use directly without additional imports (already available)
+- Component Imports: Prefer relative paths for local components (e.g., `./magnetic-button` vs absolute paths)
+- **New Pattern**: Avoid direct `style` property manipulation on motion components - use animation props instead
+- **New Pattern**: Ensure transition objects match expected type structure:
+  ```ts
+  transition: { duration: number, ease: string }
+  ```
+- **Best Practice**: Use `animate`/`initial` props for state-driven animations rather than direct DOM manipulation

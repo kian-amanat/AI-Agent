@@ -60,10 +60,11 @@ const PIPELINE_PATTERNS = [
   /\b(build|scaffold|develop)\s+(a\s+)?(full|complete|entire|whole)\s+(app|project|system|platform|website|application)\b/i,
   /\b(create|make|generate)\s+(a\s+)?(full.?stack|end.?to.?end)\b/i,
   /\b(start|create|build)\s+(my\s+)?(ai\s+)?agent\b/i,
-  // "codex" / "cursor" alone are reliable signals; "claude code" is NOT — users say
-  // "make it look like claude code" as a design reference, not a build request.
-  // Require an explicit build/create verb before the tool name to avoid false positives.
-  /\b(codex|cursor)\b/i,
+  // "codex" alone is a reliable signal; "cursor" is NOT — UI prompts constantly say
+  // "tilt toward the cursor" / "follows the cursor" (the mouse pointer). Require
+  // tool-context around "cursor" so design language never routes to pipeline.
+  /\bcodex\b/i,
+  /\bcursor\s+(ai|ide|editor|agent|app)\b|\blike\s+cursor\b|\bcursor-style\b/i,
   /\b(build|create|scaffold|develop|make)\b.{0,30}\b(claude\s*code)\b/i,
 ];
 

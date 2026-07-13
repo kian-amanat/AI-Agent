@@ -54,6 +54,25 @@ async function detectPackageManager(dir) {
   return "npm";
 }
 
+// Walk up from a file's directory to the nearest package.json owner — npm-style
+// resolution. Used to target installs at the project the user is actually
+// working in when they don't say ("install gsap" while editing the Next app
+// must land in chatbot/my-chatbot-ui, not the workspace root).
+async function findNearestPackageDir(startDir, stopAt) {
+  let dir = startDir;
+  const stop = path.resolve(stopAt);
+  while (true) {
+    try {
+      await fs.access(path.join(dir, "package.json"));
+      return dir;
+    } catch { /* keep walking */ }
+    if (path.resolve(dir) === stop) return null;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
+}
+
 async function findPackageDir(root, hint) {
   // hint: "frontend" | "backend" | "root" | undefined
   if (!hint || hint === "root") return root;
@@ -208,7 +227,7 @@ function extractInstallRequest(message) {
 // ─── Node ────────────────────────────────────────────────────────
 
 export async function installPackagesNode(state) {
-  const { workspacePath, userMessage, emit } = state;
+  const { workspacePath, userMessage, emit, rememberedTargetFile } = state;
   const root = workspacePath || PROJECT_ROOT;
 
   const request = extractInstallRequest(userMessage);
@@ -222,8 +241,20 @@ export async function installPackagesNode(state) {
     };
   }
 
-  // Resolve target directory
-  const targetDir = await findPackageDir(root, request.targetHint);
+  // Resolve target directory. With no explicit hint, prefer the project that owns
+  // the file the session is working on — a bare "install gsap" mid-frontend-work
+  // once landed in the workspace root instead of the Next app.
+  let targetDir = await findPackageDir(root, request.targetHint);
+  if (!request.targetHint && rememberedTargetFile) {
+    const ownedDir = await findNearestPackageDir(
+      path.dirname(path.resolve(root, rememberedTargetFile)),
+      root
+    );
+    if (ownedDir && ownedDir !== root) {
+      console.log(`[Install] No target hint — using remembered file's project: ${path.relative(root, ownedDir)}`);
+      targetDir = ownedDir;
+    }
+  }
   const relDir    = path.relative(root, targetDir) || ".";
   const pm        = await detectPackageManager(targetDir);
 

@@ -10,6 +10,7 @@
  */
 
 import fs from "fs/promises";
+import { readFileSync } from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { AIMessage } from "@langchain/core/messages";
@@ -206,8 +207,16 @@ function isBugFixRequest(msg) {
 }
 
 function isLintFixRequest(msg) {
-  return /\b(lint|linting|eslint|tslint|typecheck|type.check|no-explicit-any|no-unused|prefer-const|lint error|lint warning|lint fix|fix lint|fix.*lint|fix.*typescript|fix.*eslint)\b/i.test(
-    String(msg || "")
+  const m = String(msg || "");
+  // Specific rule names or tool names are unambiguous signals.
+  if (/\b(no-explicit-any|no-unused-vars|no-unused|prefer-const|eslint|tslint)\b/i.test(m)) return true;
+  // The bare words "lint"/"typecheck" are NOT — user content can quote them
+  // ("the Verify step runs typecheck and lint" in landing-page copy once flipped
+  // the planner into lint-fix mode on a design request). Require fix-intent
+  // phrasing near the word, in either order.
+  return (
+    /\b(fix|resolve|clean\s*up|address|solve|correct)\b[^.\n]{0,40}\b(lint|linting|typecheck|type.check|type\s+errors?)\b/i.test(m) ||
+    /\b(lint|linting|typecheck|type.check)\b[^.\n]{0,40}\b(errors?|warnings?|issues?|violations?|failures?|fix)\b/i.test(m)
   );
 }
 
@@ -357,6 +366,10 @@ function scoreFileForPrompt(file, cleanMsg, rememberedTargetFile, investigation)
   const base = pathBase(fp).toLowerCase();
   let score = 0;
 
+  // External web references (URL pseudo-files from agentic_explore) are the design/
+  // content ground truth the user pointed at — they must survive the file cut.
+  if (/^https?:\/\//.test(fp)) score += 180;
+
   if (rememberedTargetFile) {
     const remembered = String(rememberedTargetFile).toLowerCase();
     const rememberedBase = pathBase(remembered);
@@ -469,7 +482,117 @@ function pickFilesForPrompt(fileContext, cleanMsg, rememberedTargetFile, investi
   return picked.slice(0, mode === "debug" ? Math.max(MAX_PROMPT_FILES, 6) : MAX_PROMPT_FILES);
 }
 
-function buildSystemPrompt({ rememberedTargetFile, lockToRemembered, mode, investigation, retryErrors = [], retryCount = 0 }) {
+// ── Design-token extraction (creative mode) ────────────────────────────────────
+// "Go read the design files" told to the model produced flat template output; the
+// tokens themselves in the prompt do not. Harvest the project's REAL visual language
+// — colors, gradients, shadows, easings, custom animation classes — from globals.css
+// and the in-context files, and inject them as ground truth for creative work.
+async function extractDesignTokens(workspacePath, fileContext) {
+  try {
+    const sources = [];
+
+    // globals.css: from context if loaded, else probe common locations
+    const cssFromContext = (fileContext || []).find((f) => f?.path?.endsWith("globals.css"))?.content;
+    if (cssFromContext) {
+      sources.push(cssFromContext);
+    } else if (workspacePath) {
+      for (const candidate of ["app/globals.css", "src/app/globals.css", "chatbot/my-chatbot-ui/app/globals.css"]) {
+        try {
+          sources.push(await fs.readFile(path.resolve(workspacePath, candidate), "utf-8"));
+          break;
+        } catch { /* try next */ }
+      }
+    }
+    for (const f of fileContext || []) {
+      if (f?.content && /\.(tsx|jsx|css)$/.test(f.path || "")) sources.push(f.content);
+    }
+    if (sources.length === 0) return "";
+
+    const all = sources.join("\n");
+    const uniq = (arr, cap) => [...new Set(arr)].slice(0, cap);
+
+    const colors    = uniq(all.match(/#[0-9a-fA-F]{6}\b/g) || [], 10);
+    const gradients = uniq((all.match(/linear-gradient\([^)]{10,90}\)|radial-gradient\([^)]{10,90}\)/g) || []).map(g => g.replace(/\s+/g, " ")), 4);
+    const shadows   = uniq(all.match(/shadow-\[[^\]]{10,80}\]|box-shadow:\s*[^;]{10,80}/g) || [], 4);
+    const easings   = uniq(all.match(/\[0?\.\d+,\s*\d+(?:\.\d+)?,\s*0?\.\d+,\s*\d+(?:\.\d+)?\]|cubic-bezier\([^)]+\)/g) || [], 3);
+    const cssClasses = uniq((sources[0] || "").match(/^\.[\w-]+(?=\s*\{)/gm) || [], 8);
+    const surfaces  = uniq(all.match(/backdrop-blur-\w+|bg-white\/\[[\d.]+\]|border-white\/\[[\d.]+\]/g) || [], 6);
+
+    const lines = [];
+    if (colors.length)     lines.push(`Colors: ${colors.join(" ")}`);
+    if (gradients.length)  lines.push(`Gradients: ${gradients.join(" | ")}`);
+    if (shadows.length)    lines.push(`Shadows: ${shadows.join(" | ")}`);
+    if (easings.length)    lines.push(`Easings: ${easings.join(" ")}`);
+    if (surfaces.length)   lines.push(`Glass surfaces: ${surfaces.join(" ")}`);
+    if (cssClasses.length) lines.push(`Custom CSS classes available: ${cssClasses.join(" ")}`);
+    if (lines.length === 0) return "";
+
+    return `\n## PROJECT DESIGN TOKENS (extracted from this codebase — use these, not generic values)\n${lines.join("\n")}`.slice(0, 1500);
+  } catch {
+    return "";
+  }
+}
+
+// ── Design skills (Claude Code approach: curated expert packs, loaded on trigger) ──
+// Skill files live in backend1/agents/skills/*.md with frontmatter `triggers:` —
+// keyword-matched against the request, top 2 injected into the creative prompt.
+// Users extend the agent by dropping their own .md files there (e.g. component
+// recipes pasted from a library) — no code changes needed.
+const SKILLS_DIR = path.join(__dirname, "..", "skills");
+
+async function loadDesignSkills(cleanMsg) {
+  try {
+    const entries = await fs.readdir(SKILLS_DIR);
+    const msg = String(cleanMsg || "").toLowerCase();
+    const scored = [];
+
+    for (const name of entries) {
+      if (!name.endsWith(".md")) continue;
+      const raw = await fs.readFile(path.join(SKILLS_DIR, name), "utf-8");
+      const fm = raw.match(/^---\n([\s\S]*?)\n---\n?/);
+      const triggers = (fm?.[1].match(/triggers:\s*(.+)/)?.[1] || "")
+        .split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+      const hits = triggers.filter((t) => msg.includes(t)).length;
+      if (hits > 0) scored.push({ name, hits, body: raw.replace(/^---\n[\s\S]*?\n---\n?/, "").trim() });
+    }
+
+    scored.sort((a, b) => b.hits - a.hits);
+    const picked = scored.slice(0, 2);
+    if (picked.length === 0) return "";
+
+    console.log(`[PlanChanges] Design skills loaded: ${picked.map((p) => `${p.name}(${p.hits} triggers)`).join(", ")}`);
+    return "\n\n" + picked.map((p) => p.body.slice(0, 4500)).join("\n\n");
+  } catch {
+    return "";
+  }
+}
+
+// Optional per-mode model routing: creative work benefits from the strongest model
+// the user has, surgical fixes don't need it. If settings.json defines
+// "creativeModel", creative-mode planning uses it (same key/endpoint); everything
+// else keeps the default route. Absent the setting, behavior is unchanged.
+function resolveCreativeModelRoute(modelRoute, mode) {
+  if (mode !== "creative") return modelRoute;
+  try {
+    const settingsPath = path.join(__dirname, "..", "..", "data", "settings.json");
+    const settings = JSON.parse(readFileSyncSafe(settingsPath));
+    if (settings?.creativeModel && typeof settings.creativeModel === "string") {
+      console.log(`[PlanChanges] Creative mode → routing to creativeModel: ${settings.creativeModel}`);
+      return { ...modelRoute, model: settings.creativeModel };
+    }
+  } catch { /* no settings / no field — keep default */ }
+  return modelRoute;
+}
+
+function readFileSyncSafe(p) {
+  try {
+    return readFileSync(p, "utf-8");
+  } catch {
+    return "{}";
+  }
+}
+
+function buildSystemPrompt({ rememberedTargetFile, lockToRemembered, mode, investigation, retryErrors = [], retryCount = 0, designTokens = "" }) {
   const focusRule = lockToRemembered && rememberedTargetFile
     ? `\nFOCUS: Edit ONLY "${rememberedTargetFile}". Do NOT touch unrelated files.\n`
     : "";
@@ -495,9 +618,15 @@ ${Array.isArray(investigation.nextChecks) ? investigation.nextChecks.map((n) => 
 
   const modeSection = {
     creative: `
-## CREATIVE MODE
-Use stronger visual design, better layout, thoughtful motion, and polished UI.
-Be bold when it improves the result. Do not introduce random complexity.`,
+## CREATIVE MODE — craft checklist (all of these, every time)
+Design like the senior designer of THIS product, not a template generator:
+1. USE THE PROJECT'S REAL TOKENS. Reuse the exact colors, gradients, shadows, and easings from the design-token list and reference files below — never substitute a flat solid color where the product uses a gradient.
+2. DEPTH: layered backgrounds (radial/linear gradient washes, blurred glow orbs), glassmorphism surfaces (backdrop-blur + translucent bg + border-white/[0.06]), soft colored shadows — not flat rectangles.
+3. MOTION: staggered entrances (staggerChildren), spring or cubic-bezier easing like [0.22, 1, 0.36, 1], whileInView reveals for below-the-fold sections, hover micro-interactions on every interactive element.
+4. STRUCTURE: define repeated UI as a data array + one mapped component — NEVER paste the same JSX block 2+ times with different text. Extract a local component when an element has behavior (handlers, state).
+5. COPY IS SACRED: when the user supplies exact text (headlines, labels, button copy), use it VERBATIM — never rewrite, shorten, or "improve" their words.
+6. NAMED TECHNIQUES ARE CONTRACTS: if the request names an API or technique (useScroll, useTransform, sticky pinning, scroll-jacking, whileInView), your patch MUST actually use it. Never silently substitute a simpler pattern (e.g. overflow-x-auto is NOT scroll-jacking). If you truly cannot implement it, say so in a read_only step instead of shipping a lookalike.
+${designTokens}`,
 
     debug: `
 ## DEBUG MODE
@@ -585,6 +714,14 @@ JSX/TSX VALIDITY RULES (always enforced)
 - When adding a sibling element inside a ternary branch (e.g. adding a button below a div inside "condition ? (DIV) : …"), wrap the whole true-branch in a React fragment so it has one root: "condition ? (Fragment DIV BUTTON /Fragment) : …".
 - After applying your patch, mentally re-read the resulting JSX to confirm it is valid.
 - If your patch adds new JSX elements, confirm existing closing tags are still present.
+- Event handlers in TSX must type their event parameter: onPointerMove={(e: React.PointerEvent<HTMLDivElement>) => ...}. An untyped "e" makes e.currentTarget an EventTarget with no .style — a guaranteed typecheck failure. Never call .style/.getBoundingClientRect on an untyped event target.
+- Escape apostrophes in JSX text as &apos; or &rsquo; ("it's" → "it&apos;s") — react/no-unescaped-entities is enforced in this project.
+- Never write a bare > or < character inside JSX text content (e.g. arrows like "->" or "Learn more >"): use {'>'} / {'<'} or &gt; / &lt; — a bare one is a parse error.
+
+FIDELITY RULES (always enforced)
+- User-supplied text is VERBATIM: headlines, labels, button copy, descriptions the user wrote must appear byte-for-byte. Never paraphrase them.
+- Named techniques are contracts: if the request names an API (useScroll, useTransform, useSpring, whileInView) or a technique (scroll-jacking, sticky pinning, 3D tilt), the patch must genuinely use it — no simpler lookalikes.
+- Requested link targets are exact: "links to /" means href="/", "anchor links to #security" means href="#security" — never placeholder href="#".
 
 DEPENDENCY RULES
 - ALWAYS use the EXACT file path shown in "### File: <path>" headers below. Never abbreviate.
@@ -1070,9 +1207,11 @@ async function generatePlanWithRetry({ system, content, modelRoute, mode = "surg
   let rawResponse = "";
 
   // Keep maxOut consistent across attempts so the retry isn't token-starved.
-  // single_file prompts are smaller (one full file) so 4096 is plenty;
-  // other modes need more room for the full JSON plan.
-  const maxOut = (mode === "single_file") ? 4096 : 6000;
+  // single_file prompts are smaller (one full file) so 4096 is plenty.
+  // Creative requests (new sections, animations) produce the LARGEST patches —
+  // 100+ lines of JSX escaped inside JSON easily blows past 6000 output tokens
+  // and truncates mid-JSON, which parses as "no usable plan". Give them headroom.
+  const maxOut = (mode === "single_file") ? 4096 : (mode === "creative") ? 9000 : 6000;
 
   // Heartbeat: slow LLM providers can take 1-3 min for a large planning prompt.
   // Send a progress tick every 15s so the UI shows the agent is alive, not stuck.
@@ -1120,6 +1259,149 @@ async function generatePlanWithRetry({ system, content, modelRoute, mode = "surg
   }
 
   return { rawResponse, parsed: null, error: lastError };
+}
+
+// When the structured-JSON plan fails, fall back to what Claude Code does natively:
+// the model writes CODE, not code-inside-JSON. Large creative additions (a whole
+// landing-page section is 100+ lines of JSX) reliably break the JSON path — the
+// output truncates mid-string or the escaping collapses — while the same model
+// produces the same code flawlessly as a plain fenced block. Ask for the complete
+// updated file and construct the rewrite plan programmatically.
+async function generateFullFileRewritePlan({ cleanMsg, file, modelRoute, emit, extraGuidance = "" }) {
+  try {
+    emit?.({ type: "progress", stage: "planning", message: "Structured plan failed — regenerating as direct code..." });
+
+    const content = String(file.content || "");
+    // Output budget sized to the file: the response must hold the ENTIRE updated
+    // file plus additions — and a ground-up redesign can be much LARGER than the
+    // original, so the floor is generous. ~3 chars/token for code.
+    const maxTokens = Math.min(16_000, Math.max(9000, Math.ceil(content.length / 3) + 3000));
+
+    const result = await callLLM({
+      system: `You are Kodo, an expert AI code editor. You will receive a user request and the full current content of one file. Apply the request and return the COMPLETE UPDATED FILE.
+
+STRICT OUTPUT RULES:
+- Output ONLY the updated file content inside ONE \`\`\`tsx code fence.
+- No JSON. No explanations before or after the fence.
+- Include EVERY line of the final file — never truncate, never write placeholders like "// rest of the file unchanged".
+- Keep all existing code the request does not ask to change, byte-for-byte.${extraGuidance ? `\n\nDESIGN GUIDANCE (follow when the request is visual):${extraGuidance}` : ""}`,
+      messages: [{
+        role: "user",
+        content: `Request: "${cleanMsg}"\n\nCurrent content of ${file.path}:\n\`\`\`tsx\n${content}\n\`\`\`\n\nReturn the complete updated file now.`,
+      }],
+      modelRoute,
+      maxTokens,
+      temperature: 0,
+      stream: true,
+    });
+
+    const raw = String(result?.content || "");
+    if (!raw.trim()) return null;
+
+    const fence = raw.match(/```(?:tsx|typescript|jsx|javascript|ts|js)?\s*\n([\s\S]*?)```/);
+    let code = fence ? fence[1] : null;
+    if (!code) {
+      // Model skipped the fence but output looks like the file itself — accept it.
+      const trimmed = raw.trim();
+      if (/^(["']use client["']|import\s)/.test(trimmed)) code = trimmed;
+    }
+    if (!code) return null;
+
+    code = code.trim();
+    // Sanity: must be a real full file, not just the new fragment — keep the default
+    // export and at least half the original size. Rejecting here is safe: the caller
+    // falls through to the honest "no usable plan" message instead of writing garbage.
+    if (!/export\s+default/.test(code) || code.length < content.length * 0.5) {
+      console.warn(`[PlanChanges] Full-file fallback rejected: ${code.length} chars vs original ${content.length}, hasDefaultExport=${/export\s+default/.test(code)}`);
+      return null;
+    }
+
+    console.log(`[PlanChanges] Full-file fallback produced ${code.length} chars for ${file.path}`);
+    return {
+      reasoning: "Structured JSON plan was unusable; regenerated the change as a complete updated file.",
+      dependencyNotes: "",
+      plan: [{
+        action: "edit",
+        path: file.path,
+        description: "Applied the request as a full-file update (structured plan fallback)",
+        patches: [{ kind: "rewrite_file", content: code, search: "", replace: "", anchor: "", before: "", after: "" }],
+      }],
+    };
+  } catch (err) {
+    console.warn("[PlanChanges] Full-file fallback failed:", String(err?.message || err).slice(0, 150));
+    return null;
+  }
+}
+
+// Explicit paths in the message that do NOT exist on disk are files the user wants
+// CREATED. The JSON plan path reliably dies on large creations (a 14KB component
+// inside a JSON string truncates or breaks escaping), and the full-file EDIT
+// fallback can't help — it rewrites an existing file. This detector feeds the
+// create-specific raw-code fallback below.
+async function detectCreateTargets(cleanMsg, workspacePath, fileContext) {
+  const targets = [];
+  const re = /\b([\w.-]+(?:\/[\w.-]+)+\.(?:tsx?|jsx?|mjs|cjs|css|scss|json))\b/gi;
+  const inContext = new Set((fileContext || []).map((f) => f?.path));
+  for (const m of String(cleanMsg || "").matchAll(re)) {
+    const p = m[1].replace(/^@/, "");
+    if (inContext.has(p) || targets.includes(p)) continue;
+    try {
+      await fs.access(path.resolve(workspacePath || PC_PROJECT_ROOT, p));
+    } catch {
+      targets.push(p);
+    }
+  }
+  return targets.slice(0, 2);
+}
+
+// Raw-code fallback for CREATE tasks: ask for the complete new file in a fence —
+// no JSON — and build the create step programmatically. If the user's message
+// includes source code to adapt (the 21st.dev workflow), the model applies the
+// adaptation instructions to it directly.
+async function generateNewFilePlan({ cleanMsg, newPath, modelRoute, emit, extraGuidance = "" }) {
+  try {
+    emit?.({ type: "progress", stage: "planning", message: `Structured plan failed — generating ${path.basename(newPath)} as direct code...` });
+
+    const result = await callLLM({
+      system: `You are Kodo, an expert AI engineer. The user wants a NEW file created at: ${newPath}
+
+Produce the COMPLETE content of that new file according to the user's request. If the request includes source code to adapt, apply EVERY adaptation instruction to it faithfully — renames, replaced classes, removed imports, rebranded text — and keep everything else exactly as provided.
+
+STRICT OUTPUT RULES:
+- Output ONLY the new file's content inside ONE code fence.
+- No JSON. No explanations before or after the fence.
+- The file must be complete and self-contained — never truncate, never write placeholders like "// rest of the code".${extraGuidance ? `\n\nDESIGN GUIDANCE (follow when the request is visual):${extraGuidance}` : ""}`,
+      messages: [{ role: "user", content: cleanMsg }],
+      modelRoute,
+      maxTokens: 12_000,
+      temperature: 0,
+      stream: true,
+    });
+
+    const raw = String(result?.content || "");
+    const fence = raw.match(/```(?:\w+)?\s*\n([\s\S]*?)```/);
+    let code = fence ? fence[1].trim() : null;
+    if (!code && /^(["']use client["']|import\s|\/\/|\/\*)/.test(raw.trim())) code = raw.trim();
+    // A real module, not a fragment: some export (named exports are fine —
+    // components like CinematicFooter export by name, not default).
+    if (!code || code.length < 400 || !/export\s+(default|const|function|class|type|interface|\{)/.test(code)) {
+      console.warn(`[PlanChanges] New-file fallback rejected for ${newPath}: ${code ? code.length : 0} chars, hasExport=${code ? /export\s/.test(code) : false}`);
+      return null;
+    }
+
+    console.log(`[PlanChanges] New-file fallback produced ${code.length} chars for ${newPath}`);
+    return {
+      action: "create",
+      path: newPath,
+      description: `Created ${newPath} (raw-code fallback after structured plan failure)`,
+      patches: [],
+      edits: [],
+      content: code,
+    };
+  } catch (err) {
+    console.warn("[PlanChanges] New-file fallback failed:", String(err?.message || err).slice(0, 150));
+    return null;
+  }
 }
 
 function buildFallbackPlan({ fileContext, rememberedTargetFile, mode, emptyResponse = false }) {
@@ -1235,9 +1517,20 @@ export async function planChangesNode(state) {
   else if (isScopedChange(cleanMsg) && !isCreativeRequest(cleanMsg)) mode = "scoped";
   else if (isCreativeRequest(cleanMsg) && !isReferenceCopyRequest(cleanMsg)) mode = "creative";
 
+  // Full-rewrite requests ("completely redesign", "rewrite the entire file from
+  // scratch") override multi/scoped: a file about to be REPLACED must never be
+  // attacked with 8 surgical patches — anchors shift, JSX shatters, task dies.
+  // These route to creative mode and (below) to the direct raw-code path.
+  const isFullRewrite =
+    /\bcompletely\s+(redesign|rewrite|rebuild)\b|\b(redesign|rewrite|rebuild)\b[^.\n]{0,80}\bfrom\s+scratch\b|\b(rewrite|redesign)\s+the\s+entire\s+(file|page)\b/i.test(cleanMsg);
+  if (isFullRewrite && mode !== "debug") {
+    if (mode !== "creative") console.log(`[PlanChanges] Full-rewrite request — overriding mode "${mode}" → creative`);
+    mode = "creative";
+  }
+
   if (lockToRemembered) console.log(`[PlanChanges] Locked to: ${rememberedTargetFile}`);
   console.log(`[PlanChanges] Mode: ${mode}${isRetry ? ` (retry ${retryCount})` : ""}`);
-  console.log(`[PlanChanges] fileContext has ${(fileContext || []).length} file(s): ${(fileContext || []).map(f => f?.path?.split('/').pop() ?? '?').join(', ')}`);
+  console.log(`[PlanChanges] fileContext has ${(fileContext || []).length} file(s): ${(fileContext || []).map(f => /^https?:\/\//.test(f?.path || "") ? f.path : (f?.path?.split('/').pop() || '?')).join(', ')}`);
   if (retryErrors.length) console.log(`[PlanChanges] Retry errors:`, retryErrors.slice(0, 3).join(" | "));
 
   const modeEmoji = { debug: "🐛", creative: "🎨", surgical: "🧠", lint: "🔧", scoped: "🎯", multi: "📋" };
@@ -1251,6 +1544,14 @@ export async function planChangesNode(state) {
       : `${modeEmoji[mode]} ${modeMsg[mode]}`,
   });
 
+  // Creative work gets the project's real design tokens + matching expert skill
+  // packs in the prompt, and (if configured) the strongest model the user has —
+  // everything else is unchanged.
+  const designTokens = mode === "creative" ? await extractDesignTokens(workspacePath, fileContext) : "";
+  const designSkills = mode === "creative" ? await loadDesignSkills(cleanMsg) : "";
+  const designGuidance = designTokens + designSkills;
+  const planModelRoute = resolveCreativeModelRoute(modelRoute, mode);
+
   const system = buildSystemPrompt({
     rememberedTargetFile,
     lockToRemembered: lockToRemembered && mode !== "debug",
@@ -1258,6 +1559,7 @@ export async function planChangesNode(state) {
     investigation,
     retryErrors,
     retryCount,
+    designTokens: designGuidance,
   });
 
   let parsed = null;
@@ -1268,7 +1570,7 @@ export async function planChangesNode(state) {
   // for every model (see resolveContextBudget). On retry, raise the per-file share
   // further so the LLM sees the full file when escalating to rewrite_file — a
   // truncated retry produces a partial rewrite missing the tail of the file.
-  const { maxFileChars: baseMaxFileChars, totalContextChars } = resolveContextBudget(modelRoute);
+  const { maxFileChars: baseMaxFileChars, totalContextChars } = resolveContextBudget(planModelRoute);
   const effectiveMaxFileChars = isRetry ? Math.floor(baseMaxFileChars * 1.5) : baseMaxFileChars;
 
   // Multi mode (first attempt only): plan each file separately so each LLM call
@@ -1276,13 +1578,32 @@ export async function planChangesNode(state) {
   // Claude Code approach — avoids JSON truncation and stale-anchor failures.
   const filesToShowForSeq = pickFilesForPrompt(fileContext || [], String(userMessage).split(/conversation memory:/i)[0].trim(), rememberedTargetFile, investigation, mode);
 
-  if (mode === "multi" && !isRetry && filesToShowForSeq.length > 1) {
+  // Full-rewrite PRIMARY path (not a fallback): the model writes the complete new
+  // file as raw code — no JSON, no patches, no anchors. This is how Claude Code
+  // does whole-file work, and it is the only strategy that reliably survives a
+  // ground-up redesign of a 300-line component.
+  if (isFullRewrite && !isRetry && filesToShowForSeq[0]?.content) {
+    emit?.({ type: "progress", stage: "planning", message: "Full rewrite requested — generating the complete file directly..." });
+    parsed = await generateFullFileRewritePlan({
+      cleanMsg,
+      file: filesToShowForSeq[0],
+      modelRoute: planModelRoute,
+      emit,
+      extraGuidance: designGuidance,
+    });
+    if (parsed) {
+      console.log("[PlanChanges] Full-rewrite primary path produced the plan directly.");
+      rawResponse = "[full-file rewrite — primary path]";
+    }
+  }
+
+  if (!parsed && mode === "multi" && !isRetry && filesToShowForSeq.length > 1) {
     try {
       parsed = await planFilesSequentially({
         filesToShow: filesToShowForSeq,
         userMessage,
         system,
-        modelRoute,
+        modelRoute: planModelRoute,
         investigation,
       });
       if (parsed) rawResponse = JSON.stringify(parsed);
@@ -1333,7 +1654,7 @@ export async function planChangesNode(state) {
     const result = await generatePlanWithRetry({
       system,
       content,
-      modelRoute,
+      modelRoute: planModelRoute,
       mode,
       emit,
     });
@@ -1350,6 +1671,51 @@ export async function planChangesNode(state) {
     const preview = rawResponse.trim().slice(0, 600);
     console.warn("[PlanChanges] JSON parse failed. Raw response chars:", rawResponse.length, preview ? `— preview: ${preview}` : "— EMPTY (model returned no content)");
 
+    // Before surrendering, try the raw-code path: plain fenced code instead of a
+    // JSON plan. This rescues the most common failure — large code payloads whose
+    // JSON-escaped form truncates mid-output — and costs LLM calls only in cases
+    // that were about to fail anyway. Skip in lint/scoped modes (rewrite_file is
+    // blocked there by design) and on verify retries (those already escalate).
+    if (!isRetry && mode !== "lint" && mode !== "scoped") {
+      const fallbackSteps = [];
+
+      // CREATE targets first: explicit non-existent paths in the message are new
+      // files — the edit-oriented fallback can't produce them (observed: it grabbed
+      // the landing page and emitted the new component's code against it, which the
+      // sanity check rightly rejected — task dead).
+      const createTargets = await detectCreateTargets(cleanMsg, workspacePath, fileContext);
+      for (const newPath of createTargets) {
+        const createStep = await generateNewFilePlan({ cleanMsg, newPath, modelRoute: planModelRoute, emit, extraGuidance: designGuidance });
+        if (createStep) fallbackSteps.push(createStep);
+      }
+
+      // Companion edit: if an in-context file is also named in the message (the
+      // usual "create the component, then wire it into the page" shape), run the
+      // edit fallback scoped to just that part of the request.
+      const fullFileTarget =
+        filesToShowForSeq[0] ||
+        (fileContext || []).find((f) => f?.content);
+      if (fullFileTarget?.content) {
+        const editMsg = fallbackSteps.length > 0
+          ? `The new file(s) ${fallbackSteps.map((s) => s.path).join(", ")} have ALREADY been created. Apply ONLY the part of the following request that edits ${fullFileTarget.path}:\n\n${cleanMsg}`
+          : cleanMsg;
+        const editParsed = await generateFullFileRewritePlan({ cleanMsg: editMsg, file: fullFileTarget, modelRoute: planModelRoute, emit, extraGuidance: designGuidance });
+        if (editParsed?.plan?.length) fallbackSteps.push(...editParsed.plan);
+      }
+
+      if (fallbackSteps.length > 0) {
+        parsed = {
+          reasoning: "Structured JSON plan was unusable; regenerated the work as raw code.",
+          dependencyNotes: "",
+          plan: fallbackSteps,
+        };
+        console.log(`[PlanChanges] Recovered via raw-code fallback: ${fallbackSteps.map((s) => `${s.action} ${s.path}`).join(", ")}`);
+        rawResponse = "[recovered via raw-code fallback]";
+      }
+    }
+  }
+
+  if (!parsed?.plan) {
     // Empty response = quota exhausted. Return a clean user-facing error immediately —
     // do NOT fall through to self-heal, which would inject page.tsx and produce
     // anchor mismatches on files the user never asked to change.
@@ -1392,12 +1758,23 @@ export async function planChangesNode(state) {
   }
 
   // When the LLM explicitly returns plan:[] (valid JSON, empty array), it means it
-  // couldn't determine what to change. Fall back to the deterministic plan so the
-  // user gets a useful message instead of the generic "could not determine" fallback.
+  // couldn't determine what to change. Try the raw-code full-file path first — the
+  // model may fail at structuring a JSON plan yet write the updated file perfectly —
+  // then fall back to the deterministic plan so the user gets a useful message.
   if (Array.isArray(parsed.plan) && parsed.plan.length === 0) {
-    console.warn("[PlanChanges] LLM returned empty plan[] — using fallback");
-    const fallback = buildFallbackPlan({ fileContext, rememberedTargetFile, mode });
-    if (fallback?.plan?.length) parsed = fallback;
+    console.warn("[PlanChanges] LLM returned empty plan[] — attempting full-file fallback");
+    const emptyPlanTarget = filesToShowForSeq[0] || (fileContext || []).find((f) => f?.content);
+    if (emptyPlanTarget?.content && !isRetry && mode !== "lint" && mode !== "scoped") {
+      const recovered = await generateFullFileRewritePlan({ cleanMsg, file: emptyPlanTarget, modelRoute: planModelRoute, emit, extraGuidance: designGuidance });
+      if (recovered?.plan?.length) {
+        console.log("[PlanChanges] Recovered from empty plan[] via full-file rewrite fallback.");
+        parsed = recovered;
+      }
+    }
+    if (Array.isArray(parsed.plan) && parsed.plan.length === 0) {
+      const fallback = buildFallbackPlan({ fileContext, rememberedTargetFile, mode });
+      if (fallback?.plan?.length) parsed = fallback;
+    }
   }
 
   let plan = (parsed.plan || []).map((item) => ({
@@ -1415,6 +1792,29 @@ export async function planChangesNode(state) {
 
   plan = applyPathCanonicalization(plan, fileContext || [], rememberedTargetFile);
   plan = mergeSameFileEditSteps(plan);
+
+  // Read-before-write invariant (Claude Code core rule): the planner may only EDIT
+  // files whose content it was actually shown. A hallucinated or shortened path
+  // (e.g. "app/page.tsx" when the loaded file is "app/landing/page.tsx") once sent
+  // a full landing-page redesign into the CHAT APP's page. Edits to unread files are
+  // blocked unless the user's message literally contains that exact path. "create"
+  // is exempt — new files have nothing to read.
+  {
+    const readPaths = new Set((fileContext || []).map((f) => f?.path).filter(Boolean));
+    plan = plan.map((step) => {
+      const isWrite = step.action === "edit" || step.action === "rewrite_file" || step.action === "delete";
+      if (!isWrite || !step.path || readPaths.has(step.path) || cleanMsg.includes(step.path)) return step;
+      console.warn(`[PlanChanges] 🚫 Blocked ${step.action} to unread file "${step.path}" — not in context (loaded: ${[...readPaths].map(p => p.split("/").pop()).join(", ")})`);
+      return {
+        ...step,
+        action: "read_only",
+        patches: [],
+        edits: [],
+        content: "",
+        description: `Blocked: the plan targeted "${step.path}", a file that was never loaded into context. Edits are only allowed on files the planner has read.`,
+      };
+    });
+  }
 
   if (mode === "lint" || mode === "scoped") {
     plan = plan.map((item) => {
@@ -1517,7 +1917,7 @@ export async function planChangesNode(state) {
           : f
       );
       const retryContent = buildUserPrompt(userMessage, supplemented, rememberedTargetFile, lockToRemembered, mode, investigation, [], effectiveMaxFileChars, totalContextChars);
-      const retryResult = await generatePlanWithRetry({ system, content: retryContent, modelRoute, mode, emit });
+      const retryResult = await generatePlanWithRetry({ system, content: retryContent, modelRoute: planModelRoute, mode, emit });
       if (retryResult.parsed?.plan) {
         const retryPlan = applyPathCanonicalization(
           retryResult.parsed.plan.map(item => ({

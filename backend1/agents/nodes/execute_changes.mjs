@@ -15,9 +15,11 @@
 
 import path from "path";
 import fs from "fs/promises";
+import { existsSync } from "fs";
 import { fileURLToPath } from "url";
 import { createRequire } from "module";
 import { AIMessage } from "@langchain/core/messages";
+import { callLLM } from "../../services/llm.mjs";
 
 const _require = createRequire(import.meta.url);
 
@@ -63,6 +65,28 @@ function validateSyntax(content, absPath) {
     return null;
   }
 
+  // CSS/SCSS: patches that anchor mid-rule can slice a declaration in half, leaving
+  // orphaned properties and stray closers (this shipped once: a .card-3d block was
+  // inserted INSIDE .animate-typing-dot, breaking the whole app's build with
+  // "Unexpected }"). A brace-depth scan catches every unbalanced case cheaply.
+  if (ext === ".css" || ext === ".scss") {
+    let depth = 0;
+    const lines = content.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      // Strip comments and strings crudely — good enough for brace counting
+      const line = lines[i].replace(/\/\*[\s\S]*?\*\//g, "").replace(/"[^"]*"|'[^']*'/g, "");
+      for (const ch of line) {
+        if (ch === "{") depth++;
+        else if (ch === "}") {
+          depth--;
+          if (depth < 0) return `L${i + 1}: unexpected "}" — closing brace without a matching open (patch likely landed mid-rule)`;
+        }
+      }
+    }
+    if (depth !== 0) return `unbalanced braces: ${depth} unclosed "{" at end of file (patch likely landed mid-rule)`;
+    return null;
+  }
+
   if (![".tsx", ".jsx", ".ts", ".js"].includes(ext)) return null;
   const ts = loadTypeScript();
   if (!ts) return null;
@@ -83,6 +107,29 @@ function validateSyntax(content, absPath) {
       }).join("; ");
     }
 
+    // Next.js hard rule: a "use client" file cannot export `metadata` — it always
+    // fails the build. Kodo once added 'use client' + scroll hooks to the root
+    // layout (which exports metadata) and broke every page in the app at once.
+    if (/^\s*["']use client["']/.test(content) && /export\s+const\s+metadata\b/.test(content)) {
+      return `"use client" component exports "metadata" — disallowed in Next.js. Keep the file a Server Component or move the client logic (hooks, event handlers) into a separate client component file.`;
+    }
+
+    // With the automatic JSX runtime there is no React global: calling React.useRef
+    // (etc.) without importing React throws "ReferenceError: React is not defined"
+    // at RUNTIME while parsing fine — it once shipped a 500 on a page that passed
+    // every static check. Catch it before the write.
+    if (/\bReact\.[a-zA-Z]/.test(content) && !/import\s+(?:\*\s+as\s+)?React\b|import\s+React\s*,/.test(content)) {
+      const line = content.split("\n").findIndex(l => /\bReact\.[a-zA-Z]/.test(l)) + 1;
+      return `L${line}: uses React.<something> but never imports React — add \`import React from 'react'\` or import the hook directly (e.g. \`import { useRef } from 'react'\`).`;
+    }
+
+    // Local/alias imports must resolve to real files. During a lint-fix retry the
+    // model once "refactored" a component out into '@/components/ui/magnetic-button'
+    // — a module it never created — shipping a Module-not-found build break that
+    // parse/typegrammar checks can't see. Bare package imports are skipped (npm deps).
+    const importErr = checkLocalImportsResolve(content, absPath);
+    if (importErr) return importErr;
+
     // Beyond grammar: catch the mistakes patch-based edits are most prone to.
     // None of these are parse errors — TS happily parses all of them — so they
     // need their own AST walks. Duplicate imports first (applies to all JS/TS):
@@ -100,6 +147,51 @@ function validateSyntax(content, absPath) {
 
     return null;
   } catch { return null; }
+}
+
+// Resolve "./x", "../x", and "@/x" import specifiers against the filesystem the
+// way the bundler will. "@/" maps to the file's sub-project root (nearest ancestor
+// with a package.json — matches this repo's tsconfig "@/*": ["./*"]). Probes the
+// standard extension/index candidates. Bare package names are ignored.
+function checkLocalImportsResolve(content, absPath) {
+  const IMPORT_RE = /(?:import|export)\s[^;'"]*?from\s*['"]([^'"]+)['"]|import\s*\(\s*['"]([^'"]+)['"]\s*\)/g;
+  const fileDir = path.dirname(absPath);
+
+  let projectRoot = null;
+  const specs = [];
+  for (const m of content.matchAll(IMPORT_RE)) {
+    const spec = m[1] || m[2];
+    if (spec && (spec.startsWith("./") || spec.startsWith("../") || spec.startsWith("@/"))) specs.push(spec);
+  }
+  if (specs.length === 0) return null;
+
+  for (const spec of specs) {
+    let base;
+    if (spec.startsWith("@/")) {
+      if (!projectRoot) {
+        let dir = fileDir;
+        while (dir !== path.dirname(dir)) {
+          if (existsSync(path.join(dir, "package.json"))) { projectRoot = dir; break; }
+          dir = path.dirname(dir);
+        }
+      }
+      if (!projectRoot) continue; // can't resolve the alias — don't block
+      base = path.join(projectRoot, spec.slice(2));
+    } else {
+      base = path.resolve(fileDir, spec);
+    }
+
+    const candidates = [
+      base,
+      `${base}.tsx`, `${base}.ts`, `${base}.jsx`, `${base}.js`, `${base}.mjs`, `${base}.css`, `${base}.json`,
+      path.join(base, "index.tsx"), path.join(base, "index.ts"), path.join(base, "index.js"),
+    ];
+    if (!candidates.some((c) => existsSync(c))) {
+      const line = content.split("\n").findIndex((l) => l.includes(spec)) + 1;
+      return `L${line}: import "${spec}" does not resolve to any existing file — either create that module in the same plan (as a create step BEFORE this file is written) or keep the code in this file instead of importing it.`;
+    }
+  }
+  return null;
 }
 
 function checkDuplicateImports(ts, srcFile) {
@@ -173,21 +265,79 @@ function checkJsxStructuralIssues(ts, srcFile) {
   }
   collectDeclarations(srcFile);
 
-  let undefError = null;
+  // Collect EVERY undefined component in one pass — reporting only the first sent
+  // the fix-forward repair on a whack-a-mole loop (fixed <Lock>, then failed on
+  // <History>, task dead). One complete list = one repair pass.
+  const undefinedTags = new Map(); // name -> first line
   function visitTag(node) {
-    if (undefError) return;
     if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && ts.isIdentifier(node.tagName)) {
       const name = node.tagName.text;
-      if (/^[A-Z]/.test(name) && !declared.has(name)) {
+      if (/^[A-Z]/.test(name) && !declared.has(name) && !undefinedTags.has(name)) {
         const lc = srcFile.getLineAndCharacterOfPosition(node.getStart(srcFile));
-        undefError = `L${lc.line + 1}: "<${name}>" is used as a JSX component but is not imported or declared in this file`;
-        return;
+        undefinedTags.set(name, lc.line + 1);
       }
     }
     ts.forEachChild(node, visitTag);
   }
   visitTag(srcFile);
-  return undefError;
+
+  if (undefinedTags.size > 0) {
+    const list = [...undefinedTags.entries()].map(([n, l]) => `<${n}> (L${l})`).join(", ");
+    return `components used but never imported or declared: ${list} — add ALL missing imports in one edit (icon names usually come from 'lucide-react').`;
+  }
+  return null;
+}
+
+// ── Fix-forward syntax repair (Claude Code approach) ───────────────────────────
+// When a patch produces content that fails pre-write validation, we hold BOTH the
+// broken content AND the exact error. Re-planning from scratch throws that away and
+// burns a full retry on a fresh guess (observed: two attempts, two DIFFERENT syntax
+// errors, task dead). Instead: one targeted LLM call — "here is the file, here is
+// the error, fix ONLY that" — then re-validate. Only a clean result gets written.
+async function attemptSyntaxRepair(brokenContent, syntaxErr, relPath, absPath, modelRoute, emit) {
+  try {
+    emit?.({ type: "progress", stage: "executing", message: `Auto-repairing syntax error in ${path.basename(relPath)}…` });
+    console.log(`[Execute] Attempting fix-forward syntax repair for ${relPath}: ${String(syntaxErr).slice(0, 120)}`);
+
+    const maxTokens = Math.min(16_000, Math.max(4096, Math.ceil(brokenContent.length / 3) + 1500));
+    const result = await callLLM({
+      system: `You repair syntax errors in code files. You receive a file and its exact validation error(s).
+
+STRICT RULES:
+- Fix ONLY what the error(s) require — every other line stays byte-for-byte identical.
+- Return the ENTIRE corrected file inside ONE code fence. No explanations, no JSON, no truncation, no "rest unchanged" placeholders.
+- Common fixes: add a missing import; escape a bare > or < in JSX text as {'>'}/{'<'} or &gt;/&lt;; escape ' in JSX text as &apos;; close an unclosed tag; remove a duplicated attribute or import.`,
+      messages: [{
+        role: "user",
+        content: `File: ${relPath}\nValidation error(s): ${syntaxErr}\n\n\`\`\`\n${brokenContent}\n\`\`\`\n\nReturn the corrected complete file now.`,
+      }],
+      modelRoute,
+      maxTokens,
+      temperature: 0,
+      stream: true,
+    });
+
+    const raw = String(result?.content || "");
+    const fence = raw.match(/```(?:\w+)?\s*\n([\s\S]*?)```/);
+    let code = fence ? fence[1].trim() : null;
+    if (!code && /^(["']use client["']|import\s)/.test(raw.trim())) code = raw.trim();
+    if (!code || code.length < brokenContent.length * 0.5) {
+      console.warn(`[Execute] Syntax repair rejected: unusable response (${code ? code.length : 0} chars)`);
+      return null;
+    }
+
+    const stillBroken = validateSyntax(code, absPath);
+    if (stillBroken) {
+      console.warn(`[Execute] Syntax repair still invalid: ${String(stillBroken).slice(0, 120)}`);
+      return null;
+    }
+
+    console.log(`[Execute] ✅ Fix-forward syntax repair succeeded for ${relPath}`);
+    return code;
+  } catch (err) {
+    console.warn(`[Execute] Syntax repair failed: ${String(err?.message || err).slice(0, 120)}`);
+    return null;
+  }
 }
 
 function normalizeId(prefix, id) {
@@ -623,7 +773,7 @@ async function saveUndoSnapshot(workspacePath, sessionId, requestId, plan) {
 const ACTION_ICON = { edit: "✏️", create: "➕", delete: "🗑️", read_only: "👁️" };
 
 export async function executeChangesNode(state) {
-  const { plan, workspacePath, emit, retryCount, sessionId, requestId, permissionMode, approvalPromise } = state;
+  const { plan, workspacePath, emit, retryCount, sessionId, requestId, permissionMode, approvalPromise, modelRoute } = state;
   const root = workspacePath || PROJECT_ROOT;
 
   if (!Array.isArray(plan) || plan.length === 0) {
@@ -728,7 +878,14 @@ export async function executeChangesNode(state) {
           const rwPatch = (step.patches || []).find(p => p.kind === "rewrite_file" && p.content);
           if (rwPatch) createContent = String(rwPatch.content || "");
         }
-        const createSyntaxErr = validateSyntax(createContent, absPath);
+        let createSyntaxErr = validateSyntax(createContent, absPath);
+        if (createSyntaxErr) {
+          const repaired = await attemptSyntaxRepair(createContent, createSyntaxErr, step.path, absPath, modelRoute, emit);
+          if (repaired) {
+            createContent = repaired;
+            createSyntaxErr = null;
+          }
+        }
         if (createSyntaxErr) {
           console.warn(`[Execute] 🚫 Syntax error in created file ${step.path} — write aborted: ${createSyntaxErr}`);
           result = { success: false, error: `Syntax error: ${createSyntaxErr}` };
@@ -809,7 +966,16 @@ export async function executeChangesNode(state) {
                 note: "file already matched the requested state — no changes were needed",
               };
             } else if (appliedCount > 0) {
-              const syntaxErr = validateSyntax(working, absPath);
+              let syntaxErr = validateSyntax(working, absPath);
+              if (syntaxErr) {
+                // Fix forward before failing: we hold the broken content AND the
+                // exact error — one targeted repair beats a blind re-plan.
+                const repaired = await attemptSyntaxRepair(working, syntaxErr, step.path, absPath, modelRoute, emit);
+                if (repaired) {
+                  working = repaired;
+                  syntaxErr = null;
+                }
+              }
               if (syntaxErr) {
                 console.warn(`[Execute] 🚫 Syntax error in ${step.path} after patching — write aborted: ${syntaxErr}`);
                 result = { success: false, error: `Syntax error after patch: ${syntaxErr}` };
@@ -845,7 +1011,14 @@ export async function executeChangesNode(state) {
         if (!rewriteContent) {
           result = { success: false, error: "rewrite_file: no content provided" };
         } else {
-          const syntaxErr = validateSyntax(rewriteContent, absPath);
+          let syntaxErr = validateSyntax(rewriteContent, absPath);
+          if (syntaxErr) {
+            const repaired = await attemptSyntaxRepair(rewriteContent, syntaxErr, step.path, absPath, modelRoute, emit);
+            if (repaired) {
+              rewriteContent = repaired;
+              syntaxErr = null;
+            }
+          }
           if (syntaxErr) {
             result = { success: false, error: `Syntax error: ${syntaxErr}` };
           } else {
