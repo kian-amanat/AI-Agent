@@ -1,0 +1,185 @@
+'use client';
+
+import { motion } from 'framer-motion';
+import { Search, ClipboardList, Wrench, ShieldCheck } from 'lucide-react';
+import Link from 'next/link';
+import Image from 'next/image';
+
+export default function LandingPage() {
+  return (
+    <>
+      {/* Fixed Top Navbar */}
+      <header className="fixed top-0 w-full z-50 backdrop-blur-md bg-white/[0.05] border-b border-white/10">
+        <nav className="container mx-auto px-6 py-3 flex items-center">
+          {/* Logo */}
+          <div className="flex items-center gap-2">
+            <Image
+              src="/icon.png"
+              alt="Kodo Logo"
+              width={32}
+              height={32}
+              className="w-8 h-8"
+              priority
+            />
+            <span className="text-white font-semibold text-lg">Kodo</span>
+          </div>
+
+          {/* Navigation Links */}
+          <div className="flex-1 flex justify-center gap-8">
+            <Link href="#how-it-works" className="text-white/80 hover:text-[#ff8a3d] transition-colors">
+              How it works
+            </Link>
+            <Link href="#" className="text-white/80 hover:text-[#ff8a3d] transition-colors">
+              Features
+            </Link>
+            <Link href="#" className="text-white/80 hover:text-[#ff8a3d] transition-colors">
+              Security
+            </Link>
+          </div>
+
+          {/* CTA Button */}
+          <button
+            className="rounded-2xl bg-[#ff8a3d] py-2 px-6 text-sm font-semibold text-white shadow-lg shadow-orange-500/20 transition-all duration-300 hover:bg-[#ff5e4d] hover:shadow-orange-500/30 active:scale-[0.98]"
+          >
+            Open App
+          </button>
+        </nav>
+      </header>
+
+      {/* Hero Section */}
+      <main className="pt-24 pb-16">
+        <div className="container mx-auto px-6 text-center">
+          <motion.h1
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6 }}
+            className="text-4xl md:text-6xl font-bold text-white mb-6"
+          >
+            Build Better Code with Kodo
+          </motion.h1>
+          <motion.p
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.2 }}
+            className="text-white/70 max-w-2xl mx-auto mb-10"
+          >
+            AI-powered development environment that understands your codebase and helps you build faster.
+          </motion.p>
+          <motion.button
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6, delay: 0.4 }}
+            className="rounded-2xl bg-[#ff8a3d] py-3 px-8 text-sm font-semibold text-white shadow-lg shadow-orange-500/20 transition-all duration-300 hover:bg-[#ff5e4d] hover:shadow-orange-500/30 active:scale-[0.98]"
+          >
+            Get Started
+          </motion.button>
+        </div>
+      </main>
+
+      <motion.section
+        id="how-it-works"
+        className="py-20 bg-white/5"
+        initial="hidden"
+        whileInView="visible"
+        viewport={{ once: true }}
+      >
+        <div className="container mx-auto px-6">
+          <motion.h2
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.6 }}
+            className="text-3xl font-bold text-white mb-12 text-center"
+          >
+            How It Works
+          </motion.h2>
+          <div className="relative">
+            {/* Connecting line */}
+            <motion.div
+              className="absolute left-4 top-0 bottom-0 w-0.5 bg-gradient-to-b from-[#ff8a3d] to-[#ff5e4d]"
+              initial={{ height: 0, top: '100%' }}
+              animate={{ height: '100%', top: 0 }}
+              transition={{ duration: 1.5, ease: 'easeInOut' }}
+            />
+            {/* Steps container */}
+            <motion.div
+              variants={{
+                hidden: { opacity: 0 },
+                visible: { opacity: 1, transition: { staggerChildren: 0.2 } }
+              }}
+              className="space-y-12"
+            >
+              {/* Step 1 */}
+              <motion.div
+                variants={{
+                  hidden: { opacity: 0, x: -20 },
+                  visible: { opacity: 1, x: 0 }
+                }}
+                transition={{ duration: 0.6 }}
+                className="flex items-start"
+              >
+                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-[#ff8a3d] flex items-center justify-center">
+                  <Search className="w-5 h-5 text-white" />
+                </div>
+                <div className="ml-6">
+                  <h3 className="text-xl font-semibold text-white mb-2">Explore</h3>
+                  <p className="text-white/70">Reads only the files that matter, using code search and project memory</p>
+                </div>
+              </motion.div>
+              {/* Step 2 */}
+              <motion.div
+                variants={{
+                  hidden: { opacity: 0, x: -20 },
+                  visible: { opacity: 1, x: 0 }
+                }}
+                transition={{ duration: 0.6 }}
+                className="flex items-start"
+              >
+                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-[#ff8a3d] flex items-center justify-center">
+                  <ClipboardList className="w-5 h-5 text-white" />
+                </div>
+                <div className="ml-6">
+                  <h3 className="text-xl font-semibold text-white mb-2">Plan</h3>
+                  <p className="text-white/70">Designs a minimal, surgical patch plan</p>
+                </div>
+              </motion.div>
+              {/* Step 3 */}
+              <motion.div
+                variants={{
+                  hidden: { opacity: 0, x: -20 },
+                  visible: { opacity: 1, x: 0 }
+                }}
+                transition={{ duration: 0.6 }}
+                className="flex items-start"
+              >
+                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-[#ff8a3d] flex items-center justify-center">
+                  <Wrench className="w-5 h-5 text-white" />
+                </div>
+                <div className="ml-6">
+                  <h3 className="text-xl font-semibold text-white mb-2">Execute</h3>
+                  <p className="text-white/70">Applies changes with syntax validation before anything touches disk</p>
+                </div>
+              </motion.div>
+              {/* Step 4 */}
+              <motion.div
+                variants={{
+                  hidden: { opacity: 0, x: -20 },
+                  visible: { opacity: 1, x: 0 }
+                }}
+                transition={{ duration: 0.6 }}
+                className="flex items-start"
+              >
+                <div className="flex-shrink-0 w-8 h-8 rounded-full bg-[#ff8a3d] flex items-center justify-center">
+                  <ShieldCheck className="w-5 h-5 text-white" />
+                </div>
+                <div className="ml-6">
+                  <h3 className="text-xl font-semibold text-white mb-2">Verify</h3>
+                  <p className="text-white/70">Runs typecheck and lint, and retries automatically if something&apos;s off</p>
+                </div>
+              </motion.div>
+            </motion.div>
+          </div>
+        </div>
+      </motion.section>
+    </>
+  );
+}
