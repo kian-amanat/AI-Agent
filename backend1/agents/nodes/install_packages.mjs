@@ -182,25 +182,40 @@ function extractInstallRequest(message) {
 
   // Check for shadcn first
   for (const [key, spec] of Object.entries(SPECIAL_PACKAGES)) {
-    if (spec.match.test(msg)) {
-      // Extract component names mentioned after "shadcn"
-      const components = [];
-      for (const comp of SHADCN_COMPONENTS) {
-        if (msg.includes(comp)) components.push(comp);
-      }
-      // Also capture bare words after "add" that look like component names
-      const addMatch = msg.match(/\b(?:add|install)\s+(?:shadcn[-/]?ui?)?\s*([\w\s,-]+)$/i);
-      if (addMatch) {
-        const extra = addMatch[1]
-          .split(/[\s,]+/)
-          .map((s) => s.trim())
-          .filter((s) => s.length > 1 && s !== "shadcn" && s !== "ui" && s !== "and");
-        for (const e of extra) {
-          if (!components.includes(e)) components.push(e);
-        }
-      }
-      return { special: key, spec, components, targetHint: targetHint || spec.targetHint };
+    const specMatch = spec.match.exec(msg);
+    if (!specMatch) continue;
+
+    // Defense in depth: a negated mention ("no shadcn", "do not add shadcn") is an
+    // exclusion, not a request — even if the router misroutes here, this node
+    // should not run a real `npx shadcn add` off a sentence that forbids it.
+    const beforeSpec = msg.slice(Math.max(0, specMatch.index - 40), specMatch.index);
+    if (/\b(do\s*not|don'?t|never|no|without)\b(?:[^.!?\n]*)$/i.test(beforeSpec)) continue;
+
+    // Extract component names, but only from a WINDOW around the actual "shadcn"
+    // mention — scanning the entire message for any of ~50 known component-name
+    // substrings once picked up "button"/"card"/"carousel" from unrelated prose
+    // dozens of words away (a design prompt describing UI cards and nav buttons),
+    // producing a real, unwanted `npx shadcn add button card carousel`.
+    const windowStart = Math.max(0, specMatch.index - 20);
+    const windowEnd = Math.min(msg.length, specMatch.index + specMatch[0].length + 100);
+    const nearbyText = msg.slice(windowStart, windowEnd);
+
+    const components = [];
+    for (const comp of SHADCN_COMPONENTS) {
+      if (nearbyText.includes(comp)) components.push(comp);
     }
+    // Also capture bare words after "add" that look like component names
+    const addMatch = nearbyText.match(/\b(?:add|install)\s+(?:shadcn[-/]?ui?)?\s*([\w\s,-]+)$/i);
+    if (addMatch) {
+      const extra = addMatch[1]
+        .split(/[\s,]+/)
+        .map((s) => s.trim())
+        .filter((s) => s.length > 1 && s !== "shadcn" && s !== "ui" && s !== "and");
+      for (const e of extra) {
+        if (!components.includes(e)) components.push(e);
+      }
+    }
+    return { special: key, spec, components, targetHint: targetHint || spec.targetHint };
   }
 
   // Generic package extraction

@@ -1,0 +1,159 @@
+'use client';
+
+import React from 'react';
+import { motion } from 'framer-motion';
+
+interface GlowHorizonFMProps {
+  variant?: 'top' | 'bottom' | 'left' | 'right';
+  className?: string;
+}
+
+// Centered positioning logic to ensure the glow fills the hero naturally
+const variantStyles: Record<string, React.CSSProperties> = {
+  top: {
+    top: '0%',
+    left: '0%',
+    width: '100%',
+    height: '100%',
+    background: 'radial-gradient(ellipse 80% 50% at 50% 0%, transparent 50%, rgba(0,0,0,0) 100%)',
+  },
+  bottom: {
+    bottom: '0%',
+    left: '0%',
+    width: '100%',
+    height: '100%',
+    background: 'radial-gradient(ellipse 80% 50% at 50% 100%, transparent 50%, rgba(0,0,0,0) 100%)',
+  },
+  left: {
+    top: '0%',
+    left: '0%',
+    width: '100%',
+    height: '100%',
+    background: 'radial-gradient(ellipse 50% 80% at 0% 50%, transparent 50%, rgba(0,0,0,0) 100%)',
+  },
+  right: {
+    top: '0%',
+    right: '0%',
+    width: '100%',
+    height: '100%',
+    background: 'radial-gradient(ellipse 50% 80% at 100% 50%, transparent 50%, rgba(0,0,0,0) 100%)',
+  },
+};
+
+const GlowLayer = ({
+  delay,
+  duration,
+  size,
+  opacity,
+  blur,
+  color,
+  style,
+}: {
+  delay: number;
+  duration: number;
+  size: string;
+  opacity: number;
+  blur: number;
+  color: string;
+  style?: React.CSSProperties;
+}) => (
+  <motion.div
+    className="absolute rounded-full"
+    style={{
+      width: size,
+      height: size,
+      background: `radial-gradient(circle, ${color} 0%, transparent 75%)`,
+      opacity,
+      filter: `blur(${blur}px)`,
+      ...style,
+    }}
+    animate={{
+      scale: [1, 1.08, 1],
+      opacity: [opacity * 0.9, opacity, opacity * 0.9],
+    }}
+    transition={{
+      duration,
+      repeat: Infinity,
+      ease: 'easeInOut',
+      delay,
+    }}
+  />
+);
+
+export default function GlowHorizonFM({
+  variant = 'top',
+  className = '',
+}: GlowHorizonFMProps) {
+  const baseStyle = variantStyles[variant];
+
+  return (
+    <div
+      className={`pointer-events-none absolute inset-0 overflow-hidden ${className}`}
+      style={{ zIndex: 0 }}
+    >
+      {/* Ambient Base Glow */}
+      <motion.div
+        className="absolute inset-0"
+        animate={{
+          opacity: [0.8, 1, 0.8],
+        }}
+        transition={{
+          duration: 8,
+          repeat: Infinity,
+          ease: 'easeInOut',
+        }}
+      >
+        {/* Deep Ambient Layer */}
+        <GlowLayer
+          delay={0}
+          duration={12}
+          size="150%"
+          opacity={0.6}
+          blur={150}
+          color="#ea580c" // Orange
+          style={{
+            ...baseStyle,
+            top: variant === 'top' ? '-20%' : variant === 'bottom' ? 'auto' : '0%',
+            bottom: variant === 'bottom' ? '-20%' : 'auto',
+            left: variant === 'left' ? '-20%' : '0%',
+            right: variant === 'right' ? '-20%' : 'auto',
+          }}
+        />
+        
+        {/* Core Warm Glow */}
+        <GlowLayer
+          delay={1}
+          duration={10}
+          size="100%"
+          opacity={0.8}
+          blur={100}
+          color="#f97316" // Amber
+          style={{
+            ...baseStyle,
+            top: variant === 'top' ? '-10%' : variant === 'bottom' ? 'auto' : '0%',
+            bottom: variant === 'bottom' ? '-10%' : 'auto',
+            left: variant === 'left' ? '-10%' : '0%',
+            right: variant === 'right' ? '-10%' : 'auto',
+          }}
+        />
+
+        {/* Bright Center Highlight */}
+        <GlowLayer
+          delay={2}
+          duration={14}
+          size="60%"
+          opacity={0.9}
+          blur={60}
+          color="#fb923c" // Light Orange/Coral
+          style={{
+            ...baseStyle,
+            top: variant === 'top' ? '0%' : variant === 'bottom' ? 'auto' : '0%',
+            bottom: variant === 'bottom' ? '0%' : 'auto',
+            left: variant === 'left' ? '0%' : '0%',
+            right: variant === 'right' ? '0%' : 'auto',
+          }}
+        />
+      </motion.div>
+    </div>
+  );
+}

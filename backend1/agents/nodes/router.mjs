@@ -48,6 +48,23 @@ const INSTALL_PATTERNS = [
   /\badd\s+(lodash|dayjs|uuid|clsx|nanoid|immer|jotai|valtio|rxjs|mobx|recoil|swr|express|fastify|mongoose|drizzle|redis|cors|helmet|morgan|winston|pino|nodemailer|bcrypt|passport|multer|cheerio|puppeteer|jest|vitest|mocha|prettier|eslint|husky|esbuild|turbo|dotenv|rimraf|concurrently|socket|marked|chokidar|glob|mime|sharp|stripe|twilio|chalk|yargs|commander|inquirer|ora|debug|semver|handlebars|mustache|nunjucks|pug|ejs|joi|yup|serialize)\b/i,
 ];
 
+// A pattern match sitting inside a negation ("do not run any CLI installers, no
+// shadcn") is an explicit EXCLUSION, not a request — this shipped for real: a
+// design prompt that said "no shadcn ... do not add new dependencies" satisfied
+// /\bshadcn\b.*\b(add|...)\b/i verbatim and ran a real `npx shadcn add` against
+// the project, mutating package.json on a request that explicitly forbade it.
+// Same negation-window technique used for file-target matching in agentic_explore.
+function isGenuineInstallRequest(msg) {
+  for (const p of INSTALL_PATTERNS) {
+    const m = p.exec(msg);
+    if (!m) continue;
+    const before = msg.slice(Math.max(0, m.index - 40), m.index);
+    if (/\b(do\s*not|don'?t|never|no|without)\b(?:[^.!?\n]*)$/i.test(before)) continue;
+    return true;
+  }
+  return false;
+}
+
 const TEST_PATTERNS = [
   /\b(run|execute|start|trigger)\s+(the\s+)?(tests?|test suite|unit tests?|integration tests?)\b/i,
   /\b(npm\s+test|npm\s+run\s+test)\b/i,
@@ -168,7 +185,7 @@ function classifyByHeuristicDetailed(message) {
   const hasComponentNameEarly = COMPONENT_NAME.test(cleanMsg);
   if (isMultiTaskRequest(cleanMsg) && (hasFileExtensionEarly || hasComponentNameEarly)) return { intent: "multi_task", confident: true };
 
-  if (INSTALL_PATTERNS.some((p) => p.test(cleanMsg))) return { intent: "install", confident: true };
+  if (isGenuineInstallRequest(cleanMsg)) return { intent: "install", confident: true };
   if (TEST_PATTERNS.some((p) => p.test(cleanMsg))) return { intent: "test", confident: true };
 
   if (isDebugReport(cleanMsg)) return { intent: "investigate", confident: true };
