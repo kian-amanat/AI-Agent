@@ -1,15 +1,23 @@
 ---
-updated: 2026-07-12T15:53:41.255Z
+updated: 2026-07-15T21:56:24.680Z
 ---
 
-- Send Button Behavior: Disabled when input length is 0. Exception: Enabled when AI is responding (`isSending` is true) to allow aborting the stream.
-- Code Change Preference: Prefers minimal changes, specifically requesting to "just add this feature, and don't change any part of the code" beyond the necessary addition.
-- UI Style Preference:
-  - Prefers a "Claude Code" aesthetic for empty states
-  - Settings page saved-state button uses: `border border-emerald-400/80 bg-emerald-400/10 text-emerald-50 shadow-[0_0_18px_rgba(16,185,129,0.25)]`
-- Copy Button Preference: Wants copy buttons on all message bubbles (user and AI)
-- Active Theme Colors: Primary accent set to `#ff6b2b` in `ChatComposer.tsx`
-- Chat Sidebar Behavior: Collapsed shows orange `Plus` icon
-- ChatSidebar Height: Reduced to `h-[calc(100vh-6rem)]`
-- Chat Sidebar Box Shadow: Reduced to a slightly lower intensity for subtle elevation
-- Tooltip Usage: Expects tooltips on interactive elements like buttons for clarity; e.g., added `title="Save your model configuration"` to the Save Changes button in settings.
+- **Landing Page Aesthetic**: Premium Kodo launch screen feel.
+- **Color Palette**: Warm, dark, cinematic, high-end. Strictly orange-red brand style (`#ff6b2b` context).
+- **Prohibited**: No purple, no blue, no cold neon colors.
+- **Style Keywords**: Warm, dark, cinematic, high-end, premium.
+- **Hero Requirement**: `GlowHorizonFM` must be the main visual centerpiece in the first hero section.
+- **File Isolation**: When instructed to modify only one file, do not edit others.
+- **Dependency Constraint**: Do not add new dependencies for landing-page work (only framer-motion and lucide-react are allowed).
+- **Feature Card Design**: 
+  - **Size**: Significantly larger and immersive (85–90vw width, 80–90vh height on desktop).
+  - **Padding**: Generous internal padding (40–64px).
+  - **Typography**: Large typography with strong hierarchy.
+  - **Visuals**: Proportionally large icons/illustrations.
+- **Horizontal Section Specifics**: 
+  - Reduce empty vertical gap in the section.
+  - Cards must be dominant in the viewport but not overflow awkwardly.
+  - Content must remain clearly readable and visually strong.
+  - **Scroll Behavior**: Calibrate scroll so last card is fully visible.
+  - **Shadow/Depth**: Replace flat shadows with richer orange-red ambient shadows and soft glowing depth around cards. Shadows should look premium, warm, and branded, with subtle red-orange light bleeding outward.
+  - **Height**: Increase card height much more so panels feel tall and immersive, close to full-screen.

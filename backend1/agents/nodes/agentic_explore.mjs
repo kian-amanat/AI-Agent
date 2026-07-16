@@ -784,6 +784,11 @@ export async function agenticExploreNode(state) {
   const GENERIC_PATH_SEGMENTS = new Set([
     "page", "pages", "app", "src", "components", "component", "index", "main",
     "styles", "style", "lib", "libs", "hooks", "utils", "chatbot", "backend",
+    // Library/framework names: they appear in nearly every creative/animation
+    // request in THIS project regardless of target file ("Framer Motion" matched
+    // the "motion" segment of motion-footer.tsx and hijacked unrelated navbar
+    // work onto the footer component, repeatedly, for an entire session).
+    "motion", "framer", "gsap", "react", "next", "tailwind", "lucide",
   ]);
   if ((intent === "explore" || intent === "pipeline") && loadedFiles.size === 0 && rememberedTargetFile) {
     const msgLowerCont = cleanMessage.toLowerCase();
@@ -795,7 +800,17 @@ export async function agenticExploreNode(state) {
         .replace(/\.[a-z0-9]+$/, "")
         .split(/[^a-z0-9]+/)
         .filter(s => s.length >= 4 && !GENERIC_PATH_SEGMENTS.has(s));
-      const matched = distinctive.find(s => msgLowerCont.includes(s));
+      // A mention inside a negation ("do not modify ... footer") is an EXCLUSION,
+      // not a continuation signal — this exact case fired: a navbar-only request
+      // explicitly said "do not modify the footer" and the plain substring match
+      // read that as "this message is about the footer."
+      const isNegated = (word) => {
+        const idx = msgLowerCont.indexOf(word);
+        if (idx === -1) return false;
+        const before = msgLowerCont.slice(Math.max(0, idx - 80), idx);
+        return /\b(do\s*not|don'?t|never|excluding|except|other\s+than)\b(?:[^.!?]*)$/i.test(before);
+      };
+      const matched = distinctive.find(s => msgLowerCont.includes(s) && !isNegated(s));
       if (matched) {
         const content = await readFileSafe(path.resolve(root, rememberedEntry.path));
         if (content) {
@@ -828,11 +843,26 @@ export async function agenticExploreNode(state) {
       "manage", "format", "display", "validate", "identify", "loading", "render",
       "access", "fetch", "update", "define", "specify", "provide", "configure",
       "placeholder", "component", "target", "source", "layout", "skeleton",
+      // Library/framework names — same false-positive risk as the remembered-file
+      // continuation above: "Framer Motion" in a request basename-matches any file
+      // whose name contains "motion" (e.g. motion-footer.tsx) regardless of intent.
+      "motion", "framer", "gsap", "react", "next", "tailwind", "lucide",
     ]);
+    // Same negation guard as the remembered-file continuation above: "do not
+    // modify the footer" must not basename-match a "footer" file. Checked against
+    // the lightly-cleaned text (punctuation intact) BEFORE the aggressive strip
+    // below destroys sentence boundaries.
+    const nameMatchLowerForNegation = nameMatchClean.toLowerCase();
+    const isWordNegated = (word) => {
+      const idx = nameMatchLowerForNegation.indexOf(word);
+      if (idx === -1) return false;
+      const before = nameMatchLowerForNegation.slice(Math.max(0, idx - 80), idx);
+      return /\b(do\s*not|don'?t|never|excluding|except|other\s+than)\b(?:[^.!?]*)$/i.test(before);
+    };
     const msgWords = nameMatchClean.toLowerCase()
       .replace(/[^a-z0-9 ]/g, " ")
       .split(/\s+/)
-      .filter(w => w.length >= 4 && !NAME_STOP.has(w));
+      .filter(w => w.length >= 4 && !NAME_STOP.has(w) && !isWordNegated(w));
 
     const allFiles = loadedFiles.size === 0 ? workspaceSnapshot : [];
     // Exclude docs and utility scripts — they match action verbs but are never the right target

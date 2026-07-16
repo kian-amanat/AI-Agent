@@ -1308,11 +1308,18 @@ STRICT OUTPUT RULES:
     if (!code) return null;
 
     code = code.trim();
-    // Sanity: must be a real full file, not just the new fragment — keep the default
-    // export and at least half the original size. Rejecting here is safe: the caller
-    // falls through to the honest "no usable plan" message instead of writing garbage.
-    if (!/export\s+default/.test(code) || code.length < content.length * 0.5) {
-      console.warn(`[PlanChanges] Full-file fallback rejected: ${code.length} chars vs original ${content.length}, hasDefaultExport=${/export\s+default/.test(code)}`);
+    // Sanity: must be a real full file, not just a fragment, and at least half the
+    // original size. Export check matches the ORIGINAL file's style — requiring
+    // "export default" unconditionally rejected every legitimate rewrite of a
+    // named-export-only component (e.g. `export function CinematicFooter()`),
+    // which guaranteed failure on every single request touching that file.
+    const originalHasDefault = /export\s+default/.test(content);
+    const outputHasDefault = /export\s+default/.test(code);
+    const outputHasAnyExport = /export\s+(default|const|function|class|type|interface|\{)/.test(code);
+    const exportOk = originalHasDefault ? outputHasDefault : outputHasAnyExport;
+
+    if (!exportOk || code.length < content.length * 0.5) {
+      console.warn(`[PlanChanges] Full-file fallback rejected: ${code.length} chars vs original ${content.length}, exportOk=${exportOk} (originalHasDefault=${originalHasDefault})`);
       return null;
     }
 
