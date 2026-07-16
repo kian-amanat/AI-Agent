@@ -1,0 +1,145 @@
+'use client';
+
+import React from 'react';
+import { motion } from 'framer-motion';
+
+interface GlowHorizonFMProps {
+  variant?: 'top' | 'bottom' | 'left' | 'right';
+  className?: string;
+}
+
+const variantStyles: Record<string, React.CSSProperties> = {
+  top: {
+    top: '-20%',
+    left: '0%',
+    width: '100%',
+    height: '60%',
+    transform: 'translateY(-50%)',
+  },
+  bottom: {
+    bottom: '-20%',
+    left: '0%',
+    width: '100%',
+    height: '60%',
+    transform: 'translateY(50%)',
+  },
+  left: {
+    top: '0%',
+    left: '-20%',
+    width: '60%',
+    height: '100%',
+    transform: 'translateX(-50%)',
+  },
+  right: {
+    top: '0%',
+    right: '-20%',
+    width: '60%',
+    height: '100%',
+    transform: 'translateX(50%)',
+  },
+};
+
+const GlowLayer = ({
+  delay,
+  duration,
+  size,
+  opacity,
+  blur,
+  color,
+  style,
+}: {
+  delay: number;
+  duration: number;
+  size: string;
+  opacity: number;
+  blur: number;
+  color: string;
+  style?: React.CSSProperties;
+}) => (
+  <motion.div
+    className="absolute rounded-full mix-blend-screen"
+    style={{
+      width: size,
+      height: size,
+      background: `radial-gradient(circle, ${color} 0%, transparent 70%)`,
+      opacity,
+      filter: `blur(${blur}px)`,
+      ...style,
+    }}
+    animate={{
+      scale: [1, 1.15, 1],
+      opacity: [opacity * 0.8, opacity, opacity * 0.8],
+    }}
+    transition={{
+      duration,
+      repeat: Infinity,
+      ease: 'easeInOut',
+      delay,
+    }}
+  />
+);
+
+export default function GlowHorizonFM({
+  variant = 'top',
+  className = '',
+}: GlowHorizonFMProps) {
+  const baseStyle = variantStyles[variant];
+
+  return (
+    <div
+      className={`pointer-events-none absolute inset-0 overflow-hidden ${className}`}
+      style={{ zIndex: 0 }}
+    >
+      {/* Ambient Base Glow */}
+      <motion.div
+        className="absolute inset-0"
+        animate={{
+          opacity: [0.15, 0.25, 0.15],
+        }}
+        transition={{
+          duration: 8,
+          repeat: Infinity,
+          ease: 'easeInOut',
+        }}
+      >
+        <GlowLayer
+          delay={0}
+          duration={10}
+          size="120%"
+          opacity={0.4}
+          blur={120}
+          color="#d97706" // Amber
+          style={baseStyle}
+        />
+        <GlowLayer
+          delay={2}
+          duration={12}
+          size="100%"
+          opacity={0.3}
+          blur={100}
+          color="#ea580c" // Orange
+          style={{
+            ...baseStyle,
+            transform: variant === 'top' || variant === 'bottom'
+              ? 'translateY(20%)'
+              : 'translateX(20%)',
+          }}
+        />
+        <GlowLayer
+          delay={4}
+          duration={14}
+          size="80%"
+          opacity={0.2}
+          blur={80}
+          color="#c2410c" // Dark Orange
+          style={{
+            ...baseStyle,
+            transform: variant === 'top' || variant === 'bottom'
+              ? 'translateY(40%)'
+              : 'translateX(40%)',
+          }}
+        />
+      </motion.div>
+    </div>
+  );
+}

@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess_1783891065826_nlxch3",
+  "requestId": "req_1784195960841_ohhrcv",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-16T09:59:45.591Z",
+  "files": [
+    {
+      "relativePath": "backend1/agents/kodo_graph.mjs",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/backend1/agents/kodo_graph.mjs",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783891065826_nlxch3/req_1784195960841_ohhrcv/backend1__agents__kodo_graph.mjs.snap"
+    }
+  ]
+}

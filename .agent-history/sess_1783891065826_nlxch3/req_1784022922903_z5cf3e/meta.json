@@ -1,0 +1,14 @@
+{
+  "sessionId": "sess_1783891065826_nlxch3",
+  "requestId": "req_1784022922903_z5cf3e",
+  "workspacePath": "/Users/kkanamanat/Developer/ai-sandbox",
+  "createdAt": "2026-07-14T09:56:06.263Z",
+  "files": [
+    {
+      "relativePath": "chatbot/my-chatbot-ui/components/ui/glow-horizon.tsx",
+      "fullPath": "/Users/kkanamanat/Developer/ai-sandbox/chatbot/my-chatbot-ui/components/ui/glow-horizon.tsx",
+      "existedBefore": true,
+      "snapshotPath": "/Users/kkanamanat/Developer/ai-sandbox/.agent-history/sess_1783891065826_nlxch3/req_1784022922903_z5cf3e/chatbot__my-chatbot-ui__components__ui__glow-horizon.tsx.snap"
+    }
+  ]
+}

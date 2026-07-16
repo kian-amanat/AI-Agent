@@ -1,24 +1,12 @@
 ---
-updated: 2026-07-12T00:39:18.699Z
+updated: 2026-07-15T12:38:14.199Z
 ---
 
-- **Backend Integration Pattern**:
-  - Backend logic resides in `backend1` directory.
-  - Correct endpoint implementation for sending messages is `/api/agent/run`.
-  - **Abort Endpoint**: New endpoint required (e.g., `/api/agent/abort`) to handle AbortController signal cancellation.
-  - Frontend `api.ts` must handle the API call to this endpoint.
-  - `ChatComposer.tsx` consumes the function from `api.ts`.
-- **Agent Structure**:
-  - Agents located in `backend1/agents/` (e.g., `kodo_graph.mjs`).
-  - Must follow existing function structure but include AbortController support.
-  - State annotation (`KodoStateAnnotation`) now includes `abortSignal`.
-  - Graph runner (`graph_runner.mjs`) manages signal propagation.
-- **Timeout Configuration**:
-  - `backend1/routes/plannerAgent.mjs` defines `GRAPH_TIMEOUT_MS`.
-  - **Current Value**: 60 seconds (updated from 10 minutes).
-- **Session Tracking**:
-  - `backend1/services/session.service.mjs` now includes a request counter.
-  - Tracks how many agent runs each session has made.
-  - Function added to increment request count and modify session tracking to include this counter.
-- **API Headers**:
-  - **Request Headers**: Include necessary authentication and content type headers.
+- Frontend app lives at `chatbot/my-chatbot-ui`.
+- Landing page file to edit is `chatbot/my-chatbot-ui/app/landing/page.tsx`.
+- Landing page work should stay within the existing stack: React, Next.js, `framer-motion`, `lucide-react`, and installed `gsap` if needed.
+- Do not add new dependencies for landing-page work.
+- Preserve file isolation when a task explicitly targets a single file.
+- **Recent Action**: `app/landing/page.tsx` was completely rewritten to a premium, cinematic, 3D marketing landing page with dark luxury UI, glassmorphism, and motion.
+- **Latest Action**: Security section of landing page redesigned into a premium showcase using `SecurityCard.tsx`. Claims verified against actual codebase features (local-first, user approval, undo/reversible edits).
+- **Latest Action**: Apple-style horizontal storytelling section implemented in `page.tsx` using sticky positioning and scroll-linked transforms.
