@@ -294,7 +294,7 @@ function checkJsxStructuralIssues(ts, srcFile) {
 // burns a full retry on a fresh guess (observed: two attempts, two DIFFERENT syntax
 // errors, task dead). Instead: one targeted LLM call — "here is the file, here is
 // the error, fix ONLY that" — then re-validate. Only a clean result gets written.
-async function attemptSyntaxRepair(brokenContent, syntaxErr, relPath, absPath, modelRoute, emit) {
+export async function attemptSyntaxRepair(brokenContent, syntaxErr, relPath, absPath, modelRoute, emit) {
   try {
     emit?.({ type: "progress", stage: "executing", message: `Auto-repairing syntax error in ${path.basename(relPath)}…` });
     console.log(`[Execute] Attempting fix-forward syntax repair for ${relPath}: ${String(syntaxErr).slice(0, 120)}`);
@@ -427,12 +427,18 @@ function langFromPath(filePath) {
 }
 
 const HUNK_MAX = 3000;
+// Whole-file hunks (rewrite/create/delete) must not be truncated at the same tight
+// cap as a single patch's search/replace text — a 700-line full-file rewrite sliced
+// to 3000 chars shows the UI only ~100 changed lines, making a legitimate full
+// rebuild look like a tiny, wrong patch. Bounded generously, not truncated in practice
+// for any realistic single source file.
+const REWRITE_HUNK_MAX = 150_000;
 
 function buildDiffHunk(patch, original, working) {
   const { kind, search, replace, content, anchor, before, after } = patch;
   switch (kind) {
     case "rewrite_file":
-      return { kind: "rewrite", before: original.slice(0, HUNK_MAX), after: working.slice(0, HUNK_MAX) };
+      return { kind: "rewrite", before: original.slice(0, REWRITE_HUNK_MAX), after: working.slice(0, REWRITE_HUNK_MAX) };
     case "replace_text":
     case "replace_block":
       return { kind: "replace", before: search.slice(0, HUNK_MAX), after: replace.slice(0, HUNK_MAX) };
@@ -447,7 +453,7 @@ function buildDiffHunk(patch, original, working) {
   }
 }
 
-async function writeFileAtomic(absPath, content) {
+export async function writeFileAtomic(absPath, content) {
   await ensureParentDir(absPath);
   const tmpPath = `${absPath}.${process.pid}.tmp`;
   await fs.writeFile(tmpPath, content, "utf-8");
@@ -894,7 +900,7 @@ export async function executeChangesNode(state) {
           result = { success: true };
           diffPayload = {
             action: "create", path: step.path, language: langFromPath(step.path),
-            hunks: [{ kind: "create", after: createContent.slice(0, HUNK_MAX) }],
+            hunks: [{ kind: "create", after: createContent.slice(0, REWRITE_HUNK_MAX) }],
           };
         }
       } else if (step.action === "delete") {
@@ -904,7 +910,7 @@ export async function executeChangesNode(state) {
           result = { success: true };
           diffPayload = {
             action: "delete", path: step.path, language: langFromPath(step.path),
-            hunks: [{ kind: "delete", before: deletedContent.slice(0, HUNK_MAX) }],
+            hunks: [{ kind: "delete", before: deletedContent.slice(0, REWRITE_HUNK_MAX) }],
           };
         } catch (e) {
           result = { success: false, error: e.message };
@@ -1027,7 +1033,7 @@ export async function executeChangesNode(state) {
             result = { success: true };
             diffPayload = {
               action: "edit", path: step.path, language: langFromPath(step.path),
-              hunks: [{ kind: "rewrite", before: original.slice(0, HUNK_MAX), after: rewriteContent.slice(0, HUNK_MAX) }],
+              hunks: [{ kind: "rewrite", before: original.slice(0, REWRITE_HUNK_MAX), after: rewriteContent.slice(0, REWRITE_HUNK_MAX) }],
             };
           }
         }

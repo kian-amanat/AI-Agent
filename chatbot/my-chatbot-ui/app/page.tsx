@@ -27,11 +27,9 @@ import {
 import AuthGuard from "./components/AuthGuard";
 
 import type { Conversation, Message } from "./components/chat/chat-types";
-import { AGENT_STAGES } from "./components/chat/chat-types";
 
 import ChatSidebar from "./components/chat/ChatSidebar";
 import ChatHeader from "./components/chat/ChatHeader";
-import AgentPipelinePanel from "./components/chat/AgentPipelinePanel";
 import ThinkingTrace from "./components/chat/ThinkingTrace";
 import AssistantMessage from "./components/chat/AssistantMessage";
 import TypingIndicator from "./components/chat/TypingIndicator";
@@ -49,9 +47,11 @@ type PermissionMode = "auto" | "ask";
 function toUiMessage(message: ApiMessage): Message {
   let fileDiffs: import("./lib/api").FileDiff[] | undefined;
   try {
-    const raw = (message as any).file_diffs;
-    if (raw) fileDiffs = typeof raw === "string" ? JSON.parse(raw) : raw;
+    const raw = (message as unknown as Record<string, unknown>).file_diffs;
+    if (raw) fileDiffs = typeof raw === "string" ? JSON.parse(raw) : raw as import("./lib/api").FileDiff[];
   } catch { fileDiffs = undefined; }
+
+  const metadata = message as unknown as Record<string, unknown>;
 
   return {
     id: message.id != null ? String(message.id) : crypto.randomUUID(),
@@ -63,11 +63,11 @@ function toUiMessage(message: ApiMessage): Message {
     createdAt: message.created_at,
     metadata: {
       intent: message.intent ?? undefined,
-      requestId: (message as any).request_id ?? (message as any).requestId ?? undefined,
+      requestId: (metadata.request_id as string | undefined) ?? (metadata.requestId as string | undefined) ?? undefined,
       fileDiffs,
       undoResult:
-        ((message as any).undoResult as MessageUndoResult | undefined) ?? undefined,
-      planMetadata: (message as any).planMetadata ?? undefined,
+        (metadata.undoResult as MessageUndoResult | undefined) ?? undefined,
+      planMetadata: metadata.planMetadata ?? undefined,
     },
   };
 }

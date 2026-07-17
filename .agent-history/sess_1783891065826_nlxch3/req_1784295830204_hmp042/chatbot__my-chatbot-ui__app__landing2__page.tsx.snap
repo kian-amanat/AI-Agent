@@ -1,0 +1,687 @@
+'use client';
+
+import React, { useRef, useState, useMemo } from 'react';
+import Link from 'next/link';
+import { motion, useScroll, useTransform, useSpring, Variants, useMotionValue } from 'framer-motion';
+// GlowHorizon component defined locally below
+import { CinematicFooter } from '@/components/ui/motion-footer';
+
+// --- GlowHorizon Components ---
+
+const EASE = [0.16, 1, 0.3, 1] as const;
+const DURATION = 2;
+
+export type GlowHorizonVariant = "top" | "bottom" | "left" | "right";
+
+const VARIANTS: Record<GlowHorizonVariant, { axis: "x" | "y"; scaleAxis: "scaleX" | "scaleY"; enterPct: string; restPct: string }> = {
+  top: { axis: "y", scaleAxis: "scaleY", enterPct: "-100%", restPct: "-50%" },
+  bottom: { axis: "y", scaleAxis: "scaleY", enterPct: "100%", restPct: "50%" },
+  left: { axis: "x", scaleAxis: "scaleX", enterPct: "100%", restPct: "-50%" },
+  right: { axis: "x", scaleAxis: "scaleX", enterPct: "-100%", restPct: "-50%" },
+};
+
+function Arc({ variant, color, size, initialOffset, blur, boxShadow, delay }: {
+  variant: GlowHorizonVariant;
+  color: string;
+  size: string;
+  initialOffset?: string;
+  blur?: number;
+  boxShadow?: string;
+  delay: number;
+}) {
+  const scale = parseFloat(size) / 100;
+  const { axis, enterPct } = VARIANTS[variant];
+  const sign = enterPct.startsWith("-") ? -1 : 1;
+  const startPct = initialOffset ? `${sign * Math.abs(parseFloat(initialOffset) - 50)}%` : undefined;
+
+  return (
+    <motion.div
+      aria-hidden
+      className="absolute inset-0 rounded-[100%]"
+      style={{
+        scale,
+        background: color,
+        ...(blur !== undefined && { filter: `blur(${blur}px)` }),
+        ...(boxShadow && { boxShadow }),
+      }}
+      initial={startPct ? { [axis]: startPct } : false}
+      animate={startPct ? { [axis]: 0 } : undefined}
+      transition={{ duration: DURATION, ease: EASE, delay }}
+    />
+  );
+}
+
+export function GlowHorizon({ className, variant = "top" }: { className?: string; variant?: GlowHorizonVariant }) {
+  const { axis, scaleAxis, enterPct, restPct } = VARIANTS[variant];
+  return (
+    <motion.div
+      className={"absolute w-full h-full " + (className ?? "")}
+      style={{ isolation: "isolate" }}
+      initial={{ [axis]: enterPct, [scaleAxis]: 1.5, opacity: 0, filter: "blur(15px)" }}
+      animate={{ [axis]: restPct, [scaleAxis]: 1, opacity: 1, filter: "blur(0px)" }}
+      transition={{ duration: DURATION, ease: EASE }}
+    >
+            <Arc variant={variant} color="#FF8A3D" size="132%" boxShadow="0px -4px 23px 0px #ff8a3db5" delay={1.2} />
+      <Arc variant={variant} color="#FF5E4D" size="120%" initialOffset="10%" blur={31} delay={0.6} />
+      <Arc variant={variant} color="#FF3D3D" size="124%" initialOffset="10%" blur={21} delay={0} />
+      <Arc variant={variant} color="#000" size="120%" initialOffset="10%" blur={51} delay={0} />
+    </motion.div>
+  );
+}
+
+// --- AnimatedTitleFM ---
+
+const AnimatedTitleFM = ({ open }: { open: boolean }) => {
+  const container: Variants = { hidden: {}, visible: { transition: { staggerChildren: 0.12, delayChildren: 0.1 } } };
+  const item: Variants = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.8, ease: [0.22, 1, 0.36, 1] } } };
+
+  return (
+    <motion.div
+      variants={container}
+      initial="hidden"
+      animate={open ? "visible" : "hidden"}
+      className="text-center"
+    >
+      <motion.h1 variants={item} className="text-5xl md:text-7xl font-bold text-white mb-4">
+        Meet Kodo
+      </motion.h1>
+      <motion.p variants={item} className="text-xl text-white/60">
+        The AI agent that ships your code.
+      </motion.p>
+    </motion.div>
+  );
+};
+
+// --- Reusable Components ---
+
+const GlowCard = ({ children, className = '' }: { children: React.ReactNode; className?: string }) => {
+  const divRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const [opacity, setOpacity] = useState(0);
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!divRef.current) return;
+    const rect = divRef.current.getBoundingClientRect();
+    setPosition({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+    setOpacity(1);
+  };
+
+  const handlePointerLeave = () => {
+    setOpacity(0);
+  };
+
+  return (
+    <div
+      ref={divRef}
+      onPointerMove={handlePointerMove}
+      onPointerLeave={handlePointerLeave}
+      className={`relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.03] backdrop-blur-md transition-transform duration-300 hover:-translate-y-1 hover:border-orange-500/50 ${className}`}
+    >
+      <div
+        className="pointer-events-none absolute inset-0 transition-opacity duration-300"
+        style={{
+          opacity,
+          background: `radial-gradient(600px circle at ${position.x}px ${position.y}px, rgba(255, 106, 61, 0.15), transparent 40%)`,
+        }}
+      />
+      <div className="relative z-10 p-6">
+        {children}
+      </div>
+    </div>
+  );
+};
+
+// --- Workflow Visualization Component ---
+
+const WorkflowNode = ({ 
+  title, 
+  description, 
+  icon, 
+  index, 
+  isActive 
+}: { 
+  title: string; 
+  description: string; 
+  icon: React.ReactNode; 
+  index: number; 
+  isActive: boolean;
+}) => {
+  const divRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const [opacity, setOpacity] = useState(0);
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!divRef.current) return;
+    const rect = divRef.current.getBoundingClientRect();
+    setPosition({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+    setOpacity(1);
+  };
+
+  const handlePointerLeave = () => {
+    setOpacity(0);
+  };
+
+  return (
+    <motion.div
+      initial={{ opacity: 0, y: 20 }}
+      whileInView={{ opacity: 1, y: 0 }}
+      viewport={{ once: true, margin: "-50px" }}
+      transition={{ duration: 0.6, delay: index * 0.15, ease: [0.22, 1, 0.36, 1] }}
+      className="relative group"
+    >
+      <div
+        ref={divRef}
+        onPointerMove={handlePointerMove}
+        onPointerLeave={handlePointerLeave}
+        className={`
+          relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-xl
+          transition-all duration-500 ease-[0.22,1,0.36,1]
+          ${isActive ? 'border-orange-500/30 shadow-[0_0_30px_rgba(255,94,77,0.15)]' : 'hover:border-white/[0.15] hover:shadow-[0_0_20px_rgba(255,94,77,0.1)]'}
+        `}
+      >
+        {/* Liquid Glass Reflection */}
+        <div
+          className="pointer-events-none absolute inset-0 transition-opacity duration-500"
+          style={{
+            opacity,
+            background: `radial-gradient(600px circle at ${position.x}px ${position.y}px, rgba(255, 106, 61, 0.15), transparent 40%)`,
+          }}
+        />
+        
+        {/* Ambient Glow */}
+        <div className="absolute -inset-1 bg-gradient-to-r from-[#ff5e4d] to-[#ff8a3d] opacity-0 group-hover:opacity-10 blur-xl transition-opacity duration-500 -z-10" />
+
+        <div className="relative z-10 p-8 flex flex-col items-center text-center">
+          {/* Icon Container */}
+          <div className={`
+            mb-6 flex h-16 w-16 items-center justify-center rounded-2xl border transition-all duration-300
+            ${isActive 
+              ? 'border-orange-500/30 bg-gradient-to-br from-orange-500/20 to-orange-900/20 text-orange-400 shadow-[0_0_20px_rgba(255,94,77,0.2)]' 
+              : 'border-white/[0.06] bg-white/[0.03] text-white/80 group-hover:border-orange-500/30 group-hover:text-orange-300'}
+          `}>
+            {icon}
+          </div>
+
+          {/* Content */}
+          <h3 className="mb-3 text-xl font-semibold text-white tracking-tight">{title}</h3>
+          <p className="text-sm leading-relaxed text-white/50 max-w-[200px]">{description}</p>
+        </div>
+      </div>
+    </motion.div>
+  );
+};
+
+const WorkflowCanvas = () => {
+  const nodes = [
+    {
+      id: 'explore',
+      title: 'Explore',
+      description: 'Read only the files that matter.',
+      icon: (
+        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <circle cx="11" cy="11" r="8"></circle>
+          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+        </svg>
+      )
+    },
+    {
+      id: 'plan',
+      title: 'Plan',
+      description: 'Design the smallest possible code change.',
+      icon: (
+        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z"></path>
+          <line x1="9" y1="21" x2="15" y2="21"></line>
+        </svg>
+      )
+    },
+    {
+      id: 'execute',
+      title: 'Execute',
+      description: 'Safely apply validated edits.',
+      icon: (
+        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
+        </svg>
+      )
+    },
+    {
+      id: 'verify',
+      title: 'Verify',
+      description: 'Run lint, typecheck and preview automatically.',
+      icon: (
+        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+          <path d="m9 12 2 2 4-4"></path>
+        </svg>
+      )
+    }
+  ];
+
+  return (
+    <div className="relative w-full max-w-7xl mx-auto px-6 py-12">
+      {/* Desktop Layout: Horizontal with SVG Connections */}
+      <div className="hidden md:block relative">
+        <div className="relative flex justify-between items-center">
+          {/* SVG Connections Layer */}
+          <svg className="absolute top-1/2 left-0 w-full h-24 -translate-y-1/2 pointer-events-none z-0" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="lineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stopColor="rgba(255, 94, 77, 0)" />
+                <stop offset="20%" stopColor="rgba(255, 94, 77, 0.5)" />
+                <stop offset="80%" stopColor="rgba(255, 94, 77, 0.5)" />
+                <stop offset="100%" stopColor="rgba(255, 94, 77, 0)" />
+              </linearGradient>
+              <linearGradient id="flowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
+                <stop offset="0%" stopColor="transparent" />
+                <stop offset="50%" stopColor="#ff5e4d" />
+                <stop offset="100%" stopColor="transparent" />
+              </linearGradient>
+            </defs>
+            
+            {/* Static Base Line */}
+            <path 
+              d="M 150 48 C 300 48, 300 48, 450 48 C 600 48, 600 48, 750 48" 
+              stroke="url(#lineGradient)" 
+              strokeWidth="2" 
+              fill="none" 
+            />
+            
+            {/* Animated Flow Line */}
+            <motion.path
+              d="M 150 48 C 300 48, 300 48, 450 48 C 600 48, 600 48, 750 48"
+              stroke="url(#flowGradient)"
+              strokeWidth="2"
+              fill="none"
+              strokeDasharray="100 200"
+              animate={{ strokeDashoffset: [100, -200] }}
+              transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+            />
+          </svg>
+
+          {/* Nodes */}
+          <div className="relative z-10 grid grid-cols-4 gap-8 w-full">
+            {nodes.map((node, index) => (
+              <WorkflowNode
+                key={node.id}
+                index={index}
+                title={node.title}
+                description={node.description}
+                icon={node.icon}
+                isActive={true}
+              />
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* Mobile Layout: Vertical with SVG Connections */}
+      <div className="md:hidden relative">
+        <div className="relative flex flex-col items-center gap-12">
+          {/* Vertical SVG Connection */}
+          <svg className="absolute top-0 left-1/2 w-24 h-full -translate-x-1/2 pointer-events-none z-0" preserveAspectRatio="none">
+            <defs>
+              <linearGradient id="vLineGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stopColor="rgba(255, 94, 77, 0)" />
+                <stop offset="20%" stopColor="rgba(255, 94, 77, 0.5)" />
+                <stop offset="80%" stopColor="rgba(255, 94, 77, 0.5)" />
+                <stop offset="100%" stopColor="rgba(255, 94, 77, 0)" />
+              </linearGradient>
+              <linearGradient id="vFlowGradient" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stopColor="transparent" />
+                <stop offset="50%" stopColor="#ff5e4d" />
+                <stop offset="100%" stopColor="transparent" />
+              </linearGradient>
+            </defs>
+            
+            {/* Static Base Line */}
+            <path 
+              d="M 48 150 C 48 300, 48 300, 48 450 C 48 600, 48 600, 48 750" 
+              stroke="url(#vLineGradient)" 
+              strokeWidth="2" 
+              fill="none" 
+            />
+            
+            {/* Animated Flow Line */}
+            <motion.path
+              d="M 48 150 C 48 300, 48 300, 48 450 C 48 600, 48 600, 48 750"
+              stroke="url(#vFlowGradient)"
+              strokeWidth="2"
+              fill="none"
+              strokeDasharray="100 200"
+              animate={{ strokeDashoffset: [100, -200] }}
+              transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
+            />
+          </svg>
+
+          {/* Nodes */}
+          <div className="relative z-10 w-full">
+            {nodes.map((node, index) => (
+              <div key={node.id} className="relative">
+                <WorkflowNode
+                  index={index}
+                  title={node.title}
+                  description={node.description}
+                  icon={node.icon}
+                  isActive={true}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const HorizontalScrollSection = ({ title, cards }: { title: string; cards: { title: string; description: string }[] }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { scrollYProgress } = useScroll({
+    target: containerRef,
+    offset: ['start end', 'end start'],
+  });
+
+  const scaleX = useSpring(scrollYProgress, {
+    stiffness: 100,
+    damping: 30,
+    restDelta: 0.001,
+  });
+
+  const x = useTransform(scrollYProgress, [0, 1], ['0%', '-50%']);
+
+  return (
+    <section id={title.toLowerCase().replace(/\s+/g, '-')} className="relative py-24">
+      <div className="mb-12 text-center">
+        <h2 className="text-3xl font-bold text-white">{title}</h2>
+      </div>
+      <div ref={containerRef} className="relative h-[400px] w-full overflow-hidden">
+        <motion.div style={{ x }} className="flex gap-6">
+          {cards.map((card, index) => (
+            <div key={index} className="h-[300px] w-[300px] flex-shrink-0">
+              <GlowCard className="h-full">
+                <h3 className="mb-2 text-xl font-semibold text-white">{card.title}</h3>
+                <p className="text-gray-400">{card.description}</p>
+              </GlowCard>
+            </div>
+          ))}
+        </motion.div>
+        <motion.div
+          className="absolute bottom-0 left-0 right-0 h-1 bg-orange-500/50"
+          style={{ scaleX }}
+        />
+      </div>
+    </section>
+  );
+};
+
+// --- Main Page Component ---
+
+export default function Landing2Page() {
+  const [mode, setMode] = useState<'ask' | 'auto'>('ask');
+
+  const features = [
+    { title: 'Multi-task decomposition', description: 'Give it a list of unrelated changes; it splits, plans, and executes each one, sequentially where files overlap so edits never race each other.' },
+    { title: 'Persistent memory', description: 'Learns your project&apos;s patterns, preferences, and past fixes across sessions, stored locally in .kodo/memory.' },
+    { title: 'One-click Undo', description: 'Every write is snapshotted before it happens; revert any change from local history in one click, no confirmation dance.' },
+    { title: 'Ask mode vs Auto mode', description: 'Ask mode shows you the full plan and waits for approval before a single file changes; Auto mode applies changes and reports back.' },
+    { title: 'Web search & page fetching', description: 'Looks up documentation or a reference site you name, extracts its design language — colors, layout, copy — and uses it as ground truth instead of guessing.' },
+    { title: 'Design skills', description: 'A library of curated expert knowledge — UI/UX rules, animation recipes, layout archetypes — automatically pulled in for creative work, extensible with your own .md files.' },
+    { title: 'Self-correcting on failure', description: 'When a generated change breaks, Kodo attempts a targeted "fix forward" repair using the exact error, rather than blindly retrying from scratch.' },
+  ];
+
+  const security = [
+    { title: 'Local-first keys', description: 'Your API key and model config live in a local settings file on your machine; they&apos;re never sent to any Kodo-operated server — there isn&apos;t one, it&apos;s self-hosted.' },
+    { title: 'Workspace sandboxing', description: 'Every file operation is path-resolved and checked against the workspace root; nothing can read or write outside your project directory.' },
+    { title: 'Read-before-write enforcement', description: 'Kodo can only edit a file it has actually opened and read in that turn; it cannot blindly modify a file it never inspected.' },
+    { title: 'Pre-write validation', description: 'Every patch is checked for syntax errors, structural JSX issues, duplicate imports/attributes, undefined components, and broken import paths before it&apos;s written.' },
+    { title: 'Snapshot-before-write', description: 'The original state of every touched file is saved locally before any edit, which is what powers one-click Undo and complete peace of mind.' },
+    { title: 'Verification gate', description: 'Typecheck, lint, and a real render check must pass — or the failure is reported honestly — before Kodo calls a task complete; it doesn&apos;t just claim success.' },
+    { title: 'Bounded, transparent retries', description: 'If verification fails, Kodo retries with the exact error fed back, capped at a small number of attempts, with every step visible in the activity log — no silent infinite loops.' },
+  ];
+
+  return (
+    <div className="min-h-screen bg-[#08080a] text-white">
+            {/* Premium Liquid Glass Navbar */}
+            <motion.nav
+        initial={{ y: -100, opacity: 0 }}
+        animate={{ y: 0, opacity: 1 }}
+        transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
+        className="fixed top-6 left-0 right-0 z-50 flex justify-center px-4"
+      >
+        <motion.div
+          className={`
+            relative flex items-center justify-between
+            w-full max-w-4xl h-14
+            rounded-full
+            border border-white/[0.06]
+            bg-white/[0.05]
+            backdrop-blur-2xl
+            shadow-[0_8px_32px_rgba(0,0,0,0.12),_inset_0_1px_0_rgba(255,255,255,0.05)]
+            overflow-hidden
+            transition-all duration-500
+          `}
+          whileHover={{
+            backgroundColor: "rgba(255, 255, 255, 0.08)",
+            borderColor: "rgba(255, 255, 255, 0.12)",
+            boxShadow: "0 12px 40px rgba(0,0,0,0.15), inset 0 1px 0 rgba(255,255,255,0.08)",
+            transition: { duration: 0.4, ease: [0.22, 1, 0.36, 1] }
+          }}
+        >
+          {/* Liquid Glass Reflections */}
+          <div className="absolute inset-0 pointer-events-none">
+            <div className="absolute top-0 left-0 w-full h-[1px] bg-gradient-to-r from-transparent via-white/20 to-transparent" />
+            <div className="absolute inset-0 bg-gradient-to-b from-white/[0.05] to-transparent opacity-50" />
+          </div>
+
+          {/* Left: Icon Logo */}
+          <div className="flex items-center pl-4 pr-4 z-10">
+            <Link href="/" className="flex items-center gap-3 group">
+              <motion.img
+                src="/icon.png"
+                alt="Kodo"
+                className="w-8 h-8 object-contain"
+                whileHover={{ scale: 1.1, rotate: 5 }}
+                whileTap={{ scale: 0.95 }}
+              />
+            </Link>
+          </div>
+
+          {/* Center: Navigation Links */}
+          <div className="hidden md:flex items-center gap-1 px-2 z-10 flex-1 justify-center">
+            {[
+              { name: 'How it works', href: '#how-it-works' },
+              { name: 'Features', href: '#features' },
+              { name: 'Security', href: '#security' },
+              { name: 'More', href: '#more' },
+            ].map((item) => (
+              <a
+                key={item.name}
+                href={item.href}
+                className="relative px-4 py-2 text-sm font-medium text-white/60 hover:text-white transition-colors rounded-full group"
+              >
+                <span className="relative z-10">{item.name}</span>
+                {/* Hover Background */}
+                <span className="absolute inset-0 rounded-full bg-white/[0.05] opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+              </a>
+            ))}
+          </div>
+
+          {/* Right: CTA Button */}
+          <div className="flex items-center pl-2 pr-4 z-10">
+            <Link
+              href="/"
+              className="group relative flex items-center gap-2 px-5 py-1.5 rounded-full bg-gradient-to-r from-[#ff5e4d] to-[#ff8a3d] text-white text-sm font-semibold shadow-[0_0_20px_rgba(255,94,77,0.2)] hover:shadow-[0_0_30px_rgba(255,94,77,0.4)] transition-all duration-300 overflow-hidden"
+            >
+              <span className="relative z-10 flex items-center gap-2">
+                Open App
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="opacity-70 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform">
+                  <line x1="7" y1="17" x2="17" y2="7"></line>
+                  <polyline points="7 7 17 7 17 17"></polyline>
+                </svg>
+              </span>
+              <div className="absolute inset-0 bg-gradient-to-r from-[#ff8a3d] to-[#ff5e4d] opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
+            </Link>
+          </div>
+        </motion.div>
+      </motion.nav>
+
+      {/* Hero Section */}
+      <section className="relative flex min-h-screen items-center justify-center overflow-hidden">
+        <GlowHorizon />
+        <div className="relative z-10 mx-auto max-w-4xl px-6 text-center flex flex-col items-center justify-center" style={{ marginTop: '-60px' }}>
+          
+          {/* Eyebrow Label */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
+            className="mb-6 text-xs font-semibold uppercase tracking-[0.18em] text-orange-400/80"
+          >
+            MEET KODO
+          </motion.div>
+
+          {/* Headline */}
+          <motion.h1
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
+            className="mb-8 max-w-[600px] text-5xl font-extrabold leading-[0.95] tracking-tight md:text-7xl"
+          >
+            The AI Engineer <br className="hidden md:block" />
+            for Your <span className="bg-gradient-to-r from-[#ff6a3d] to-[#ffa03d] bg-clip-text text-transparent">Codebase</span>
+          </motion.h1>
+
+          {/* Description */}
+          <motion.p
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.8, delay: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="mb-10 max-w-[620px] text-lg leading-relaxed text-white/70 md:text-xl"
+          >
+            Kodo understands your repository, plans surgical code changes, applies them safely, and verifies everything before you review the result.
+          </motion.p>
+
+          {/* Buttons */}
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.8, delay: 0.4, ease: [0.22, 1, 0.36, 1] }}
+            className="mx-auto flex w-fit items-center gap-3 rounded-full border border-white/[0.06] bg-white/[0.03] p-1 backdrop-blur-md"
+          >
+            <button
+              onClick={() => setMode('ask')}
+              className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${mode === 'ask' ? 'bg-orange-500 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              Ask mode
+            </button>
+            <button
+              onClick={() => setMode('auto')}
+              className={`rounded-full px-4 py-2 text-sm font-medium transition-colors ${mode === 'auto' ? 'bg-orange-500 text-white' : 'text-gray-400 hover:text-white'}`}
+            >
+              Auto mode
+            </button>
+          </motion.div>
+          
+          <motion.p
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.5, delay: 0.6 }}
+            className="mt-4 text-sm text-gray-500"
+          >
+            {mode === 'ask' ? 'Review plans before execution.' : 'Automatic changes with full reporting.'}
+          </motion.p>
+        </div>
+      </section>
+
+      {/* Agent Workflow Section - REPLACED */}
+      <section id="how-it-works" className="py-32 relative overflow-hidden">
+        {/* Ambient Background Glow */}
+        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-[#ff5e4d] rounded-full opacity-[0.03] blur-[120px] pointer-events-none" />
+        
+        <div className="mx-auto max-w-7xl px-6 relative z-10">
+          <div className="text-center mb-20">
+            <motion.h2 
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
+              className="text-4xl md:text-5xl font-bold text-white mb-6 tracking-tight"
+            >
+              How Kodo Thinks
+            </motion.h2>
+            <motion.p 
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.6, delay: 0.1, ease: [0.22, 1, 0.36, 1] }}
+              className="text-lg text-white/60 max-w-2xl mx-auto leading-relaxed"
+            >
+              Every request follows a surgical execution pipeline designed to understand your codebase, plan minimal changes, apply them safely, and verify everything before you review the result.
+            </motion.p>
+          </div>
+          
+          <WorkflowCanvas />
+        </div>
+      </section>
+
+      {/* Core Pipeline Section */}
+      <section className="py-24">
+        <div className="mx-auto max-w-7xl px-6">
+          <h2 className="mb-16 text-center text-3xl font-bold text-white">Core Pipeline</h2>
+          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-4">
+            <GlowCard>
+              <div className="mb-4 text-4xl font-bold text-orange-500">01</div>
+              <h3 className="mb-2 text-xl font-semibold text-white">Explore</h3>
+              <p className="text-gray-400">Reads only the files that matter, using code search and project memory, and live web lookups when you reference external sites.</p>
+            </GlowCard>
+            <GlowCard>
+              <div className="mb-4 text-4xl font-bold text-orange-500">02</div>
+              <h3 className="mb-2 text-xl font-semibold text-white">Plan</h3>
+              <p className="text-gray-400">Designs a minimal, surgical patch — no shotgun changes, just the exact diff needed.</p>
+            </GlowCard>
+            <GlowCard>
+              <div className="mb-4 text-4xl font-bold text-orange-500">03</div>
+              <h3 className="mb-2 text-xl font-semibold text-white">Execute</h3>
+              <p className="text-gray-400">Applies the change, validated before it ever touches disk.</p>
+            </GlowCard>
+            <GlowCard>
+              <div className="mb-4 text-4xl font-bold text-orange-500">04</div>
+              <h3 className="mb-2 text-xl font-semibold text-white">Verify</h3>
+              <p className="text-gray-400">Runs typecheck, lint, and a live render check against your dev server, retrying automatically if something&apos;s off.</p>
+            </GlowCard>
+          </div>
+        </div>
+      </section>
+
+      {/* Features Section */}
+      <HorizontalScrollSection title="Features" cards={features} />
+
+      {/* Security Section */}
+      <HorizontalScrollSection title="Security" cards={security} />
+
+      {/* Get Started Section */}
+      <section className="py-24">
+        <div className="mx-auto max-w-4xl px-6 text-center">
+          <h2 className="mb-12 text-3xl font-bold text-white">Get Started</h2>
+          <div className="grid grid-cols-1 gap-8 md:grid-cols-2">
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-8 backdrop-blur-md">
+              <h3 className="mb-4 text-xl font-semibold text-white">Step 1: Configure</h3>
+              <p className="text-gray-400">Open Settings and add your model, API key, and base URL — stored locally, never sent anywhere else.</p>
+            </div>
+            <div className="rounded-xl border border-white/[0.06] bg-white/[0.03] p-8 backdrop-blur-md">
+              <h3 className="mb-4 text-xl font-semibold text-white">Step 2: Chat</h3>
+              <p className="text-gray-400">Chat naturally — describe what you want changed, Kodo explores, plans, executes, and verifies automatically.</p>
+            </div>
+          </div>
+          <div className="mt-12 rounded-xl border border-white/[0.06] bg-[#0a0a0c] p-6 text-left">
+            <div className="mb-2 text-xs text-gray-500">Example Prompt</div>
+            <code className="text-sm text-orange-400">&quot;Refactor the login component to use the new design system tokens and add a loading state.&quot;</code>
+          </div>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <CinematicFooter />
+    </div>
+  );
+}

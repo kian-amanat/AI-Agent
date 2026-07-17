@@ -1,5 +1,6 @@
 ---
 name: ui-ux-pro
+description: Senior-designer rules for premium dark UI — typography scale, whitespace, hierarchy, this project's exact dark-theme values, motion taste. Load for any visual design, layout, or "make it premium" request.
 triggers: design, premium, landing, hero, ui, ux, beautiful, modern, restyle, redesign, layout, section, page, marketing
 ---
 ## UI/UX PRO RULES (apply all — this is what separates premium from template)

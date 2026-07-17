@@ -9,6 +9,7 @@ import fs from "fs/promises";
 import { fileURLToPath } from "url";
 import { spawn } from "child_process";
 import { AIMessage } from "@langchain/core/messages";
+import { attemptSyntaxRepair, writeFileAtomic } from "./execute_changes.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -309,8 +310,44 @@ const VALIDATION_FIX_HINTS = [
    `Hint: the file uses React.something (e.g. React.useRef) without importing React. Either add \`import React from 'react'\` or — better — import the hook directly: \`import { useRef } from 'react'\` and call useRef(null).`],
 ];
 
+// ── Verify-time fix-forward repair (Claude Code approach, extended) ────────────
+// execute_changes.mjs already does this for syntax errors caught BEFORE a write —
+// hold the broken content and the exact error, one targeted repair beats a blind
+// re-plan. Typecheck errors (caught HERE, after the write, since tsc needs the file
+// on disk) never got that treatment: a coordinated change (e.g. a JSX prop usage +
+// its type declaration) that failed typecheck used to burn a full re-plan retry
+// instead of one cheap "fix this exact tsc error" call — and a two-retry budget is
+// tight enough that this alone could exhaust it. Reuses the same repair function.
+function extractFileSpecificErrors(combinedOutput, relFilePath) {
+  const lines = String(combinedOutput || "").split("\n");
+  const escaped = relFilePath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const filePattern = new RegExp(`^${escaped}\\(`);
+  const matched = lines.filter((l) => filePattern.test(l.replace(/\\/g, "/")));
+  return matched.slice(0, 10).join("\n");
+}
+
+async function attemptTypecheckAutoRepair({ errorsInTouched, combinedOutput, projectDir, modelRoute, emit }) {
+  const repaired = [];
+  for (const relFile of errorsInTouched.slice(0, 3)) {
+    const fileErrors = extractFileSpecificErrors(combinedOutput, relFile);
+    if (!fileErrors) continue;
+
+    const absPath = path.resolve(projectDir, relFile);
+    const content = await readFileSafe(absPath);
+    if (!content) continue;
+
+    const fixed = await attemptSyntaxRepair(content, fileErrors, relFile, absPath, modelRoute, emit);
+    if (fixed && fixed !== content) {
+      await writeFileAtomic(absPath, fixed);
+      repaired.push(relFile);
+      console.log(`[Verify] Auto-repair applied to ${relFile} for typecheck error(s)`);
+    }
+  }
+  return repaired;
+}
+
 export async function verifyNode(state) {
-  const { executionResults, plan, workspacePath, emit, retryCount, userMessage } = state;
+  const { executionResults, plan, workspacePath, emit, retryCount, userMessage, modelRoute } = state;
 
   emit?.({ type: "progress", stage: "verifying", message: "🔍 Verifying changes..." });
 
@@ -444,11 +481,11 @@ export async function verifyNode(state) {
     }
 
     for (const cmd of validationCommands) {
-      const result = await runCommand(cmd.command, cmd.args, projectDir, 120000);
+      let result = await runCommand(cmd.command, cmd.args, projectDir, 120000);
       validationResults.push({ ...result, projectDir: projectLabel });
 
       if (!result.ok) {
-        const combinedOutput = [
+        let combinedOutput = [
           result.stdout ? result.stdout.slice(-3000) : "",
           result.stderr ? result.stderr.slice(-3000) : "",
         ]
@@ -492,6 +529,37 @@ export async function verifyNode(state) {
               message: `ℹ️ Typecheck found pre-existing errors in unrelated files (${errorFiles.slice(0, 2).join(", ")}${errorFiles.length > 2 ? "…" : ""}) — not caused by this change.`,
             });
             continue;
+          }
+
+          // Fix-forward before failing: hold the broken file AND the exact tsc error,
+          // try ONE targeted repair (same approach execute_changes uses for pre-write
+          // syntax errors), then recheck. Cheaper and more reliable than burning a full
+          // re-plan retry on a coordinated change (e.g. a JSX prop usage plus its type).
+          if (errorsInTouched.length > 0 && modelRoute) {
+            const repairedFiles = await attemptTypecheckAutoRepair({
+              errorsInTouched, combinedOutput, projectDir, modelRoute, emit,
+            });
+            if (repairedFiles.length > 0) {
+              const recheck = await runCommand(cmd.command, cmd.args, projectDir, 120000);
+              validationResults.push({ ...recheck, projectDir: projectLabel });
+              if (recheck.ok) {
+                emit?.({
+                  type: "progress",
+                  stage: "verified",
+                  message: `🔧 Auto-repaired typecheck error(s) in ${repairedFiles.join(", ")}`,
+                });
+                console.log(`[Verify] Auto-repair resolved typecheck failure(s) in: ${repairedFiles.join(", ")}`);
+                continue;
+              }
+              // Still broken after the repair attempt — report against the FRESH
+              // output, not the stale pre-repair one, so the retry planner (if any)
+              // sees current reality instead of an error that no longer matches disk.
+              result = recheck;
+              combinedOutput = [
+                recheck.stdout ? recheck.stdout.slice(-3000) : "",
+                recheck.stderr ? recheck.stderr.slice(-3000) : "",
+              ].filter(Boolean).join("\n");
+            }
           }
         }
 
