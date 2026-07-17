@@ -86,9 +86,9 @@ export default function GlowHorizonFM({
 }: GlowHorizonFMProps) {
   const baseStyle = variantStyles[variant];
 
-  return (
+    return (
     <div
-      className={`pointer-events-none absolute inset-0 overflow-hidden ${className}`}
+      className={`pointer-events-none absolute inset-0 ${className}`}
       style={{ zIndex: 0 }}
     >
       {/* Ambient Base Glow */}
@@ -103,55 +103,55 @@ export default function GlowHorizonFM({
           ease: 'easeInOut',
         }}
       >
-        {/* Deep Ambient Layer */}
+                {/* Deep Ambient Layer */}
         <GlowLayer
-          delay={0}
-          duration={12}
-          size="150%"
-          opacity={0.6}
-          blur={150}
-          color="#ea580c" // Orange
-          style={{
-            ...baseStyle,
-            top: variant === 'top' ? '-20%' : variant === 'bottom' ? 'auto' : '0%',
-            bottom: variant === 'bottom' ? '-20%' : 'auto',
-            left: variant === 'left' ? '-20%' : '0%',
-            right: variant === 'right' ? '-20%' : 'auto',
-          }}
-        />
-        
-        {/* Core Warm Glow */}
-        <GlowLayer
-          delay={1}
-          duration={10}
-          size="100%"
-          opacity={0.8}
-          blur={100}
-          color="#f97316" // Amber
-          style={{
-            ...baseStyle,
-            top: variant === 'top' ? '-10%' : variant === 'bottom' ? 'auto' : '0%',
-            bottom: variant === 'bottom' ? '-10%' : 'auto',
-            left: variant === 'left' ? '-10%' : '0%',
-            right: variant === 'right' ? '-10%' : 'auto',
-          }}
+        delay={0}
+        duration={12}
+        size="150%"
+        opacity={0.85}
+        blur={120}
+        color="#dc2626" // Red
+        style={{
+        ...baseStyle,
+        top: variant === 'top' ? '-20%' : variant === 'bottom' ? 'auto' : '0%',
+        bottom: variant === 'bottom' ? '-20%' : 'auto',
+        left: variant === 'left' ? '-20%' : '0%',
+        right: variant === 'right' ? '-20%' : 'auto',
+        }}
         />
 
-        {/* Bright Center Highlight */}
+                {/* Core Warm Glow */}
         <GlowLayer
-          delay={2}
-          duration={14}
-          size="60%"
-          opacity={0.9}
-          blur={60}
-          color="#fb923c" // Light Orange/Coral
-          style={{
-            ...baseStyle,
-            top: variant === 'top' ? '0%' : variant === 'bottom' ? 'auto' : '0%',
-            bottom: variant === 'bottom' ? '0%' : 'auto',
-            left: variant === 'left' ? '0%' : '0%',
-            right: variant === 'right' ? '0%' : 'auto',
-          }}
+        delay={1}
+        duration={10}
+        size="100%"
+        opacity={0.95}
+        blur={90}
+        color="#ea580c" // Orange
+        style={{
+        ...baseStyle,
+        top: variant === 'top' ? '-10%' : variant === 'bottom' ? 'auto' : '0%',
+        bottom: variant === 'bottom' ? '-10%' : 'auto',
+        left: variant === 'left' ? '-10%' : '0%',
+        right: variant === 'right' ? '-20%' : 'auto',
+        }}
+        />
+
+                {/* Bright Center Highlight */}
+        <GlowLayer
+        delay={2}
+        duration={14}
+        size="60%"
+        opacity={1}
+        blur={50}
+        color="#f97316" // Amber
+        style={{
+        ...baseStyle,
+        top: variant === 'top' ? '0%' : variant === 'bottom' ? 'auto' : '0%',
+        bottom: variant === 'bottom' ? '0%' : 'auto',
+        left: variant === 'left' ? '0%' : '0%',
+        right: variant === 'right' ? '0%' : 'auto',
+        }}
         />
       </motion.div>
     </div>

@@ -1,23 +1,20 @@
 ---
-updated: 2026-07-15T21:56:24.680Z
+updated: 2026-07-17T13:45:50.715Z
 ---
 
-- **Landing Page Aesthetic**: Premium Kodo launch screen feel.
-- **Color Palette**: Warm, dark, cinematic, high-end. Strictly orange-red brand style (`#ff6b2b` context).
-- **Prohibited**: No purple, no blue, no cold neon colors.
-- **Style Keywords**: Warm, dark, cinematic, high-end, premium.
-- **Hero Requirement**: `GlowHorizonFM` must be the main visual centerpiece in the first hero section.
-- **File Isolation**: When instructed to modify only one file, do not edit others.
-- **Dependency Constraint**: Do not add new dependencies for landing-page work (only framer-motion and lucide-react are allowed).
-- **Feature Card Design**: 
-  - **Size**: Significantly larger and immersive (85–90vw width, 80–90vh height on desktop).
-  - **Padding**: Generous internal padding (40–64px).
-  - **Typography**: Large typography with strong hierarchy.
-  - **Visuals**: Proportionally large icons/illustrations.
-- **Horizontal Section Specifics**: 
-  - Reduce empty vertical gap in the section.
-  - Cards must be dominant in the viewport but not overflow awkwardly.
-  - Content must remain clearly readable and visually strong.
-  - **Scroll Behavior**: Calibrate scroll so last card is fully visible.
-  - **Shadow/Depth**: Replace flat shadows with richer orange-red ambient shadows and soft glowing depth around cards. Shadows should look premium, warm, and branded, with subtle red-orange light bleeding outward.
-  - **Height**: Increase card height much more so panels feel tall and immersive, close to full-screen.
+- **Landing Page Aesthetic**: Premium dark, cinematic, high-end (Linear/Vercel/Apple style).
+- **Color Palette**: Warm, dark, orange-red brand (`#ff6b2b` context). No purple/blue/cold neon.
+- **Animation**: `framer-motion` exclusively.
+- **Component Constraints**: 
+  - Do NOT add new dependencies (only `framer-motion`, `lucide-react`).
+  - Hero: `GlowHorizonFM` remains the main visual centerpiece. **Do NOT redesign from scratch**; refine existing structure for premium feel.
+  - Card Design: Immersive, large (85-90vw), generous padding, strong typography.
+- **Navbar Specifics**:
+  - **Height**: Slimmer, reduced to `h-12` (reduced padding and font size).
+  - **Background**: Liquid glass effect with higher transparency (`bg-white/[0.05]`).
+  - **Borders**: Very soft white border (`border-white/[0.06]`).
+  - **Effects**: Strong backdrop blur, gentle inner highlight, faint outer glow. No heavy dark fill.
+  - **Visibility**: Visible across the whole page, wider width.
+  - **Logo**: Use `/icon.png` (pure icon, no background, no circle, no container) instead of "Kodo" text. Size: 28–34px, vertically centered.
+  - **Links**: Includes 'More' link.
+- **Hero Layout Preference**: Content should be positioned slightly upward so the glow frames the CTA area, not the paragraph text.

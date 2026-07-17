@@ -142,6 +142,21 @@ const EXPLORATION_TOOLS = [
   {
     type: "function",
     function: {
+      name: "load_skill",
+      description:
+        "Load a skill — a curated expert knowledge pack (design rules, code recipes, domain guidance). Available skills are listed with descriptions in the system prompt. Load every skill relevant to the request BEFORE calling ready_to_plan; its guidance is carried into planning.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: { type: "string", description: "Skill name exactly as shown in the AVAILABLE SKILLS list" },
+        },
+        required: ["name"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "web_search",
       description:
         "Search the web. Use when the user asks to research something, find examples, or locate a reference website. Returns titles, URLs, and snippets — follow up with fetch_url on the most relevant result. Do NOT use for questions about this codebase.",
@@ -276,6 +291,65 @@ async function webSearch(query) {
     return { success: true, query: q, results };
   } catch (err) {
     return { success: false, error: `Search failed: ${String(err?.message || err).slice(0, 120)}` };
+  }
+}
+
+// ── Skills (Claude Code approach: model-SELECTED knowledge packs) ─────────────
+// Claude Code lists every skill's name + description in the system prompt and
+// lets the model decide which to load via a Skill tool. Kodo mirrors that here:
+// loadSkillIndex builds the listing, load_skill is the tool. Skills live in two
+// places, also mirroring Claude Code's user/project split:
+//   built-in:  backend1/agents/skills/*.md
+//   project:   <workspace>/.kodo/skills/*.md   (user-owned, per-project)
+const BUILTIN_SKILLS_DIR = path.join(__dirname, "..", "skills");
+
+function parseSkillFrontmatter(raw) {
+  const fm = raw.match(/^---\n([\s\S]*?)\n---\n?/);
+  const body = raw.replace(/^---\n[\s\S]*?\n---\n?/, "").trim();
+  const get = (key) => (fm?.[1].match(new RegExp(`^${key}:\\s*(.+)$`, "m"))?.[1] || "").trim();
+  return { name: get("name"), description: get("description"), triggers: get("triggers"), body };
+}
+
+function skillDirsFor(workspacePath) {
+  const dirs = [BUILTIN_SKILLS_DIR];
+  if (workspacePath) dirs.push(path.join(workspacePath, ".kodo", "skills"));
+  return dirs;
+}
+
+async function loadSkillIndex(workspacePath) {
+  const index = [];
+  const seen = new Set();
+  for (const dir of skillDirsFor(workspacePath)) {
+    let entries = [];
+    try { entries = await fs.readdir(dir); } catch { continue; }
+    for (const fileName of entries) {
+      if (!fileName.endsWith(".md")) continue;
+      try {
+        const raw = await fs.readFile(path.join(dir, fileName), "utf-8");
+        const { name, description } = parseSkillFrontmatter(raw);
+        const skillName = name || fileName.replace(/\.md$/, "");
+        if (seen.has(skillName)) continue; // project skill of same name shadows nothing; first wins
+        seen.add(skillName);
+        index.push({ name: skillName, description: description || "(no description)", file: path.join(dir, fileName) });
+      } catch { /* skip unreadable */ }
+    }
+  }
+  return index;
+}
+
+async function loadSkillByName(workspacePath, skillName) {
+  const wanted = String(skillName || "").trim().toLowerCase();
+  if (!wanted) return null;
+  const index = await loadSkillIndex(workspacePath);
+  const hit =
+    index.find((s) => s.name.toLowerCase() === wanted) ||
+    index.find((s) => s.name.toLowerCase().includes(wanted) || wanted.includes(s.name.toLowerCase()));
+  if (!hit) return null;
+  try {
+    const raw = await fs.readFile(hit.file, "utf-8");
+    return { name: hit.name, body: parseSkillFrontmatter(raw).body };
+  } catch {
+    return null;
   }
 }
 
@@ -484,6 +558,12 @@ async function executeTool(name, args, root, workspaceSnapshot) {
       case "fetch_url":
         return await fetchUrl(args.url);
 
+      case "load_skill": {
+        const skill = await loadSkillByName(root, args.name);
+        if (!skill) return { success: false, error: `No skill named "${args.name}" — use a name from the AVAILABLE SKILLS list in the system prompt.` };
+        return { success: true, name: skill.name, content: skill.body.slice(0, MAX_TOOL_OUTPUT_CHARS) };
+      }
+
       default:
         return { success: false, error: `Unknown tool: ${name}` };
     }
@@ -494,7 +574,7 @@ async function executeTool(name, args, root, workspaceSnapshot) {
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-function buildSystemPrompt(cleanMessage, workspaceTree, memoryIndex = "") {
+function buildSystemPrompt(cleanMessage, workspaceTree, memoryIndex = "", skillIndex = []) {
   const snapshot = workspaceTree
     .filter(f => f.isDir ? f.path.split("/").length <= 2 : true)
     .slice(0, 120)
@@ -508,6 +588,13 @@ ${memoryIndex}
 Use read_memory_topic to load a full topic. Use list_memory_topics to see all topics.\n`
     : "";
 
+  // Claude Code approach: list every skill's name + description and let the MODEL
+  // decide which to load — semantic selection, not keyword matching.
+  const skillSection = skillIndex.length
+    ? `\nAVAILABLE SKILLS (curated expert packs — load with load_skill BEFORE ready_to_plan when relevant):
+${skillIndex.map((s) => `• ${s.name} — ${s.description}`).join("\n")}\n`
+    : "";
+
   return `You are Kodo, an autonomous code agent in EXPLORATION MODE.
 
 MISSION: Gather the precise context needed to implement the user's request, then signal ready.
@@ -519,14 +606,15 @@ TOOLS:
 • ready_to_plan      — call when you have enough context; ends exploration
 • list_memory_topics — see what Kodo has learned about this project in past sessions
 • read_memory_topic  — load full details for a memory topic (patterns, preferences, context)
+• load_skill         — load an expert knowledge pack by name (see AVAILABLE SKILLS below)
 • web_search         — search the web (research, examples, reference sites); follow up with fetch_url
 • fetch_url          — fetch a web page: readable text + design signals (colors, fonts, gradients)
-${memorySection}
+${memorySection}${skillSection}
 STRATEGIES BY REQUEST TYPE:
 
 BUG FIX: grep for the error text → read the file with the bug → follow imports to root cause
 EDIT/REFACTOR: find the target file → read it → read its imports if relevant
-UI CHANGE: read the component AND its nearest layout/styles file
+UI CHANGE: read the component AND its nearest layout/styles file — and load any design/animation skill that matches the request
 FEATURE: grep for similar existing code → read it → identify all files to touch
 REPEAT TASK: if memory shows you've worked here before, load the relevant topic first
 WEB REFERENCE: if the user mentions an external website or asks to research something, use web_search / fetch_url — the fetched design signals (colors, fonts, gradients) become the reference for the change. Never use web tools for questions about this codebase.
@@ -630,7 +718,8 @@ export async function agenticExploreNode(state) {
 
   // Load memory index (first 200 lines of MEMORY.md) and inject into system prompt
   const memoryIndex = workspacePath ? await loadMemoryIndex(workspacePath) : "";
-  const systemPrompt = buildSystemPrompt(cleanMessage, workspaceTree, memoryIndex);
+  const skillIndex = await loadSkillIndex(workspacePath || root);
+  const systemPrompt = buildSystemPrompt(cleanMessage, workspaceTree, memoryIndex, skillIndex);
 
   // Seed the conversation — include remembered file as context if available
   const initialContent = rememberedTargetFile
@@ -640,6 +729,7 @@ export async function agenticExploreNode(state) {
   const conversationMessages = [{ role: "user", content: initialContent }];
 
   const loadedFiles = new Map(); // relPath → { path, content, size, score }
+  const loadedSkillPacks = new Map(); // skill name → body (carried into planning)
   let readySignal = null;
   let iteration = 0;
 
@@ -1061,6 +1151,11 @@ export async function agenticExploreNode(state) {
         emit?.({ type: "progress", stage: "exploring", message: `web search: "${String(args.query || "").slice(0, 60)}" — ${result.results?.length ?? 0} result(s)` });
       } else if (toolName === "fetch_url") {
         emit?.({ type: "progress", stage: "exploring", message: `fetch ${String(args.url || "").slice(0, 80)}` });
+      } else if (toolName === "load_skill") {
+        emit?.({ type: "progress", stage: "exploring", message: `skill: ${result.success ? result.name : String(args.name || "")}` });
+        if (result.success && result.content) {
+          loadedSkillPacks.set(result.name, result.content);
+        }
       }
 
       // Cap tool output so we don't blow up the context window
@@ -1119,6 +1214,17 @@ export async function agenticExploreNode(state) {
   // ground truth for the planner, never edit targets.
   for (const w of webRefs) {
     fileContextMap.set(w.path, w);
+  }
+
+  // Skills the model chose to load — carried into planning as guidance entries.
+  for (const [skillName, body] of loadedSkillPacks) {
+    fileContextMap.set(`skill:${skillName}`, {
+      path: `skill:${skillName}`,
+      content: body,
+      size: body.length,
+      score: 170,
+      summary: "Expert skill guidance the agent loaded for this task — APPLY it; this is guidance, not an editable file.",
+    });
   }
 
   // Eagerly load priority files listed in ready_to_plan that weren't read yet

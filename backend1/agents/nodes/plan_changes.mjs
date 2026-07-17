@@ -370,6 +370,9 @@ function scoreFileForPrompt(file, cleanMsg, rememberedTargetFile, investigation)
   // content ground truth the user pointed at — they must survive the file cut.
   if (/^https?:\/\//.test(fp)) score += 180;
 
+  // Skill guidance entries the explore agent chose to load — same protection.
+  if (/^skill:/.test(fp)) score += 170;
+
   if (rememberedTargetFile) {
     const remembered = String(rememberedTargetFile).toLowerCase();
     const rememberedBase = pathBase(remembered);
@@ -540,20 +543,30 @@ async function extractDesignTokens(workspacePath, fileContext) {
 // recipes pasted from a library) — no code changes needed.
 const SKILLS_DIR = path.join(__dirname, "..", "skills");
 
-async function loadDesignSkills(cleanMsg) {
+async function loadDesignSkills(cleanMsg, workspacePath) {
   try {
-    const entries = await fs.readdir(SKILLS_DIR);
     const msg = String(cleanMsg || "").toLowerCase();
     const scored = [];
+    const seen = new Set();
 
-    for (const name of entries) {
-      if (!name.endsWith(".md")) continue;
-      const raw = await fs.readFile(path.join(SKILLS_DIR, name), "utf-8");
-      const fm = raw.match(/^---\n([\s\S]*?)\n---\n?/);
-      const triggers = (fm?.[1].match(/triggers:\s*(.+)/)?.[1] || "")
-        .split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
-      const hits = triggers.filter((t) => msg.includes(t)).length;
-      if (hits > 0) scored.push({ name, hits, body: raw.replace(/^---\n[\s\S]*?\n---\n?/, "").trim() });
+    // Two skill locations, mirroring Claude Code's built-in/project split:
+    // the agent's own packs plus user-owned per-project packs in .kodo/skills.
+    const dirs = [SKILLS_DIR];
+    if (workspacePath) dirs.push(path.join(workspacePath, ".kodo", "skills"));
+
+    for (const dir of dirs) {
+      let entries = [];
+      try { entries = await fs.readdir(dir); } catch { continue; }
+      for (const name of entries) {
+        if (!name.endsWith(".md") || seen.has(name)) continue;
+        seen.add(name);
+        const raw = await fs.readFile(path.join(dir, name), "utf-8");
+        const fm = raw.match(/^---\n([\s\S]*?)\n---\n?/);
+        const triggers = (fm?.[1].match(/triggers:\s*(.+)/)?.[1] || "")
+          .split(",").map((t) => t.trim().toLowerCase()).filter(Boolean);
+        const hits = triggers.filter((t) => msg.includes(t)).length;
+        if (hits > 0) scored.push({ name, hits, body: raw.replace(/^---\n[\s\S]*?\n---\n?/, "").trim() });
+      }
     }
 
     scored.sort((a, b) => b.hits - a.hits);
@@ -1074,6 +1087,18 @@ function canonicalizePlanPath(plannedPath, fileContext, rememberedTargetFile) {
 function applyPathCanonicalization(plan, fileContext, rememberedTargetFile) {
   return (plan || []).map((item) => {
     if (!item?.path) return item;
+
+    // "create" targets a NEW file by definition. canonicalizePlanPath's byBase/byEnd
+    // fallbacks exist to fix an EDIT step whose path is slightly off from an already-
+    // loaded file — for a create step they instead silently redirect the write onto
+    // an unrelated existing file that happens to share the same filename (observed:
+    // a request to create "landing2/page.tsx" got snapped onto the already-loaded
+    // "landing/page.tsx" and overwrote the real page with a stub). Only normalize
+    // slashes for creates — never fuzzy-match onto an existing path.
+    if (item.action === "create") {
+      return { ...item, path: String(item.path || "").trim().replace(/\\/g, "/").replace(/^\.\//, "") };
+    }
+
     return {
       ...item,
       path: canonicalizePlanPath(item.path, fileContext, rememberedTargetFile),
@@ -1555,7 +1580,7 @@ export async function planChangesNode(state) {
   // packs in the prompt, and (if configured) the strongest model the user has —
   // everything else is unchanged.
   const designTokens = mode === "creative" ? await extractDesignTokens(workspacePath, fileContext) : "";
-  const designSkills = mode === "creative" ? await loadDesignSkills(cleanMsg) : "";
+  const designSkills = mode === "creative" ? await loadDesignSkills(cleanMsg, workspacePath) : "";
   const designGuidance = designTokens + designSkills;
   const planModelRoute = resolveCreativeModelRoute(modelRoute, mode);
 
