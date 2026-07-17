@@ -1,5 +1,6 @@
 ---
 name: landing-hero-recipes
+description: Named hero-section archetypes (OpenAI-minimal, Linear-glow, Vercel-grid) with exact layout skeletons. Load when building or restyling a hero, or when the user says "feel like / look like" a reference site.
 triggers: hero, landing, openai, linear, vercel, stripe, marketing, headline, cta, restyle, feel like, look like
 ---
 ## HERO ARCHETYPES (pick the ONE that matches the requested reference; adapt colors to this project's palette)

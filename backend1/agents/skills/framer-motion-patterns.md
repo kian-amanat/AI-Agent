@@ -1,5 +1,6 @@
 ---
 name: framer-motion-patterns
+description: Known-good framer-motion code recipes for this project — staggered entrances, scroll-jacking, scroll progress bars, 3D cursor tilt, self-drawing lines, ambient glows, spring/easing tokens. Load for ANY animation or motion work.
 triggers: animation, animate, motion, scroll, stagger, parallax, hover, transition, reveal, tilt, 3d, spring, framer
 ---
 ## FRAMER MOTION RECIPES (use these exact patterns — they are known-good in this project)

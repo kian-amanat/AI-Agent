@@ -125,6 +125,10 @@ function withErrorBoundary(nodeName, fn) {
 
 function routerEdge(state) {
   switch (state.intent) {
+    case "scaffold_create":
+      // Trivial file/folder creation — router already built the plan directly,
+      // skip agentic_explore and plan_changes (no LLM call needed for this at all).
+      return "execute_changes";
     case "multi_task":
       return "multi_task_runner";
     case "investigate":
@@ -168,13 +172,14 @@ export function buildKodoGraph() {
   // Entry point
   graph.addEdge(START, "router");
 
-  // Router dispatches to one of six paths
+  // Router dispatches to one of seven paths
   graph.addConditionalEdges("router", routerEdge, {
     multi_task_runner: "multi_task_runner",
     agentic_explore:   "agentic_explore",
     answer:            "answer",
     run_tests:         "run_tests",
     install_packages:  "install_packages",
+    execute_changes:   "execute_changes",
   });
 
   // Code-edit pipeline: explore → plan → execute → verify → (retry | done)

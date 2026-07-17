@@ -254,8 +254,63 @@ Respond with ONLY the single word "answer" or "explore" — nothing else.`,
 
 const CONTEXTUAL_EDIT_RE = /\b(that\s+(page|file|function|component|module|class|script)|on\s+it|to\s+it|in\s+it)\b/i;
 
+// ── Trivial scaffold fast path ──────────────────────────────────────────────────
+// A pure "create an empty file/folder" request has zero content to generate, so it
+// should never depend on the LLM planner — a provider timeout or quota outage once
+// killed exactly this kind of one-line task ("create new folder ... create page.tsx
+// file empty just this" → "AI model did not return a usable plan"). Detected
+// narrowly (explicit "empty" signal + a bare filename with a known extension + a
+// folder-creation phrase) so it can never misfire on a real content-generation
+// request — any ambiguity falls through to the normal pipeline unchanged.
+const SCAFFOLD_FILE_RE = /\b([\w-]+\.(?:tsx?|jsx?|mjs|cjs|css|scss|json|md|html|txt))\b/i;
+const SCAFFOLD_FOLDER_NAME_RE = /\b(?:folder|directory)\b[^.\n]{0,60}?\b(?:name(?:d)?\s+is|named|called)\s+["']?([\w-]+)["']?|\b(?:folder|directory)\s+["']?([\w-]+)["']?/i;
+const SCAFFOLD_BASE_DIR_RE = /(?:@|\binside\s+)([\w][\w./-]*\/)(?=\s|$)/i;
+
+function detectTrivialScaffoldRequest(message) {
+  const msg = String(message || "").trim();
+  if (!msg || msg.length > 300) return null; // keep this narrow — long requests need real planning
+  if (!/\bempty\b/i.test(msg)) return null;
+  if (!/\b(create|make|add)\b/i.test(msg)) return null;
+  if (!/\b(folder|directory)\b/i.test(msg)) return null;
+
+  const fileMatch = msg.match(SCAFFOLD_FILE_RE);
+  if (!fileMatch) return null;
+  const fileName = fileMatch[1];
+
+  const folderMatch = msg.match(SCAFFOLD_FOLDER_NAME_RE);
+  const folderName = folderMatch?.[1] || folderMatch?.[2];
+  if (!folderName) return null;
+
+  const baseDirMatch = msg.match(SCAFFOLD_BASE_DIR_RE);
+  const baseDir = baseDirMatch ? baseDirMatch[1].replace(/\/$/, "") : "";
+
+  const folderPath = baseDir ? `${baseDir}/${folderName}` : folderName;
+  const filePath = `${folderPath}/${fileName}`;
+
+  return { folderPath, filePath };
+}
+
 export async function routerNode(state) {
   const { userMessage, emit, rememberedTargetFile, modelRoute } = state;
+
+  const scaffold = detectTrivialScaffoldRequest(userMessage);
+  if (scaffold) {
+    console.log(`[Router] Trivial scaffold detected — bypassing LLM planner entirely: ${scaffold.filePath}`);
+    emit?.({ type: "progress", stage: "routed", message: "📁 Creating file directly — no planning needed..." });
+    return {
+      intent: "scaffold_create",
+      plan: [
+        {
+          action: "create",
+          path: scaffold.filePath,
+          description: `Created empty file at ${scaffold.filePath}`,
+          patches: [],
+          edits: [],
+          content: "",
+        },
+      ],
+    };
+  }
 
   const heuristic = classifyByHeuristicDetailed(userMessage);
   let intent = heuristic.intent;
