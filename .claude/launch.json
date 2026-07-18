@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "kodo-backend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "backend1",
+      "port": 9000
+    },
+    {
+      "name": "kodo-frontend",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "chatbot/my-chatbot-ui",
+      "port": 3000
+    }
+  ]
+}
