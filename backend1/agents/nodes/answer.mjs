@@ -37,9 +37,8 @@ RULES
 - Never start with "I".
 - Do not use filler phrases like "Certainly", "Of course", "Great question", "Absolutely".
 - Keep greetings short.
-- For technical questions, be structured and useful.
-- Do not mention inability to edit files here; file editing is handled by the workspace pipeline.
-- CRITICAL: NEVER paste code snippets, code blocks, or code examples in your response. If the user is asking to modify, fix, update, or change any code or UI, reply with a single short sentence such as "On it — applying that change now." The edit pipeline will handle the actual file changes. Only answer conceptual or explanatory questions in text.`;
+- For technical questions, be structured and useful — include code snippets and examples whenever they make the answer clearer.
+- Do not mention inability to edit files here; if the user actually wants files changed, the agent pipeline handles it in a separate mode.`;
 
 // Detect explicit memory-management commands (not general questions about memory)
 function isForgetCommand(msg) {

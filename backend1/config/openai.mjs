@@ -10,11 +10,6 @@ export const BACKEND_ROOT = path.join(PROJECT_ROOT, "backend");
 export const FRONTEND_ROOT = path.join(PROJECT_ROOT, "frontend");
 export const PLANS_DIR = PROJECT_ROOT;
 
-export const PIPELINE_SCRIPT = path.resolve(
-  __dirname,
-  "../../pipeline_agent.mjs"
-);
-
 // =========================
 // Default models (GapGPT fallback)
 // =========================
@@ -44,9 +39,9 @@ export const VISION_MODEL =
 export const OPENAI_BASE_URL =
   process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1";
 
-export const OPENAI_API_KEY =
-  process.env.OPENAI_API_KEY ||
-  "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD";
+// NEVER hardcode keys here — a real key was once committed in this file.
+// Configure via the .env file (OPENAI_API_KEY) or the in-app Settings page.
+export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
 // Default client — GapGPT (used when no user settings configured)
 export const openai = new OpenAI({

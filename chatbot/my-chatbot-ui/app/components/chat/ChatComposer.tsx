@@ -3,12 +3,15 @@
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  FileCode2, GitBranch, Loader2, Mic, Paperclip,
+  ChevronDown, FileCode2, GitBranch, Loader2, Mic, Paperclip,
   Shield, ShieldCheck, StopCircle, X,
 } from "lucide-react";
 import NorthRoundedIcon from "@mui/icons-material/NorthRounded";
 import StopRoundedIcon from "@mui/icons-material/StopRounded";
-import { fetchGitStatus, transcribeAudio, type GitStatus } from "../../lib/api";
+import {
+  fetchGitBranches, fetchGitStatus, switchGitBranch, transcribeAudio,
+  type GitBranchInfo, type GitStatus,
+} from "../../lib/api";
 import SlashCommandPalette, { type SlashCommandId } from "./SlashCommandPalette";
 
 type PermissionMode = "auto" | "ask";
@@ -77,6 +80,26 @@ export default function ChatComposer({
   const [showPalette, setShowPalette]       = React.useState(false);
   const [gitStatus, setGitStatus]           = React.useState<GitStatus | null>(null);
 
+  // Branch dropdown state
+  const [showBranchDropdown, setShowBranchDropdown] = React.useState(false);
+  const [branches, setBranches]                   = React.useState<GitBranchInfo[]>([]);
+  const [branchLoading, setBranchLoading]         = React.useState(false);
+  const [branchError, setBranchError]             = React.useState<string | null>(null);
+  const branchDropdownRef = React.useRef<HTMLDivElement>(null);
+
+  // Close dropdown on outside click
+  React.useEffect(() => {
+    function handleClick(e: MouseEvent) {
+      if (branchDropdownRef.current && !branchDropdownRef.current.contains(e.target as Node)) {
+        setShowBranchDropdown(false);
+      }
+    }
+    if (showBranchDropdown) {
+      document.addEventListener("mousedown", handleClick);
+      return () => document.removeEventListener("mousedown", handleClick);
+    }
+  }, [showBranchDropdown]);
+
   // Fetch git status on mount, refresh every 30 s
   React.useEffect(() => {
     let cancelled = false;
@@ -90,6 +113,46 @@ export default function ChatComposer({
     const id = setInterval(poll, 30_000);
     return () => { cancelled = true; clearInterval(id); };
   }, []);
+
+  // Load branches when dropdown opens
+  const loadBranches = React.useCallback(async () => {
+    setBranchLoading(true);
+    setBranchError(null);
+    try {
+      const list = await fetchGitBranches();
+      setBranches(list);
+    } catch (err) {
+      setBranchError(err instanceof Error ? err.message : "Failed to load branches");
+    } finally {
+      setBranchLoading(false);
+    }
+  }, []);
+
+  const handleBranchSelect = React.useCallback(
+    async (branchName: string) => {
+      setBranchLoading(true);
+      setBranchError(null);
+      try {
+        await switchGitBranch(branchName);
+        // Refresh git status to reflect new branch
+        const s = await fetchGitStatus();
+        setGitStatus(s);
+        setShowBranchDropdown(false);
+      } catch (err) {
+        setBranchError(err instanceof Error ? err.message : "Failed to switch branch");
+      } finally {
+        setBranchLoading(false);
+      }
+    },
+    []
+  );
+
+  const toggleBranchDropdown = React.useCallback(() => {
+    setShowBranchDropdown((p) => {
+      if (!p) void loadBranches();
+      return !p;
+    });
+  }, [loadBranches]);
 
   // @-file mentions extracted from the current input
   const atMentions = React.useMemo(
@@ -210,7 +273,7 @@ export default function ChatComposer({
               : { boxShadow: "0 0 0 1px rgba(255,255,255,0.06), 0 18px 50px rgba(0,0,0,0.18)" }
           }
           transition={{ duration: 0.22 }}
-          className="overflow-hidden rounded-[22px] border border-white/8 bg-white/[0.03] backdrop-blur-sm"
+          className="overflow-visible rounded-[22px] border border-white/8 bg-white/[0.03] backdrop-blur-sm"
         >
           {/* ── Main input row ─────────────────────────────── */}
           <div className="flex items-end gap-2 p-2.5">
@@ -393,26 +456,103 @@ export default function ChatComposer({
                 animate={{ opacity: 1, height: "auto" }}
                 exit={{ opacity: 0, height: 0 }}
                 transition={{ duration: 0.18, ease: "easeOut" }}
-                className="overflow-hidden"
+                className="overflow-visible"
               >
                 <div className="flex items-center gap-2 border-t border-white/[0.045] px-3.5 py-2">
 
-                  {/* Branch pill */}
+                  {/* Branch pill with dropdown */}
                   {gitStatus && (
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <GitBranch className="h-3 w-3 text-white/25" />
-                      <span className="font-mono text-[11px] text-white/40">
-                        {gitStatus.branch}
-                      </span>
-                      {gitStatus.dirty && (
-                        <span
-                          className="h-[5px] w-[5px] rounded-full bg-[#ff8a3d]/70 shrink-0"
-                          title="Uncommitted changes"
-                        />
-                      )}
-                      {gitStatus.ahead > 0 && (
-                        <span className="text-[10px] text-[#34d399]/60">↑{gitStatus.ahead}</span>
-                      )}
+                    <div className="relative shrink-0" ref={branchDropdownRef}>
+                      <button
+                        type="button"
+                        onClick={toggleBranchDropdown}
+                        disabled={isSending || branchLoading}
+                        className="flex items-center gap-1.5 rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-[3px] transition-colors hover:border-white/12 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                        title="Switch branch"
+                      >
+                        <GitBranch className="h-3 w-3 text-white/25" />
+                        <span className="font-mono text-[11px] text-white/40">
+                          {gitStatus.branch}
+                        </span>
+                        <ChevronDown className="h-2.5 w-2.5 text-white/20 transition-transform duration-150" style={{ transform: showBranchDropdown ? "rotate(180deg)" : undefined }} />
+                        {gitStatus.dirty && (
+                          <span
+                            className="h-[5px] w-[5px] rounded-full bg-[#ff8a3d]/70 shrink-0"
+                            title="Uncommitted changes"
+                          />
+                        )}
+                        {gitStatus.ahead > 0 && (
+                          <span className="text-[10px] text-[#34d399]/60">↑{gitStatus.ahead}</span>
+                        )}
+                      </button>
+
+                      {/* Branch dropdown */}
+                      <AnimatePresence>
+                        {showBranchDropdown && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 4, scale: 0.97 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: 4, scale: 0.97 }}
+                            transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+                            className="absolute bottom-full left-0 z-[1000] mb-2 w-64 overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.03] backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.4)]"
+                          >
+                            <div className="max-h-64 overflow-y-auto">
+                              {/* Header */}
+                              <div className="sticky top-0 border-b border-white/[0.045] bg-white/[0.03] px-3 py-1.5 backdrop-blur-xl">
+                                <span className="text-[10px] font-semibold uppercase tracking-wider text-white/25">
+                                  Branches
+                                </span>
+                              </div>
+
+                              {branchLoading && branches.length === 0 ? (
+                                <div className="flex items-center justify-center gap-2 py-4">
+                                  <Loader2 className="h-3.5 w-3.5 animate-spin text-white/30" />
+                                  <span className="text-[11px] text-white/30">Loading…</span>
+                                </div>
+                              ) : branchError ? (
+                                <div className="px-3 py-4 text-center">
+                                  <span className="text-[11px] text-[#ff5e4d]/60">{branchError}</span>
+                                </div>
+                              ) : (
+                                <ul className="py-1">
+                                  {branches.map((b) => (
+                                    <li key={b.name}>
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          if (!b.current) void handleBranchSelect(b.name);
+                                          else setShowBranchDropdown(false);
+                                        }}
+                                        disabled={b.current || branchLoading}
+                                        className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors ${
+                                          b.current
+                                            ? "bg-[#ff8a3d]/10 text-[#ff8a3d]/80"
+                                            : "text-white/50 hover:bg-white/[0.04] hover:text-white/70"
+                                        }`}
+                                      >
+                                        <GitBranch className={`h-3 w-3 shrink-0 ${b.current ? "text-[#ff8a3d]/60" : "text-white/20"}`} />
+                                        <span className="min-w-0 truncate font-mono">{b.name}</span>
+                                        {b.current && (
+                                          <span className="ml-auto text-[10px] text-[#ff8a3d]/50">
+                                            (current)
+                                          </span>
+                                        )}
+                                      </button>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
+                            </div>
+
+                            {/* Footer */}
+                            <div className="border-t border-white/[0.045] bg-white/[0.03] px-3 py-1.5 backdrop-blur-xl">
+                              <span className="text-[10px] text-white/18">
+                                {branchLoading ? "Switching…" : `${branches.length} branch${branches.length !== 1 ? "es" : ""}`}
+                              </span>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
                     </div>
                   )}
 

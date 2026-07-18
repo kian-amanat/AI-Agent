@@ -46,6 +46,57 @@ export default async function workspaceRoute(fastify) {
     return { ok: true, branch, dirty: statusOut.length > 0, ahead: aheadOut };
   });
 
+  // GET /api/workspace/git/branches — list all branches
+  fastify.get("/git/branches", async (request) => {
+    const root = getWorkspacePath(request) || process.cwd();
+
+    const { stdout } = await execAsync("git branch --format='%(refname:short) %(HEAD)'", {
+      cwd: root,
+      timeout: 5000,
+    }).catch(() => ({ stdout: "" }));
+
+    const currentBranch = await execAsync("git rev-parse --abbrev-ref HEAD", {
+      cwd: root,
+      timeout: 3000,
+    }).then((r) => r.stdout.trim()).catch(() => "unknown");
+
+    const branches = stdout
+      .split("\n")
+      .map((line) => {
+        const trimmed = line.trim();
+        if (!trimmed) return null;
+        // Format: "branch-name HEAD" for current, "branch-name" for others
+        const parts = trimmed.split(/\s+/);
+        const name = parts[0];
+        const isHead = parts.includes("HEAD");
+        return { name, current: isHead || name === currentBranch };
+      })
+      .filter(Boolean);
+
+    return { ok: true, branches };
+  });
+
+  // POST /api/workspace/git/checkout — switch branch
+  fastify.post("/git/checkout", async (request) => {
+    const root = getWorkspacePath(request) || process.cwd();
+    const body = request.body;
+    const branch = body?.branch;
+
+    if (!branch) {
+      return fastify.httpErrors.badRequest("Missing branch name");
+    }
+
+    try {
+      await execAsync(`git checkout ${branch.replace(/[^a-zA-Z0-9_./-]/g, "")}`, {
+        cwd: root,
+        timeout: 10000,
+      });
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err.message || "Failed to switch branch" };
+    }
+  });
+
   // GET /api/workspace/files — workspace file tree
   fastify.get("/files", async (request) => {
     const root = getWorkspacePath(request) || process.cwd();

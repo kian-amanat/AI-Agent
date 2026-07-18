@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "node tests/agent_loop.test.mjs && node tests/core.test.mjs",
     "dev": "node server.mjs"
   },
   "keywords": [],
@@ -20,6 +20,7 @@
     "bcryptjs": "^3.0.3",
     "better-sqlite3": "^12.10.0",
     "fastify": "^5.8.5",
-    "jsonwebtoken": "^9.0.3"
+    "jsonwebtoken": "^9.0.3",
+    "openai": "^6.45.0"
   }
 }

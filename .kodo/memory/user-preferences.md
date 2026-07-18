@@ -1,5 +1,5 @@
 ---
-updated: 2026-07-17T13:45:50.715Z
+updated: 2026-07-18T19:51:52.389Z
 ---
 
 - **Landing Page Aesthetic**: Premium dark, cinematic, high-end (Linear/Vercel/Apple style).
@@ -17,4 +17,4 @@ updated: 2026-07-17T13:45:50.715Z
   - **Visibility**: Visible across the whole page, wider width.
   - **Logo**: Use `/icon.png` (pure icon, no background, no circle, no container) instead of "Kodo" text. Size: 28–34px, vertically centered.
   - **Links**: Includes 'More' link.
-- **Hero Layout Preference**: Content should be positioned slightly upward so the glow frames the CTA area, not the paragraph text.
+- **Specific Request**: Replace "How it works" section with "Colors used in Kodo" section.

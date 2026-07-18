@@ -1,11 +1,13 @@
 ---
-updated: 2026-07-17T13:34:15.657Z
+updated: 2026-07-18T19:51:52.387Z
 ---
 
 - **Frontend App**: `chatbot/my-chatbot-ui`.
-- **Landing Page**: `chatbot/my-chatbot-ui/app/landing/page.tsx` (original).
-- **New Route**: `chatbot/my-chatbot-ui/app/landing2/page.tsx` created and rebuilt from scratch.
-- **Recent Update**: `landing2/page.tsx` updated to include a complex workflow visualization component (replacing simple 'How it Works' section).
+- **Backend**: `backend1`.
+- **New Feature**: Git Branch Switching in Chat Composer.
+  - **Frontend**: `ChatComposer.tsx` now includes a dropdown to view and switch branches.
+  - **API**: `api.ts` exports `fetchGitBranches` and `switchGitBranch`.
+  - **Backend Route**: `workspace.mjs` exposes `/api/workspace/git/branches` and `/api/workspace/git/checkout`.
 - **Stack**: React, Next.js, `framer-motion`, `lucide-react`.
-- **Constraint**: No new dependencies added during modularization or updates.
-- **Components**: `Navbar`, `HeroSection`, `FeatureSections`, `Footer`, `n8n-workflow-block-shadcnui` (or equivalent workflow component).
+- **Constraint**: No new dependencies added.
+- **UI Section Update**: User requested replacing "How it works" section with "Colors used in Kodo" section, leveraging project color palette.

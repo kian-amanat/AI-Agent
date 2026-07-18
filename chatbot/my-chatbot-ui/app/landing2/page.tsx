@@ -1,10 +1,88 @@
 'use client';
 
-import React, { useRef, useState, useMemo } from 'react';
+import React, { useRef, useState, useMemo, useEffect, useSyncExternalStore } from 'react';
 import Link from 'next/link';
-import { motion, useScroll, useTransform, useSpring, Variants, useMotionValue } from 'framer-motion';
+import { motion, useScroll, useTransform, useSpring, AnimatePresence, MotionValue } from 'framer-motion';
 // GlowHorizon component defined locally below
 import { CinematicFooter } from '@/components/ui/motion-footer';
+import FlowArt, { FlowSection } from '@/components/ui/story-scroll';
+
+// --- Reduced-motion preference (shared) ---
+// useSyncExternalStore is the textbook fit for "subscribe to a browser API,
+// reflect its value in render": no setState-in-an-effect (which a first
+// pass here did — react-hooks/set-state-in-effect correctly flagged the
+// cascading-render risk), and getServerSnapshot returning false means the
+// server-rendered markup and the client's FIRST render match exactly
+// (window/matchMedia don't exist during SSR) — no hydration mismatch either.
+function subscribeToReducedMotion(callback: () => void) {
+  const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+  mq.addEventListener('change', callback);
+  return () => mq.removeEventListener('change', callback);
+}
+function getReducedMotionSnapshot() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+function getReducedMotionServerSnapshot() {
+  return false;
+}
+function usePrefersReducedMotion() {
+  return useSyncExternalStore(subscribeToReducedMotion, getReducedMotionSnapshot, getReducedMotionServerSnapshot);
+}
+
+// --- Film Grain + Vignette Overlay ---
+
+const FilmGrainOverlay = () => {
+  const prefersReducedMotion = usePrefersReducedMotion();
+
+  // Generate a static SVG noise texture (150x150 tile)
+  const noiseSvg = useMemo(
+    () =>
+      `data:image/svg+xml,${encodeURIComponent(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="150" height="150"><filter id="n"><feTurbulence type="fractalNoise" baseFrequency="0.75" numOctaves="4" stitchTiles="stitch"/></filter><rect width="100%" height="100%" filter="url(%23n)" opacity="0.4"/></svg>`
+      )}`,
+    []
+  );
+
+  return (
+    <>
+      {/* Film grain — subtle, animated, respects reduced-motion.
+          The tile is drawn once on an oversized layer and TRANSLATED (GPU);
+          animating backgroundPosition repainted the whole viewport at 60fps
+          through the mix-blend layer, which showed up as animation lag. */}
+      <div
+        aria-hidden
+        className="pointer-events-none fixed inset-0 z-[100] overflow-hidden mix-blend-overlay"
+        style={{ opacity: 0.035 }}
+      >
+        <motion.div
+          className="absolute will-change-transform"
+          style={{
+            inset: '-150px 0 0 -150px',
+            width: 'calc(100% + 150px)',
+            height: 'calc(100% + 150px)',
+            backgroundImage: `url(${noiseSvg})`,
+            backgroundSize: '150px 150px',
+          }}
+          animate={
+            prefersReducedMotion
+              ? {}
+              // 150px = one tile, so the loop wraps seamlessly
+              : { x: [0, 150], y: [0, 150] }
+          }
+          transition={{ duration: 0.8, repeat: Infinity, ease: 'linear' }}
+        />
+      </div>
+      {/* Vignette — dark edges, cinematic feel */}
+      <div
+        aria-hidden
+        className="pointer-events-none fixed inset-0 z-[99]"
+        style={{
+          background: 'radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.45) 100%)',
+        }}
+      />
+    </>
+  );
+};
 
 // --- GlowHorizon Components ---
 
@@ -69,26 +147,53 @@ export function GlowHorizon({ className, variant = "top" }: { className?: string
   );
 }
 
-// --- AnimatedTitleFM ---
+// --- Scroll Indicator ---
 
-const AnimatedTitleFM = ({ open }: { open: boolean }) => {
-  const container: Variants = { hidden: {}, visible: { transition: { staggerChildren: 0.12, delayChildren: 0.1 } } };
-  const item: Variants = { hidden: { opacity: 0, y: 20 }, visible: { opacity: 1, y: 0, transition: { duration: 0.8, ease: [0.22, 1, 0.36, 1] } } };
+const ScrollIndicator = () => {
+  const [visible, setVisible] = useState(true);
+  const hasScrolled = useRef(false);
+  const prefersReducedMotion = usePrefersReducedMotion();
+
+  useEffect(() => {
+    const handleScroll = () => {
+      if (window.scrollY > 60 && !hasScrolled.current) {
+        hasScrolled.current = true;
+        setVisible(false);
+      }
+    };
+    window.addEventListener('scroll', handleScroll, { passive: true });
+    return () => window.removeEventListener('scroll', handleScroll);
+  }, []);
 
   return (
-    <motion.div
-      variants={container}
-      initial="hidden"
-      animate={open ? "visible" : "hidden"}
-      className="text-center"
-    >
-      <motion.h1 variants={item} className="text-5xl md:text-7xl font-bold text-white mb-4">
-        Meet Kodo
-      </motion.h1>
-      <motion.p variants={item} className="text-xl text-white/60">
-        The AI agent that ships your code.
-      </motion.p>
-    </motion.div>
+    <AnimatePresence>
+      {visible && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
+          className="pointer-events-none absolute bottom-10 left-1/2 z-30 -translate-x-1/2"
+        >
+          <div className="flex flex-col items-center gap-2">
+            <span className="text-[10px] font-semibold uppercase tracking-[0.25em] text-white/30">
+              Scroll
+            </span>
+            <motion.div
+              className="h-10 w-5 rounded-full border border-white/20"
+              animate={prefersReducedMotion ? {} : { y: [0, 8, 0] }}
+              transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
+            >
+              <motion.div
+                className="h-2 w-1 rounded-full bg-white/40 mx-auto mt-1.5"
+                animate={prefersReducedMotion ? { opacity: 0.7 } : { y: [0, 12, 0], opacity: [0.4, 1, 0.4] }}
+                transition={{ duration: 1.8, repeat: Infinity, ease: 'easeInOut' }}
+              />
+            </motion.div>
+          </div>
+        </motion.div>
+      )}
+    </AnimatePresence>
   );
 };
 
@@ -131,243 +236,104 @@ const GlowCard = ({ children, className = '' }: { children: React.ReactNode; cla
   );
 };
 
-// --- Workflow Visualization Component ---
-
-const WorkflowNode = ({ 
-  title, 
-  description, 
-  icon, 
-  index, 
-  isActive 
-}: { 
-  title: string; 
-  description: string; 
-  icon: React.ReactNode; 
-  index: number; 
-  isActive: boolean;
+// Split out so useTransform is called inside a genuine component (allowed by
+// rules-of-hooks) rather than inside the parent's .map() callback (a static
+// lint violation — react-hooks/rules-of-hooks flags any hook call inside a
+// loop/callback regardless of whether the iteration count happens to be
+// stable, since it can't prove that from the array literal alone).
+const ScrollPinStep = ({
+  step,
+  index,
+  total,
+  scrollYProgress,
+}: {
+  step: { step: string; title: string; description: string };
+  index: number;
+  total: number;
+  scrollYProgress: MotionValue<number>;
 }) => {
-  const divRef = useRef<HTMLDivElement>(null);
-  const [position, setPosition] = useState({ x: 0, y: 0 });
-  const [opacity, setOpacity] = useState(0);
+  // Each step is active during its 1/total slice of total scroll.
+  const slice = 1 / total;
+  const start = index * slice;
+  const peakStart = start + 0.02;
+  const peakEnd = start + slice - 0.02;
+  const end = start + slice;
 
-  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
-    if (!divRef.current) return;
-    const rect = divRef.current.getBoundingClientRect();
-    setPosition({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-    setOpacity(1);
-  };
-
-  const handlePointerLeave = () => {
-    setOpacity(0);
-  };
+  const opacity = useTransform(scrollYProgress, [start, peakStart, peakEnd, end], [0, 1, 1, 0]);
+  const y = useTransform(scrollYProgress, [start, peakStart], [40, 0]);
+  const scale = useTransform(scrollYProgress, [start, peakStart], [0.95, 1]);
 
   return (
     <motion.div
-      initial={{ opacity: 0, y: 20 }}
-      whileInView={{ opacity: 1, y: 0 }}
-      viewport={{ once: true, margin: "-50px" }}
-      transition={{ duration: 0.6, delay: index * 0.15, ease: [0.22, 1, 0.36, 1] }}
-      className="relative group"
+      style={{ y, opacity, scale }}
+      className="absolute inset-0 flex items-center justify-center px-6"
     >
-      <div
-        ref={divRef}
-        onPointerMove={handlePointerMove}
-        onPointerLeave={handlePointerLeave}
-        className={`
-          relative overflow-hidden rounded-2xl border border-white/[0.08] bg-white/[0.03] backdrop-blur-xl
-          transition-all duration-500 ease-[0.22,1,0.36,1]
-          ${isActive ? 'border-orange-500/30 shadow-[0_0_30px_rgba(255,94,77,0.15)]' : 'hover:border-white/[0.15] hover:shadow-[0_0_20px_rgba(255,94,77,0.1)]'}
-        `}
-      >
-        {/* Liquid Glass Reflection */}
-        <div
-          className="pointer-events-none absolute inset-0 transition-opacity duration-500"
-          style={{
-            opacity,
-            background: `radial-gradient(600px circle at ${position.x}px ${position.y}px, rgba(255, 106, 61, 0.15), transparent 40%)`,
-          }}
-        />
-        
-        {/* Ambient Glow */}
-        <div className="absolute -inset-1 bg-gradient-to-r from-[#ff5e4d] to-[#ff8a3d] opacity-0 group-hover:opacity-10 blur-xl transition-opacity duration-500 -z-10" />
-
-        <div className="relative z-10 p-8 flex flex-col items-center text-center">
-          {/* Icon Container */}
-          <div className={`
-            mb-6 flex h-16 w-16 items-center justify-center rounded-2xl border transition-all duration-300
-            ${isActive 
-              ? 'border-orange-500/30 bg-gradient-to-br from-orange-500/20 to-orange-900/20 text-orange-400 shadow-[0_0_20px_rgba(255,94,77,0.2)]' 
-              : 'border-white/[0.06] bg-white/[0.03] text-white/80 group-hover:border-orange-500/30 group-hover:text-orange-300'}
-          `}>
-            {icon}
-          </div>
-
-          {/* Content */}
-          <h3 className="mb-3 text-xl font-semibold text-white tracking-tight">{title}</h3>
-          <p className="text-sm leading-relaxed text-white/50 max-w-[200px]">{description}</p>
-        </div>
+      <div className="mx-auto max-w-3xl text-center">
+        <motion.div
+          style={{ opacity }}
+          className="mb-6 flex items-center justify-center gap-4"
+        >
+          <span className="text-5xl font-bold text-orange-500/30">{step.step}</span>
+          <div className="h-px w-16 bg-gradient-to-r from-transparent to-orange-500/30" />
+          {/* Current step / total — was accidentally recomputing the SAME
+              value as the span on the left ("01 — 01"). This reads "01 — 04". */}
+          <span className="text-2xl font-semibold text-white/20">{String(total).padStart(2, '0')}</span>
+        </motion.div>
+        <motion.h3
+          style={{ opacity }}
+          className="mb-4 text-3xl md:text-5xl font-bold text-white tracking-tight"
+        >
+          {step.title}
+        </motion.h3>
+        <motion.p
+          style={{ opacity }}
+          className="text-lg md:text-xl text-white/50 max-w-xl mx-auto leading-relaxed"
+        >
+          {step.description}
+        </motion.p>
       </div>
     </motion.div>
   );
 };
 
-const WorkflowCanvas = () => {
-  const nodes = [
+const ScrollPinSteps = () => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { scrollYProgress } = useScroll({
+    target: containerRef,
+    offset: ['start start', 'end end'],
+  });
+
+  const steps = [
     {
-      id: 'explore',
+      step: '01',
       title: 'Explore',
-      description: 'Read only the files that matter.',
-      icon: (
-        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <circle cx="11" cy="11" r="8"></circle>
-          <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
-        </svg>
-      )
+      description: 'Kodo reads only the files that matter — using code search, project memory, and live web lookups when you reference external sites.',
     },
     {
-      id: 'plan',
+      step: '02',
       title: 'Plan',
-      description: 'Design the smallest possible code change.',
-      icon: (
-        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 2a7 7 0 0 1 7 7c0 2.38-1.19 4.47-3 5.74V17a2 2 0 0 1-2 2H10a2 2 0 0 1-2-2v-2.26C6.19 13.47 5 11.38 5 9a7 7 0 0 1 7-7z"></path>
-          <line x1="9" y1="21" x2="15" y2="21"></line>
-        </svg>
-      )
+      description: 'It designs a minimal, surgical patch — no shotgun changes, just the exact diff needed to achieve your goal.',
     },
     {
-      id: 'execute',
+      step: '03',
       title: 'Execute',
-      description: 'Safely apply validated edits.',
-      icon: (
-        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"></path>
-        </svg>
-      )
+      description: 'The change is applied safely — validated before it ever touches disk, with snapshots saved for instant undo.',
     },
     {
-      id: 'verify',
+      step: '04',
       title: 'Verify',
-      description: 'Run lint, typecheck and preview automatically.',
-      icon: (
-        <svg xmlns="http://www.w3.org/2000/svg" width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
-          <path d="m9 12 2 2 4-4"></path>
-        </svg>
-      )
-    }
+      description: 'Typecheck, lint, and a live render check must pass — or the failure is reported honestly. No silent success.',
+    },
   ];
 
   return (
-    <div className="relative w-full max-w-7xl mx-auto px-6 py-12">
-      {/* Desktop Layout: Horizontal with SVG Connections */}
-      <div className="hidden md:block relative">
-        <div className="relative flex justify-between items-center">
-          {/* SVG Connections Layer */}
-          <svg className="absolute top-1/2 left-0 w-full h-24 -translate-y-1/2 pointer-events-none z-0" preserveAspectRatio="none">
-            <defs>
-              <linearGradient id="lineGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor="rgba(255, 94, 77, 0)" />
-                <stop offset="20%" stopColor="rgba(255, 94, 77, 0.5)" />
-                <stop offset="80%" stopColor="rgba(255, 94, 77, 0.5)" />
-                <stop offset="100%" stopColor="rgba(255, 94, 77, 0)" />
-              </linearGradient>
-              <linearGradient id="flowGradient" x1="0%" y1="0%" x2="100%" y2="0%">
-                <stop offset="0%" stopColor="transparent" />
-                <stop offset="50%" stopColor="#ff5e4d" />
-                <stop offset="100%" stopColor="transparent" />
-              </linearGradient>
-            </defs>
-            
-            {/* Static Base Line */}
-            <path 
-              d="M 150 48 C 300 48, 300 48, 450 48 C 600 48, 600 48, 750 48" 
-              stroke="url(#lineGradient)" 
-              strokeWidth="2" 
-              fill="none" 
-            />
-            
-            {/* Animated Flow Line */}
-            <motion.path
-              d="M 150 48 C 300 48, 300 48, 450 48 C 600 48, 600 48, 750 48"
-              stroke="url(#flowGradient)"
-              strokeWidth="2"
-              fill="none"
-              strokeDasharray="100 200"
-              animate={{ strokeDashoffset: [100, -200] }}
-              transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-            />
-          </svg>
-
-          {/* Nodes */}
-          <div className="relative z-10 grid grid-cols-4 gap-8 w-full">
-            {nodes.map((node, index) => (
-              <WorkflowNode
-                key={node.id}
-                index={index}
-                title={node.title}
-                description={node.description}
-                icon={node.icon}
-                isActive={true}
-              />
-            ))}
-          </div>
-        </div>
-      </div>
-
-      {/* Mobile Layout: Vertical with SVG Connections */}
-      <div className="md:hidden relative">
-        <div className="relative flex flex-col items-center gap-12">
-          {/* Vertical SVG Connection */}
-          <svg className="absolute top-0 left-1/2 w-24 h-full -translate-x-1/2 pointer-events-none z-0" preserveAspectRatio="none">
-            <defs>
-              <linearGradient id="vLineGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                <stop offset="0%" stopColor="rgba(255, 94, 77, 0)" />
-                <stop offset="20%" stopColor="rgba(255, 94, 77, 0.5)" />
-                <stop offset="80%" stopColor="rgba(255, 94, 77, 0.5)" />
-                <stop offset="100%" stopColor="rgba(255, 94, 77, 0)" />
-              </linearGradient>
-              <linearGradient id="vFlowGradient" x1="0%" y1="0%" x2="0%" y2="100%">
-                <stop offset="0%" stopColor="transparent" />
-                <stop offset="50%" stopColor="#ff5e4d" />
-                <stop offset="100%" stopColor="transparent" />
-              </linearGradient>
-            </defs>
-            
-            {/* Static Base Line */}
-            <path 
-              d="M 48 150 C 48 300, 48 300, 48 450 C 48 600, 48 600, 48 750" 
-              stroke="url(#vLineGradient)" 
-              strokeWidth="2" 
-              fill="none" 
-            />
-            
-            {/* Animated Flow Line */}
-            <motion.path
-              d="M 48 150 C 48 300, 48 300, 48 450 C 48 600, 48 600, 48 750"
-              stroke="url(#vFlowGradient)"
-              strokeWidth="2"
-              fill="none"
-              strokeDasharray="100 200"
-              animate={{ strokeDashoffset: [100, -200] }}
-              transition={{ duration: 3, repeat: Infinity, ease: "linear" }}
-            />
-          </svg>
-
-          {/* Nodes */}
-          <div className="relative z-10 w-full">
-            {nodes.map((node, index) => (
-              <div key={node.id} className="relative">
-                <WorkflowNode
-                  index={index}
-                  title={node.title}
-                  description={node.description}
-                  icon={node.icon}
-                  isActive={true}
-                />
-              </div>
-            ))}
-          </div>
+    <div ref={containerRef} className="relative">
+      {/* Scroll-driven height: each step gets ~100vh of scroll room */}
+      <div className="relative" style={{ height: `${steps.length * 100}vh` }}>
+        <div className="sticky top-0 flex h-screen items-center justify-center overflow-hidden">
+          {steps.map((s, i) => (
+            <ScrollPinStep key={s.step} step={s} index={i} total={steps.length} scrollYProgress={scrollYProgress} />
+          ))}
         </div>
       </div>
     </div>
@@ -414,10 +380,188 @@ const HorizontalScrollSection = ({ title, cards }: { title: string; cards: { tit
   );
 };
 
+// --- Parallax Feature Cards (Kodo in action) ---
+
+// Distinctive Kodo capabilities — deliberately NOT the Explore/Plan/Execute/
+// Verify pipeline steps (told in full by the cinematic ScrollPinSteps section
+// below) and deliberately NOT a repeat of the "Features" horizontal-scroll
+// list further down the page. Repeating either one here — as the original
+// build did with the pipeline steps — is what turned this page into the same
+// 4 ideas told three or four times; this teaser earns its own space instead.
+const PARALLAX_FEATURES = [
+  {
+    title: 'Ask mode vs. Auto mode',
+    description: 'Ask mode shows the full plan and waits for your approval before a single file changes; Auto mode applies changes and reports back.',
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m9 11 3 3L22 4"></path>
+        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+      </svg>
+    ),
+  },
+  {
+    title: 'Web search & page fetching',
+    description: 'Point it at a reference site and it extracts the real design language — colors, layout, copy — and uses that as ground truth, not a guess.',
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="9"></circle>
+        <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"></path>
+      </svg>
+    ),
+  },
+  {
+    title: 'Design skills',
+    description: 'A library of curated expert knowledge — UI/UX rules, animation recipes, layout archetypes — pulled in automatically, extensible with your own .md files.',
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+      </svg>
+    ),
+  },
+  {
+    title: 'Local-first, no lock-in',
+    description: 'Bring your own API key, pick any supported provider, and run it all on your machine — nothing routes through a Kodo-operated server.',
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="11" width="18" height="10" rx="2"></rect>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+      </svg>
+    ),
+  },
+];
+
+const ParallaxFeatureCard = ({
+  feature,
+  scrollYProgress,
+  speed,
+  index,
+}: {
+  feature: typeof PARALLAX_FEATURES[0];
+  scrollYProgress: MotionValue<number>;
+  speed: number;
+  index: number;
+}) => {
+  const divRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const [opacity, setOpacity] = useState(0);
+
+  // Real scroll-linked parallax — the previous version set `style={{ y: speed }}`
+  // on a plain (non-motion) <div>, which does nothing: `y` isn't a CSS property,
+  // React silently drops it, and the constant wasn't scroll-linked anyway. This
+  // drives an actual vertical offset off the strip's own scroll progress.
+  const y = useTransform(scrollYProgress, [0, 1], [0, speed]);
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!divRef.current) return;
+    const rect = divRef.current.getBoundingClientRect();
+    setPosition({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+    setOpacity(1);
+  };
+
+  const handlePointerLeave = () => {
+    setOpacity(0);
+  };
+
+  return (
+    <motion.div style={{ y }} className="flex-shrink-0 w-72 md:w-80 will-change-transform">
+      <motion.div
+        initial={{ opacity: 0, y: 30 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true, margin: "-80px" }}
+        transition={{ duration: 0.6, delay: index * 0.12, ease: [0.22, 1, 0.36, 1] }}
+        // `group` lives here (an ancestor of the group-hover glow below) — it
+        // was missing entirely before, so that glow div could never fire.
+        className="group"
+      >
+        <div
+          ref={divRef}
+          onPointerMove={handlePointerMove}
+          onPointerLeave={handlePointerLeave}
+          className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.03] backdrop-blur-md transition-transform duration-300 hover:-translate-y-1 hover:border-orange-500/50"
+        >
+          {/* Mouse-follow glow */}
+          <div
+            className="pointer-events-none absolute inset-0 transition-opacity duration-300"
+            style={{
+              opacity,
+              background: `radial-gradient(600px circle at ${position.x}px ${position.y}px, rgba(255, 106, 61, 0.15), transparent 40%)`,
+            }}
+          />
+          {/* Ambient glow */}
+          <div className="absolute -inset-1 bg-gradient-to-r from-[#ff5e4d] to-[#ff8a3d] opacity-0 group-hover:opacity-10 blur-xl transition-opacity duration-500 -z-10" />
+
+          <div className="relative z-10 p-6">
+            {/* Icon */}
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-white/[0.06] bg-white/[0.03] text-orange-400">
+              {feature.icon}
+            </div>
+            {/* Title */}
+            <h3 className="mb-2 text-lg font-semibold text-white tracking-tight">{feature.title}</h3>
+            {/* Description */}
+            <p className="text-sm leading-relaxed text-white/50">{feature.description}</p>
+          </div>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+};
+
+const ParallaxFeatureStrip = () => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { scrollYProgress } = useScroll({
+    target: containerRef,
+    offset: ['start end', 'end start'],
+  });
+
+  // Horizontal scroll driven by vertical scroll
+  const x = useTransform(scrollYProgress, [0, 1], ['0%', '-40%']);
+
+  // Parallax speeds in px — each card drifts a different amount over the
+  // strip's scroll range, some up, some down, for visible depth.
+  const speeds = [30, -60, 45, -35] as const;
+
+  return (
+    <section id="kodo-in-action" className="relative py-24 overflow-hidden">
+      {/* Section header */}
+      <div className="mx-auto max-w-7xl px-6 mb-16">
+        <motion.div
+          initial={{ opacity: 0, y: 20 }}
+          whileInView={{ opacity: 1, y: 0 }}
+          viewport={{ once: true, margin: "-80px" }}
+          transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
+          className="text-center"
+        >
+          <h2 className="text-3xl md:text-4xl font-bold text-white tracking-tight">Kodo in Action</h2>
+          <p className="mt-4 text-lg text-white/50 max-w-2xl mx-auto leading-relaxed">
+            What makes Kodo more than a code-completion loop.
+          </p>
+        </motion.div>
+      </div>
+
+      {/* Horizontal scroll strip with parallax cards */}
+      <div ref={containerRef} className="relative h-[340px] w-full overflow-hidden">
+        <motion.div style={{ x }} className="flex gap-6 pl-[5vw] md:pl-[10vw] pr-[5vw] md:pr-[10vw] items-center">
+          {PARALLAX_FEATURES.map((feature, index) => (
+            <ParallaxFeatureCard
+              key={feature.title}
+              feature={feature}
+              scrollYProgress={scrollYProgress}
+              speed={speeds[index]}
+              index={index}
+            />
+          ))}
+        </motion.div>
+      </div>
+    </section>
+  );
+};
+
 // --- Main Page Component ---
 
 export default function Landing2Page() {
   const [mode, setMode] = useState<'ask' | 'auto'>('ask');
+  const prefersReducedMotion = usePrefersReducedMotion();
 
   const features = [
     { title: 'Multi-task decomposition', description: 'Give it a list of unrelated changes; it splits, plans, and executes each one, sequentially where files overlap so edits never race each other.' },
@@ -441,6 +585,9 @@ export default function Landing2Page() {
 
   return (
     <div className="min-h-screen bg-[#08080a] text-white">
+      {/* Film grain + vignette overlay */}
+      <FilmGrainOverlay />
+
             {/* Premium Liquid Glass Navbar */}
             <motion.nav
         initial={{ y: -100, opacity: 0 }}
@@ -527,7 +674,47 @@ export default function Landing2Page() {
 
       {/* Hero Section */}
       <section className="relative flex min-h-screen items-center justify-center overflow-hidden">
-        <GlowHorizon />
+        {/* Slow zoom background — a continuous loop, so it's disabled outright
+            under reduced motion rather than just slowed down. */}
+        <motion.div
+          className="absolute inset-0 z-0 will-change-transform"
+          animate={prefersReducedMotion ? { scale: 1 } : { scale: [1, 1.08] }}
+          transition={{ duration: 20, repeat: Infinity, repeatType: "reverse", ease: "easeInOut" }}
+        >
+          <GlowHorizon />
+        </motion.div>
+        {/* Slow gradient shift — cinematic color drift */}
+        <motion.div
+          aria-hidden
+          className="pointer-events-none absolute inset-0 z-[1]"
+          style={{
+            background: 'radial-gradient(ellipse at 50% 50%, transparent 30%, rgba(8,8,10,0.6) 100%)',
+          }}
+        >
+          {/* Color drift via transform on oversized static-gradient layers.
+              Animating the gradient STRING repainted the full screen every
+              frame on the main thread; translating a pre-painted layer is
+              GPU-composited and free. Both loops are continuous, so they're
+              frozen (not just slowed) under prefers-reduced-motion. */}
+          <motion.div
+            className="absolute will-change-transform"
+            style={{
+              inset: '-40%',
+              background: 'radial-gradient(ellipse at 40% 45%, rgba(255,94,77,0.12) 0%, transparent 45%)',
+            }}
+            animate={prefersReducedMotion ? { x: '0%', y: '0%' } : { x: ['-8%', '8%', '-8%'], y: ['-4%', '6%', '-4%'] }}
+            transition={{ duration: 16, repeat: Infinity, ease: 'easeInOut' }}
+          />
+          <motion.div
+            className="absolute will-change-transform"
+            style={{
+              inset: '-40%',
+              background: 'radial-gradient(ellipse at 55% 45%, rgba(255,61,61,0.08) 0%, transparent 40%)',
+            }}
+            animate={prefersReducedMotion ? { x: '0%', y: '0%' } : { x: ['6%', '-7%', '6%'], y: ['-6%', '7%', '-6%'] }}
+            transition={{ duration: 20, repeat: Infinity, ease: 'easeInOut' }}
+          />
+        </motion.div>
         <div className="relative z-10 mx-auto max-w-4xl px-6 text-center flex flex-col items-center justify-center" style={{ marginTop: '-100px' }}>
           
           {/* Eyebrow Label */}
@@ -540,15 +727,43 @@ export default function Landing2Page() {
             MEET KODO
           </motion.div>
 
-          {/* Headline */}
+          {/* Headline — word-by-word staggered reveal with dramatic letter-spacing */}
           <motion.h1
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.8, ease: [0.22, 1, 0.36, 1] }}
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            transition={{ duration: 0.3 }}
             className="mb-10 max-w-4xl text-5xl font-bold leading-[1.05] tracking-tight text-white md:text-7xl"
           >
-            The AI Engineer <br className="hidden md:block" />
-            for Your <span className="bg-gradient-to-r from-[#ff6a3d] to-[#ffa03d] bg-clip-text text-transparent">Codebase</span>
+            <span className="inline-flex flex-wrap justify-center gap-x-3 gap-y-1 md:gap-x-4">
+              {/* GPU-only reveal: scaleX condenses like a tracking-in title but
+                  never triggers layout (letter-spacing did — one reflow per frame
+                  per word was the source of the text lag). */}
+              {['The', 'AI', 'Engineer'].map((word, i) => (
+                <motion.span
+                  key={`line1-${i}`}
+                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 30, scaleX: 1.35, filter: 'blur(6px)' }}
+                  animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0, scaleX: 1, filter: 'blur(0px)' }}
+                  transition={{ duration: prefersReducedMotion ? 0.4 : 1.2, ease: [0.22, 1, 0.36, 1], delay: prefersReducedMotion ? 0 : 0.3 + i * 0.15 }}
+                  className="inline-block will-change-transform"
+                  style={{ transformOrigin: '50% 50%' }}
+                >
+                  {word}
+                </motion.span>
+              ))}
+              <br className="hidden md:block" />
+              {['for', 'Your', <span key="codebase" className="bg-gradient-to-r from-[#ff6a3d] to-[#ffa03d] bg-clip-text text-transparent">Codebase</span>].map((item, i) => (
+                <motion.span
+                  key={`line2-${i}`}
+                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 30, scaleX: 1.35, filter: 'blur(6px)' }}
+                  animate={prefersReducedMotion ? { opacity: 1 } : { opacity: 1, y: 0, scaleX: 1, filter: 'blur(0px)' }}
+                  transition={{ duration: prefersReducedMotion ? 0.4 : 1.2, ease: [0.22, 1, 0.36, 1], delay: prefersReducedMotion ? 0 : 0.6 + i * 0.15 }}
+                  className="inline-block will-change-transform"
+                  style={{ transformOrigin: '50% 50%' }}
+                >
+                  {item}
+                </motion.span>
+              ))}
+            </span>
           </motion.h1>
 
           {/* Description */}
@@ -591,67 +806,207 @@ export default function Landing2Page() {
           >
             No lock-in • Bring your own API key • Runs locally
           </motion.p>
+
+          {/* Scroll Indicator */}
+          <ScrollIndicator />
         </div>
       </section>
 
-      {/* Agent Workflow Section - REPLACED */}
-      <section id="how-it-works" className="py-32 relative overflow-hidden">
-        {/* Ambient Background Glow */}
-        <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-[#ff5e4d] rounded-full opacity-[0.03] blur-[120px] pointer-events-none" />
-        
-        <div className="mx-auto max-w-7xl px-6 relative z-10">
-          <div className="text-center mb-20">
-            <motion.h2 
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-              className="text-4xl md:text-5xl font-bold text-white mb-6 tracking-tight"
-            >
-              How Kodo Thinks
-            </motion.h2>
-            <motion.p 
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.6, delay: 0.1, ease: [0.22, 1, 0.36, 1] }}
-              className="text-lg text-white/60 max-w-2xl mx-auto leading-relaxed"
-            >
-              Every request follows a surgical execution pipeline designed to understand your codebase, plan minimal changes, apply them safely, and verify everything before you review the result.
-            </motion.p>
-          </div>
-          
-          <WorkflowCanvas />
-        </div>
-      </section>
+      {/* Kodo in Action — parallax horizontal-scroll strip */}
+      <ParallaxFeatureStrip />
 
-      {/* Core Pipeline Section */}
-      <section className="py-24">
-        <div className="mx-auto max-w-7xl px-6">
-          <h2 className="mb-16 text-center text-3xl font-bold text-white">Core Pipeline</h2>
-          <div className="grid grid-cols-1 gap-6 md:grid-cols-2 lg:grid-cols-4">
-            <GlowCard>
-              <div className="mb-4 text-4xl font-bold text-orange-500">01</div>
-              <h3 className="mb-2 text-xl font-semibold text-white">Explore</h3>
-              <p className="text-gray-400">Reads only the files that matter, using code search and project memory, and live web lookups when you reference external sites.</p>
-            </GlowCard>
-            <GlowCard>
-              <div className="mb-4 text-4xl font-bold text-orange-500">02</div>
-              <h3 className="mb-2 text-xl font-semibold text-white">Plan</h3>
-              <p className="text-gray-400">Designs a minimal, surgical patch — no shotgun changes, just the exact diff needed.</p>
-            </GlowCard>
-            <GlowCard>
-              <div className="mb-4 text-4xl font-bold text-orange-500">03</div>
-              <h3 className="mb-2 text-xl font-semibold text-white">Execute</h3>
-              <p className="text-gray-400">Applies the change, validated before it ever touches disk.</p>
-            </GlowCard>
-            <GlowCard>
-              <div className="mb-4 text-4xl font-bold text-orange-500">04</div>
-              <h3 className="mb-2 text-xl font-semibold text-white">Verify</h3>
-              <p className="text-gray-400">Runs typecheck, lint, and a live render check against your dev server, retrying automatically if something&apos;s off.</p>
-            </GlowCard>
-          </div>
-        </div>
+      {/* Agent Workflow Section — cinematic scroll-pinned FlowArt */}
+      <section id="how-it-works" className="relative overflow-hidden">
+        <FlowArt aria-label="How Kodo Thinks">
+          <FlowSection
+            aria-label="The pipeline"
+            style={{ backgroundColor: '#08080a', color: '#fff' }}
+          >
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-white/40">01 — The pipeline</p>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <div>
+              <h2 className="text-[clamp(3.5rem,12vw,14rem)] font-bold leading-[0.85] uppercase tracking-tight">
+                Think
+                <br />
+                Before
+                <br />
+                Touch
+              </h2>
+            </div>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <p className="max-w-[50ch] text-[clamp(1rem,2.5vw,2rem)] font-normal leading-relaxed text-white/60">
+              Kodo never writes blindly. It reads, plans, and verifies — every change is surgical, every edit is reversible.
+            </p>
+          </FlowSection>
+
+          <FlowSection
+            aria-label="Explore"
+            style={{ backgroundColor: '#111113', color: '#fff' }}
+          >
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-white/40">02 — Explore</p>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <div>
+              <h2 className="text-[clamp(3.5rem,12vw,14rem)] font-bold leading-[0.85] uppercase tracking-tight">
+                Read
+                <br />
+                The
+                <br />
+                Room
+              </h2>
+            </div>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <p className="max-w-[50ch] text-[clamp(1rem,2.5vw,2rem)] font-normal leading-relaxed text-white/60">
+              Kodo reads only the files that matter — using code search, project memory, and live web lookups when you reference external sites.
+            </p>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <div className="flex flex-wrap gap-[3vw]">
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Code Search</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  Semantic search across your entire repository to find the exact symbols, functions, and patterns you need.
+                </p>
+              </div>
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Project Memory</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  Remembers your conventions, architecture decisions, and past fixes — no re-explaining needed.
+                </p>
+              </div>
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Web Lookups</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  Fetches live documentation or reference sites when you mention them — ground truth, not guesses.
+                </p>
+              </div>
+            </div>
+          </FlowSection>
+
+          <FlowSection
+            aria-label="Plan"
+            style={{ backgroundColor: '#0a0a0c', color: '#fff' }}
+          >
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-white/40">03 — Plan</p>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <div>
+              <h2 className="text-[clamp(3.5rem,12vw,14rem)] font-bold leading-[0.85] uppercase tracking-tight">
+                Design
+                <br />
+                The
+                <br />
+                Patch
+              </h2>
+            </div>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <p className="max-w-[50ch] text-[clamp(1rem,2.5vw,2rem)] font-normal leading-relaxed text-white/60">
+              It designs a minimal, surgical patch — no shotgun changes, just the exact diff needed to achieve your goal.
+            </p>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <div className="flex flex-wrap gap-[3vw]">
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Minimal Diff</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  Only touches what needs changing. No refactoring unrelated code, no style drift, no scope creep.
+                </p>
+              </div>
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Dependency Aware</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  Understands import chains, type contracts, and component relationships before writing a single line.
+                </p>
+              </div>
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Multi-task</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  Decomposes complex requests into sequential tasks that never race — overlapping files are serialized.
+                </p>
+              </div>
+            </div>
+          </FlowSection>
+
+          <FlowSection
+            aria-label="Execute"
+            style={{ backgroundColor: '#0f0f11', color: '#fff' }}
+          >
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-white/40">04 — Execute</p>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <div>
+              <h2 className="text-[clamp(3.5rem,12vw,14rem)] font-bold leading-[0.85] uppercase tracking-tight">
+                Apply
+                <br />
+                With
+                <br />
+                Care
+              </h2>
+            </div>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <p className="max-w-[50ch] text-[clamp(1rem,2.5vw,2rem)] font-normal leading-relaxed text-white/60">
+              The change is applied safely — validated before it ever touches disk, with snapshots saved for instant undo.
+            </p>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <div className="flex flex-wrap gap-[3vw]">
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Pre-write Validation</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  Syntax, structure, imports, and broken references are checked before any file is written.
+                </p>
+              </div>
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Snapshots</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  Every touched file is snapshotted before editing — one-click undo, complete peace of mind.
+                </p>
+              </div>
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Sandboxed</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  Path-resolved operations ensure nothing reads or writes outside your project directory.
+                </p>
+              </div>
+            </div>
+          </FlowSection>
+
+          <FlowSection
+            aria-label="Verify"
+            style={{ backgroundColor: '#08080a', color: '#fff' }}
+          >
+            <p className="text-xs font-bold uppercase tracking-[0.2em] text-white/40">05 — Verify</p>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <div>
+              <h2 className="text-[clamp(3.5rem,12vw,14rem)] font-bold leading-[0.85] uppercase tracking-tight">
+                Trust
+                <br />
+                But
+                <br />
+                Verify
+              </h2>
+            </div>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <p className="max-w-[50ch] text-[clamp(1rem,2.5vw,2rem)] font-normal leading-relaxed text-white/60">
+              Typecheck, lint, and a live render check must pass — or the failure is reported honestly. No silent success.
+            </p>
+            <hr className="my-[2vw] border-none border-t border-white/10" />
+            <div className="flex flex-wrap gap-[3vw]">
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Typecheck</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  Full TypeScript / JS type checking catches mismatches, missing props, and broken imports.
+                </p>
+              </div>
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Lint</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  ESLint rules enforced — no style drift, no dead code, no anti-patterns slip through.
+                </p>
+              </div>
+              <div className="min-w-[180px] flex-1">
+                <p className="mb-2 text-sm font-bold uppercase tracking-wider">Render Check</p>
+                <p className="text-[clamp(0.85rem,1.3vw,1.05rem)] leading-relaxed opacity-75">
+                  A real render validation ensures JSX is structurally sound — not just syntactically valid.
+                </p>
+              </div>
+            </div>
+          </FlowSection>
+        </FlowArt>
       </section>
 
       {/* Features Section */}
