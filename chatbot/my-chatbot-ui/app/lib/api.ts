@@ -69,7 +69,14 @@ export type SSEEvent =
   | { type: "file_context"; files: WorkspaceFile[] }
   | { type: "file_change";  action: string; path: string; success: boolean; error?: string | null }
   | { type: "file_diff";    action: string; path: string; language: string; hunks: DiffHunk[] }
-  | { type: "plan_preview"; steps: PlanStep[] };
+  | { type: "plan_preview"; steps: PlanStep[] }
+  | { type: "todo";         todos: TodoItem[] }
+  | { type: "usage";        inputTokens: number; outputTokens: number; llmCalls: number; model?: string };
+
+export interface TodoItem {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+}
 
 export interface GitStatus {
   branch: string;
@@ -229,6 +236,25 @@ async function parseSSE(
               onEvent({
                 type:  "plan_preview",
                 steps: Array.isArray(parsed.steps) ? parsed.steps : [],
+              });
+              break;
+
+            // Agent todo list (Claude Code-style task tracking)
+            case "todo":
+              onEvent({
+                type:  "todo",
+                todos: Array.isArray(parsed.todos) ? parsed.todos : [],
+              });
+              break;
+
+            // Token usage for the request
+            case "usage":
+              onEvent({
+                type: "usage",
+                inputTokens:  Number(parsed.inputTokens)  || 0,
+                outputTokens: Number(parsed.outputTokens) || 0,
+                llmCalls:     Number(parsed.llmCalls)     || 0,
+                model:        parsed.model,
               });
               break;
 
@@ -512,6 +538,29 @@ export async function fetchGitStatus(): Promise<GitStatus> {
   const data = await readJson<{ ok: boolean } & GitStatus>(res);
   if (!res.ok || !data.ok) throw new Error("Failed to fetch git status");
   return { branch: data.branch, dirty: data.dirty, ahead: data.ahead };
+}
+
+export interface GitBranchInfo {
+  name: string;
+  current: boolean;
+}
+
+export async function fetchGitBranches(): Promise<GitBranchInfo[]> {
+  const res  = await fetch(`${WORKSPACE_URL}/git/branches`, { headers: authHeaders(), cache: "no-store" });
+  const data = await readJson<{ ok: boolean; branches: GitBranchInfo[] }>(res);
+  if (!res.ok || !data.ok) throw new Error("Failed to fetch git branches");
+  return Array.isArray(data.branches) ? data.branches : [];
+}
+
+export async function switchGitBranch(branch: string): Promise<{ ok: boolean; error?: string }> {
+  const res  = await fetch(`${WORKSPACE_URL}/git/checkout`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ branch }),
+  });
+  const data = await readJson<{ ok: boolean; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Failed to switch branch");
+  return data;
 }
 
 export async function fetchWorkspaceFiles(): Promise<WorkspaceFileEntry[]> {

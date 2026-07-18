@@ -1,20 +1,19 @@
 ---
-updated: 2026-07-17T13:45:50.714Z
+updated: 2026-07-18T19:15:41.795Z
 ---
 
-### Workflow Component Reuse Pattern (2026-07-17)
-- **Context**: Replaced simple 'How it Works' section with complex workflow visualization.
-- **File**: `chatbot/my-chatbot-ui/app/landing2/page.tsx`
-- **Strategy**: Full file replacement to integrate `n8n-workflow-block-shadcnui` (or similar uploaded workflow component).
-- **Key Constraints**:
-  - Do NOT redesign from scratch.
-  - Reuse existing component's: canvas layout, node positioning, animated SVG lines, node interactions, Framer Motion animations, responsive behavior, drag system, and connection rendering.
-  - Only adapt visual style to Kodo's brand (warm dark, orange-red).
-- **Pattern**: When upgrading complex UI sections, prefer full-file replacement if the diff is too large for patches, ensuring all existing structural imports (Navbar, Footer) are preserved.
+### ChatComposer Dropdown & Input Styling (2026-07-18)
+- **File**: `chatbot/my-chatbot-ui/app/components/chat/ChatComposer.tsx`
+- **Liquid Glass Aesthetic for Dropdowns**:
+  - Replaced solid dark gray backgrounds with transparent glass layers to match the project's "liquid glass" theme.
+  - **Container Styling**: `bg-white/[0.08] backdrop-blur-xl border border-white/[0.06]`
+    - Updated from `bg-white/[0.03]` to `bg-white/[0.08]` to increase opacity as requested.
+    - Matches the transparency and blur intensity of the composer input card.
+  - **Goal**: Visual consistency between the branch dropdown and other UI elements (navbar, input cards).
 
-### Hero Refinement Pattern (2026-07-17)
-- **Context**: Refining `GlowHorizon` hero for premium SaaS look without full redesign.
-- **File**: `chatbot/my-chatbot-ui/app/landing2/page.tsx`
-- **Strategy**: Full file update to adjust visual hierarchy, typography, and spacing while keeping background and core layout intact.
-- **Specific Adjustment**: Move entire hero content slightly upward so the glow frames the CTA area, not the paragraph text.
-- **Constraint**: Keep existing orange-red Glow Horizon background, navbar, buttons, and overall dark Kodo style.
+- **Opacity Adjustment for Opaqueness**:
+  - User requested making transparent elements "some opaque".
+  - **Main input container**: Changed from `bg-white/[0.03]` to `bg-white/[0.06]`.
+  - **Attach file button**: Changed from `bg-white/[0.03]` / hover `bg-white/[0.05]` to `bg-white/[0.06]` / hover `bg-white/[0.08]`.
+  - **Mic button (default)**: Changed from `bg-white/[0.03]` / hover `bg-white/[0.05]` to `bg-white/[0.06]` / hover `bg-white/[0.08]`.
+  - **Dropdown Container**: Updated to `bg-white/[0.08]` (merged with dropdown section above).

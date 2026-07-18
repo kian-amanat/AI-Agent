@@ -36,12 +36,9 @@ export async function runKodoGraph({
     userMessage,
     rememberedTargetFile,
     workspacePath,
-    fileContext:     [],
-    plan:            [],
-    executionResults:[],
-    verifyResult:    null,
-    retryCount:      0,
     finalAnswer:     "",
+    editedFiles:     [],
+    usage:           null,
     sessionId,
     requestId,
     userId,
@@ -79,14 +76,11 @@ export async function runKodoGraph({
   }
 
   const finalAnswer = finalState?.finalAnswer || "";
+  const editedFiles = Array.isArray(finalState?.editedFiles) ? finalState.editedFiles : [];
+  const usage       = finalState?.usage || null;
 
-  // Extract which files were actually edited/created (for memory)
-  const editedFiles = (finalState?.executionResults || [])
-    .filter(r => r.success && (r.action === "edit" || r.action === "create") && r.path)
-    .map(r => r.path);
-
-    // Note: abortSignal cleanup is handled in plannerAgent.mjs after runKodoGraph resolves
+  // Note: abortSignal cleanup is handled in plannerAgent.mjs after runKodoGraph resolves
   console.log(`[KodoGraph] ✅ Done. Answer=${finalAnswer.length} chars, editedFiles=${editedFiles.length}`);
 
-  return { finalAnswer, editedFiles };
+  return { finalAnswer, editedFiles, usage };
 }

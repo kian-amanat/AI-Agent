@@ -1,6 +1,12 @@
 ---
-updated: 2026-07-16T17:19:22.760Z
+updated: 2026-07-18T17:20:49.701Z
 ---
+
+### Bug: Git Branch Fetch Failure
+- **Context**: User reported dropdown showing "Failed to fetch git branches" and "0 branches" in `ChatComposer.tsx`.
+- **Issue**: The frontend could not retrieve branches from the backend API.
+- **Status**: Reported but not yet fixed in this session (AI response timed out).
+- **Note**: Requires checking `fetchGitBranches()` implementation and backend `/api/workspace/git/branches` route availability.
 
 ### Bug: Edit Patch Mismatch (0/1 patches matched)
 - **Context**: User requested replacing the hero section in `chatbot/my-chatbot-ui/app/landing/page.tsx` with a GlowHorizon-style hero using orange-red brand colors.
@@ -11,10 +17,4 @@ updated: 2026-07-16T17:19:22.760Z
 ### Bug: TS2322 Property 'showGlow' Does Not Exist
 - **Context**: User requested applying a rotating glow effect only to cards in the "Deep Dive into Capabilities" section.
 - **Issue**: The AI attempted to pass a `showGlow` prop to a component that did not accept it, causing a TypeScript error.
-- **Root Cause**: The component definition for the feature cards was not updated to include the `showGlow` prop.
-- **Lesson**: When adding visual effects to specific sections, ensure the underlying component interfaces are updated to support new props.
-
-### Bug: Incomplete User Request Handling
-- **Context**: User requested modifications to `glow-horizon.tsx` and `landing/page.tsx`.
-- **Issue**: The AI model did not return a usable plan (timeout or invalid response), so no files were changed.
-- **Lesson**: If the model fails to return a plan, retry the request.
+- **Root Cause**: The component definition for the feature cards was not updated
