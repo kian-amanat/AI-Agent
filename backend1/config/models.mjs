@@ -18,8 +18,9 @@ export const PROVIDERS = {
     name: "Anthropic",
     baseUrl: "https://api.anthropic.com/v1",
     models: {
-      "claude-sonnet-4-6": { name: "Claude Sonnet 4.6", vision: true, maxTokens: 200000 },
-      "claude-haiku-4-5": { name: "Claude Haiku 4.5", vision: true, maxTokens: 200000 },
+      "claude-sonnet-5":            { name: "Claude Sonnet 5",   vision: true, maxTokens: 200000 },
+      "claude-opus-4-8":            { name: "Claude Opus 4.8",   vision: true, maxTokens: 200000 },
+      "claude-haiku-4-5-20251001":  { name: "Claude Haiku 4.5",  vision: true, maxTokens: 200000 },
     },
   },
   qwen: {

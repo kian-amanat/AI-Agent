@@ -44,10 +44,34 @@ import {
 import { loadMemoryIndex, writeAgentMemory } from "../services/agentMemory.mjs";
 
 const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
+const ALLOWED_ORIGIN = process.env.KODO_ALLOWED_ORIGIN || "http://localhost:3000";
 
-// Per-session in-flight lock — prevents two concurrent requests for the same session
-// from interleaving their graph runs and corrupting each other's file edits.
-const activeSessionRequests = new Map(); // sessionId → requestId
+// Per-session queue — two concurrent requests for the same session would
+// interleave their graph runs and corrupt each other's file edits, so a
+// second request for a busy session waits its turn instead of racing (or, as
+// before, being rejected outright with a 409). sessionQueues holds the tail
+// promise of the chain; registerSessionSlot appends to it and returns a
+// release function the caller must call when its own processing is done.
+const sessionQueues = new Map(); // sessionId → Promise (resolves when the slot is free)
+
+// Split into register (synchronous — preserves arrival order even if two
+// requests land in the same tick) + wait (async — actually blocks until it's
+// this request's turn), so the caller can emit a "queued" notice on the SSE
+// stream before awaiting, instead of the client seeing dead air.
+function registerSessionSlot(sessionId) {
+  const hadPrev = sessionQueues.has(sessionId);
+  const prevTail = sessionQueues.get(sessionId) || Promise.resolve();
+  let releaseMine;
+  const mine = new Promise((resolve) => { releaseMine = resolve; });
+  sessionQueues.set(sessionId, mine);
+
+  const release = () => {
+    releaseMine();
+    // Only the last request in the chain cleans up, so the map doesn't grow forever.
+    if (sessionQueues.get(sessionId) === mine) sessionQueues.delete(sessionId);
+  };
+  return { prevTail, release, hadToWait: hadPrev };
+}
 
 // Plan approval promises — when permissionMode === "ask", execution pauses here
 // until the user clicks Approve (POST /confirm/:requestId) or Cancel (POST /reject/:requestId)
@@ -87,7 +111,7 @@ function requireUserSession(request, reply) {
 }
 
 function startSSE(reply) {
-  reply.raw.setHeader("Access-Control-Allow-Origin", "*");
+  reply.raw.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
   reply.raw.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   reply.raw.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   reply.raw.writeHead(200, {
@@ -99,7 +123,7 @@ function startSSE(reply) {
 }
 
 function setCors(reply) {
-  reply.header("Access-Control-Allow-Origin", "*");
+  reply.header("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
   reply.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
@@ -155,6 +179,70 @@ function syncSessionMemory(sessionId, userId, {
   if (targetFile.trim())            rememberTargetFile(sessionId, targetFile.trim());
 }
 
+// ── Slash commands (Claude Code approach: /init, /memory, /skills, /help) ────
+
+async function handleSlashCommand(message, { workspacePath, modelRoute }) {
+  const m = String(message || "").trim();
+  if (!m.startsWith("/")) return null;
+  const [cmdRaw, ...rest] = m.slice(1).split(/\s+/);
+  const cmd = (cmdRaw || "").toLowerCase();
+
+  const { loadSkillIndex, walkWorkspace } = await import("../agents/nodes/agent_loop.mjs");
+  const { listMemoryTopics, loadMemoryIndex: loadMemIdx } = await import("../services/agentMemory.mjs");
+  const { callLLM } = await import("../services/llm.mjs");
+
+  switch (cmd) {
+    case "help":
+      return [
+        "**Kodo commands**",
+        "- `/init` — analyse the workspace and generate KODO.md (project instructions loaded into every request)",
+        "- `/memory` — show what Kodo remembers about this project",
+        "- `/skills` — list available expert skills",
+        "- `/help` — this list",
+        "",
+        "Anything else you type goes to the agent. Say `remember: <fact>` to save a fact, `forget all memory` to wipe memory.",
+      ].join("\n");
+
+    case "memory": {
+      const index = await loadMemIdx(workspacePath);
+      const topics = await listMemoryTopics(workspacePath);
+      if (!topics.length) return "No memory yet — Kodo saves project knowledge automatically as you work.";
+      return `**Memory index**\n${index || topics.map((t) => `- ${t}`).join("\n")}`;
+    }
+
+    case "skills": {
+      const skills = await loadSkillIndex(workspacePath);
+      if (!skills.length) return "No skills installed. Add markdown packs to `.kodo/skills/` (frontmatter: name, description).";
+      return `**Available skills**\n${skills.map((s) => `- **${s.name}** — ${s.description}`).join("\n")}`;
+    }
+
+    case "init": {
+      const tree = await walkWorkspace(workspacePath, 6);
+      const snapshot = tree.slice(0, 250).map((f) => (f.isDir ? `${f.path}/` : f.path)).join("\n");
+      const pkgs = [];
+      for (const f of tree) {
+        if (!f.isDir && f.path.endsWith("package.json") && f.path.split("/").length <= 3) {
+          try { pkgs.push(`--- ${f.path} ---\n${(await fs.readFile(path.join(workspacePath, f.path), "utf-8")).slice(0, 1500)}`); } catch {}
+        }
+      }
+      const result = await callLLM({
+        system: `You write KODO.md files — concise project instructions an AI coding agent loads on every request. Cover: what the project is, layout (which dir is which app), how to run/build/typecheck each part, code conventions visible from the structure, and any gotchas. Max ~120 lines of markdown. No filler.`,
+        messages: [{ role: "user", content: `File tree:\n${snapshot}\n\n${pkgs.join("\n\n")}\n\nWrite the KODO.md content now (markdown only).` }],
+        modelRoute,
+        maxTokens: 2500,
+        temperature: 0.2,
+      });
+      const content = String(result?.content || "").replace(/^```(?:markdown|md)?\n?/, "").replace(/\n?```\s*$/, "").trim();
+      if (!content) return "Could not generate KODO.md — the model returned nothing. Try again.";
+      await fs.writeFile(path.join(workspacePath, "KODO.md"), content + "\n", "utf-8");
+      return `Created **KODO.md** (${content.split("\n").length} lines). It now loads into every agent request. Edit it any time — it's your project's standing instructions.\n\n${content.slice(0, 1200)}${content.length > 1200 ? "\n…" : ""}`;
+    }
+
+    default:
+      return `Unknown command \`/${cmd}\`. Try \`/help\`.`;
+  }
+}
+
 // ── Route ──────────────────────────────────────────────────────
 
 export default async function plannerAgentRoute(fastify) {
@@ -192,7 +280,9 @@ export default async function plannerAgentRoute(fastify) {
     ]);
 
     const permissionMode =
-      body.permission_mode === "ask" ? "ask" : "auto";
+      body.permission_mode === "ask"  ? "ask"
+      : body.permission_mode === "plan" ? "plan"
+      : "auto";
 
     const workspacePath = authSession.workspace_path || "";
 
@@ -252,18 +342,12 @@ export default async function plannerAgentRoute(fastify) {
       agentMemoryIndex  ? `Agent memory:\n${agentMemoryIndex}`          : "",
     ].filter(Boolean).join("\n\n");
 
-    // ── Concurrent-request guard ──────────────────────────────────────────────
-    // If this session already has a request in-flight, reject immediately.
-    // Two parallel graph runs share file state and corrupt each other's patches.
-    if (activeSessionRequests.has(sessionId)) {
-      const existingId = activeSessionRequests.get(sessionId);
-      console.warn(`[PlannerAgent] Session ${sessionId} busy (${existingId}) — rejecting duplicate`);
-      return reply.code(409).send({
-        ok: false,
-        error: "A request is already processing for this session. Please wait for it to complete.",
-      });
-    }
-    activeSessionRequests.set(sessionId, requestId);
+    // ── Concurrent-request queue ──────────────────────────────────────────────
+    // Two parallel graph runs for the same session would corrupt each other's
+    // file edits, so register this request's place in line now (synchronous —
+    // preserves arrival order); the actual wait happens further down, after the
+    // SSE stream is open and can tell the client it's queued.
+    const { prevTail: sessionSlotPrevTail, release: releaseSessionSlot, hadToWait: sessionSlotQueued } = registerSessionSlot(sessionId);
 
     const sessionLabel = normalizeSessionLabel(message, []);
     createSession(sessionId, userId, sessionLabel);
@@ -316,8 +400,39 @@ export default async function plannerAgentRoute(fastify) {
       }
     }
 
-        // ── Run the LangGraph (with hard timeout so SSE always closes) ───────────
-    const GRAPH_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes max (multi-task needs headroom)
+    // Now that the SSE stream is open, wait for our turn if a previous request
+    // for this session is still running — the client sees a "queued" progress
+    // event instead of dead air (or, as before, a hard 409 rejection).
+    if (sessionSlotQueued) {
+      emit({ type: "progress", stage: "queued", message: "⏳ Waiting for a previous request in this session to finish..." });
+    }
+    await sessionSlotPrevTail.catch(() => {}); // don't let a prior failure jam the queue
+
+    // ── Slash commands: handled without touching the graph ───────────────────
+    if (effectiveMessage.startsWith("/")) {
+      try {
+        const slashReply = await handleSlashCommand(effectiveMessage, { workspacePath, modelRoute });
+        if (slashReply) {
+          emit({ type: "content", content: slashReply });
+          emit({ type: "done", request_id: requestId, summary: slashReply, metadata: { type: "command", request_id: requestId, ...modelMeta } });
+          reply.raw.end();
+          saveMessage(sessionId, userId, "assistant", slashReply, "command");
+          touchSession(sessionId, userId);
+          releaseSessionSlot();
+          return reply;
+        }
+      } catch (err) {
+        const msg = `Command failed: ${err.message}`;
+        emit({ type: "content", content: msg });
+        emit({ type: "done", request_id: requestId, summary: msg, metadata: { type: "command", request_id: requestId, ...modelMeta } });
+        reply.raw.end();
+        releaseSessionSlot();
+        return reply;
+      }
+    }
+
+    // ── Run the LangGraph (with hard timeout so SSE always closes) ───────────
+    const GRAPH_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes max
 
     // Client disconnect handling
     const controller = new AbortController();
@@ -375,7 +490,7 @@ export default async function plannerAgentRoute(fastify) {
 
     if (raceResult.timedOut) {
       console.warn("[Agent] ⏱️ Graph timeout — closing SSE stream");
-      activeSessionRequests.delete(sessionId);
+      releaseSessionSlot();
       emit({ type: "content", content: "The task is taking longer than expected. Please try again." });
       emit({ type: "done", request_id: requestId, summary: "",
              metadata: { type: "graph", request_id: requestId, ...modelMeta } });
@@ -386,7 +501,7 @@ export default async function plannerAgentRoute(fastify) {
     if (!raceResult.ok) {
       const graphError = raceResult.error;
       console.error("❌ LangGraph error:", graphError);
-      activeSessionRequests.delete(sessionId);
+      releaseSessionSlot();
       emit({ type: "error", error: "Graph execution failed", details: graphError.message });
       reply.raw.end();
       saveMessage(sessionId, userId, "assistant", `Error: ${graphError.message}`, "error");
@@ -397,6 +512,7 @@ export default async function plannerAgentRoute(fastify) {
 
     finalAnswer = raceResult.result.finalAnswer || "";
     editedFiles  = raceResult.result.editedFiles  || [];
+    const usage  = raceResult.result.usage || null;
 
     // ── Done ──────────────────────────────────────────────────
     // The answer node streams content chunks during execution (contentEmitted=true).
@@ -414,6 +530,7 @@ export default async function plannerAgentRoute(fastify) {
         type:       "graph",
         request_id: requestId,
         ...modelMeta,
+        ...(usage ? { usage } : {}),
       },
     });
 
@@ -455,7 +572,7 @@ export default async function plannerAgentRoute(fastify) {
     });
 
     // Release session lock and cleanup abort listener
-    activeSessionRequests.delete(sessionId);
+    releaseSessionSlot();
     request.raw.removeListener("close", abortListener);
 
     return reply;
@@ -606,16 +723,38 @@ export default async function plannerAgentRoute(fastify) {
       const messages = getSessionMessages(sessionId, authSession.user_id);
       if (!messages.length) return { ok: true, summary: "(empty conversation)", messageCount: 0 };
 
-      // Build a condensed transcript — last 20 messages, 400 chars each
-      const transcript = messages.slice(-20).map((m) => {
+      // Real compaction (Claude Code approach): LLM-summarize the WHOLE
+      // transcript so long sessions keep their decisions, not just their tail.
+      const transcript = messages.map((m) => {
         const role    = m.role === "user" ? "User" : "Assistant";
-        const snippet = String(m.content || "").replace(/\s+/g, " ").slice(0, 400);
+        const snippet = String(m.content || "").replace(/\s+/g, " ").slice(0, 600);
         return `${role}: ${snippet}`;
-      }).join("\n\n");
+      }).join("\n").slice(-40_000);
 
-      const summary =
-        `[Compacted — ${messages.length} message${messages.length === 1 ? "" : "s"} in this conversation]\n\n` +
-        `Recent context:\n${transcript}`;
+      let summary;
+      try {
+        const settings   = await loadSettings();
+        const modelRoute = routeModel(settings, false);
+        const { callLLM } = await import("../services/llm.mjs");
+        const result = await callLLM({
+          system: "Summarize this coding-session conversation for context compaction. Keep: what the user is building, decisions made, files created/edited, current state, unresolved issues, and user preferences. Omit pleasantries. Max 40 lines.",
+          messages: [{ role: "user", content: transcript }],
+          modelRoute,
+          maxTokens: 1200,
+          temperature: 0.2,
+        });
+        const llmSummary = String(result?.content || "").trim();
+        if (!llmSummary) throw new Error("empty summary");
+        summary = `[Compacted — ${messages.length} messages summarized]\n\n${llmSummary}`;
+      } catch (err) {
+        // Fallback: condensed tail (old behaviour) if the LLM call fails
+        console.warn("[Compact] LLM summarization failed, using tail fallback:", err.message);
+        const tail = messages.slice(-20).map((m) => {
+          const role = m.role === "user" ? "User" : "Assistant";
+          return `${role}: ${String(m.content || "").replace(/\s+/g, " ").slice(0, 400)}`;
+        }).join("\n\n");
+        summary = `[Compacted — ${messages.length} messages in this conversation]\n\nRecent context:\n${tail}`;
+      }
 
       return { ok: true, summary, messageCount: messages.length };
     } catch (err) {

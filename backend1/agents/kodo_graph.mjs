@@ -1,58 +1,39 @@
 /**
  * kodo_graph.mjs
  *
- * Graph topology (post-agentic-loop refactor):
+ * Graph topology (Claude Code refactor — one agent, no phases):
  *
  *   START
  *     ↓
  *   router
- *     ├── answer          (questions / greetings)
- *     ├── pipeline        (full project scaffolding)
- *     ├── run_tests       ("run tests")
- *     ├── install_packages ("install X")
- *     └── agentic_explore (all code edits and bug fixes)
+ *     ├── answer      (greetings / questions / conversation — streams)
+ *     └── agent_loop  (EVERYTHING else: edits, bugs, tests, installs,
+ *                      multi-step work — one unified tool loop that
+ *                      reads, edits, runs commands, and verifies itself)
  *               ↓
- *         plan_changes     (LLM plans patches from gathered context)
- *               ↓
- *        execute_changes   (applies patches to disk)
- *               ↓
- *            verify        (file existence, lint, typecheck, tests)
- *               │
- *     re-plan if issues (≤ 2 retries, feeding fresh file context)
- *               │
  *              END
  *
- * The key change: the former rigid chain
- *   investigate_workspace → workspace_index → stacktrace_parser →
- *   symbol_search → grep_workspace → dependency_context
- * is replaced by a single agenticExploreNode where the model calls
- * tools (read_file, grep_code, list_files) iteratively until it has
- * gathered enough context to plan with confidence.
+ * The old explore → plan → execute → verify pipeline, the regex intent
+ * router, and the multi-task decomposer are gone: the agent loop plans
+ * with a todo list, edits incrementally with edit_file/write_file, and
+ * verifies by running real commands via bash.
  */
 
 import { StateGraph, END, START } from "@langchain/langgraph";
 
-import { routerNode }          from "./nodes/router.mjs";
-import { agenticExploreNode }  from "./nodes/agentic_explore.mjs";
-import { planChangesNode }     from "./nodes/plan_changes.mjs";
-import { executeChangesNode }  from "./nodes/execute_changes.mjs";
-import { verifyNode }          from "./nodes/verify.mjs";
-import { answerNode }          from "./nodes/answer.mjs";
-import { runTestsNode }        from "./nodes/run_tests.mjs";
-import { installPackagesNode } from "./nodes/install_packages.mjs";
-import { multiTaskRunnerNode } from "./nodes/multi_task_runner.mjs";
+import { routerNode }    from "./nodes/router.mjs";
+import { agentLoopNode } from "./nodes/agent_loop.mjs";
+import { answerNode }    from "./nodes/answer.mjs";
 
 // ── State annotation ──────────────────────────────────────────────────────────
 
 export const KodoStateAnnotation = {
-  // Conversation history
   messages: {
     default: () => [],
     reducer: (prev, next) =>
       Array.isArray(next) ? [...prev, ...next] : [...prev, next],
   },
 
-  // Routing
   intent: { default: () => "" },
 
   // Request context
@@ -64,46 +45,22 @@ export const KodoStateAnnotation = {
   requestId:       { default: () => "" },
   userId:          { default: () => "" },
 
-  // Memory: the last file the user worked on (carried across turns)
+  // The last file the user worked on (carried across turns)
   rememberedTargetFile: {
     default: () => "",
-    reducer: (prev, next) =>
-      next !== undefined && next !== "" ? next : prev,
+    reducer: (prev, next) => (next !== undefined && next !== "" ? next : prev),
   },
 
-  // Exploration output → consumed by plan_changes
-  fileContext: {
-    default: () => [],
-    reducer: (prev, next) =>
-      Array.isArray(next) && next.length ? next : prev,
-  },
-  investigation: {
-    default: () => null,
-    reducer: (prev, next) => next ?? prev,
-  },
-
-  // Plan + execution
-  plan:             { default: () => [] },
-  executionResults: { default: () => [] },
-
-  // Verification
-  verifyResult: { default: () => null },
-  retryCount:   { default: () => 0 },
-
-  // Test runner output
-  testReport: {
-    default: () => null,
-    reducer: (prev, next) => next ?? prev,
-  },
-
-  // Final streamed answer
+  // Outputs
   finalAnswer: { default: () => "" },
+  editedFiles: { default: () => [] },
+  usage:       { default: () => null },
 
-    // SSE emitter — injected by graph_runner, never serialised
-  emit: { default: () => null },
-
-  // AbortController signal for cancellation
-  abortSignal: { default: () => null },
+  // Runtime plumbing — injected by graph_runner, never serialised
+  emit:            { default: () => null },
+  abortSignal:     { default: () => null },
+  permissionMode:  { default: () => "auto" },
+  approvalPromise: { default: () => null },
 };
 
 // ── Error boundary ────────────────────────────────────────────────────────────
@@ -121,82 +78,26 @@ function withErrorBoundary(nodeName, fn) {
   };
 }
 
-// ── Edge functions ────────────────────────────────────────────────────────────
-
-function routerEdge(state) {
-  switch (state.intent) {
-    case "scaffold_create":
-      // Trivial file/folder creation — router already built the plan directly,
-      // skip agentic_explore and plan_changes (no LLM call needed for this at all).
-      return "execute_changes";
-    case "multi_task":
-      return "multi_task_runner";
-    case "investigate":
-    case "explore":
-    case "pipeline":
-      return "agentic_explore";
-    case "test":
-      return "run_tests";
-    case "install":
-      return "install_packages";
-    default:
-      return "answer";
-  }
-}
-
-function verifyEdge(state) {
-  const MAX_RETRIES = 2;
-  if (!state.verifyResult?.ok && (state.retryCount || 0) < MAX_RETRIES) {
-    console.log(`[Graph] Verify failed — retry ${state.retryCount}/${MAX_RETRIES}`);
-    return "plan_changes";
-  }
-  return END;
-}
-
 // ── Graph factory ─────────────────────────────────────────────────────────────
 
 export function buildKodoGraph() {
   const graph = new StateGraph({ channels: KodoStateAnnotation });
 
   graph
-    .addNode("router",            withErrorBoundary("router",            routerNode))
-    .addNode("agentic_explore",   withErrorBoundary("agentic_explore",   agenticExploreNode))
-    .addNode("plan_changes",      withErrorBoundary("plan_changes",      planChangesNode))
-    .addNode("execute_changes",   withErrorBoundary("execute_changes",   executeChangesNode))
-    .addNode("verify",            withErrorBoundary("verify",            verifyNode))
-    .addNode("answer",            withErrorBoundary("answer",            answerNode))
-    .addNode("run_tests",         withErrorBoundary("run_tests",         runTestsNode))
-    .addNode("install_packages",  withErrorBoundary("install_packages",  installPackagesNode))
-    .addNode("multi_task_runner", withErrorBoundary("multi_task_runner", multiTaskRunnerNode));
+    .addNode("router",     withErrorBoundary("router",     routerNode))
+    .addNode("agent_loop", withErrorBoundary("agent_loop", agentLoopNode))
+    .addNode("answer",     withErrorBoundary("answer",     answerNode));
 
-  // Entry point
   graph.addEdge(START, "router");
 
-  // Router dispatches to one of seven paths
-  graph.addConditionalEdges("router", routerEdge, {
-    multi_task_runner: "multi_task_runner",
-    agentic_explore:   "agentic_explore",
-    answer:            "answer",
-    run_tests:         "run_tests",
-    install_packages:  "install_packages",
-    execute_changes:   "execute_changes",
-  });
+  graph.addConditionalEdges(
+    "router",
+    (state) => (state.intent === "answer" ? "answer" : "agent_loop"),
+    { answer: "answer", agent_loop: "agent_loop" }
+  );
 
-  // Code-edit pipeline: explore → plan → execute → verify → (retry | done)
-  graph.addEdge("agentic_explore", "plan_changes");
-  graph.addEdge("plan_changes",    "execute_changes");
-  graph.addEdge("execute_changes", "verify");
-
-  graph.addConditionalEdges("verify", verifyEdge, {
-    plan_changes: "plan_changes",
-    [END]:        END,
-  });
-
-  // Terminal nodes
-  graph.addEdge("answer",            END);
-  graph.addEdge("run_tests",         END);
-  graph.addEdge("install_packages",  END);
-  graph.addEdge("multi_task_runner", END); // runs full pipeline internally per task
+  graph.addEdge("agent_loop", END);
+  graph.addEdge("answer", END);
 
   return graph.compile();
 }

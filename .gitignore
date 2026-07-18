@@ -1,2 +1,16 @@
 node_modules
 .env
+.env.*
+
+# Runtime artifacts — never commit
+.agent-history/
+.claude/settings.local.json
+database.sqlite
+backend1/memory.db*
+backend1/uploads/
+backend1/temp_audio/
+backend1/data/settings.json
+*.tsbuildinfo
+.next/
+dist/
+build/

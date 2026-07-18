@@ -1,3 +1,4 @@
+import "./config/env.mjs"; // MUST stay first — loads .env before other modules read it
 import Fastify from "fastify";
 import path from "path";
 import fs from "fs/promises";
@@ -11,6 +12,20 @@ import workspaceRoute from "./routes/workspace.mjs";
 
 const fastify = Fastify({
   logger: true,
+});
+
+// Fastify's default JSON parser 400s on an empty body (FST_ERR_CTP_EMPTY_JSON_BODY).
+// The UI legitimately sends body-less JSON POSTs (e.g. the plan-approval
+// /confirm/:requestId click) — treat an empty body as {} instead of erroring.
+fastify.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
+  const text = String(body || "").trim();
+  if (!text) return done(null, {});
+  try {
+    done(null, JSON.parse(text));
+  } catch (err) {
+    err.statusCode = 400;
+    done(err, undefined);
+  }
 });
 
 const UPLOAD_DIR = path.join(process.cwd(), "uploads");
@@ -48,9 +63,12 @@ if (multipartAvailable && multipartPlugin) {
   });
 }
 
+// Lock CORS to the frontend origin; override with KODO_ALLOWED_ORIGIN for other setups.
+const ALLOWED_ORIGIN = process.env.KODO_ALLOWED_ORIGIN || "http://localhost:3000";
+
 fastify.addHook("onRequest", async (request, reply) => {
     reply.header("X-Request-ID", crypto.randomUUID());
-  reply.header("Access-Control-Allow-Origin", "*");
+  reply.header("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
   reply.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   reply.header(
     "Access-Control-Allow-Headers",
@@ -115,6 +133,10 @@ fastify.post("/api/agent/upload", async (request, reply) => {
 
 fastify.get("/uploads/:filename", async (request, reply) => {
   const { filename } = request.params;
+  // Serve only plain basenames — no separators, no traversal, no hidden files.
+  if (!/^[\w][\w.-]*$/.test(filename) || filename.includes("..")) {
+    return reply.code(400).send({ ok: false, error: "Invalid filename" });
+  }
   const filePath = path.join(UPLOAD_DIR, filename);
 
   try {

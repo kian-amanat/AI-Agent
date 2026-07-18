@@ -276,6 +276,14 @@ async function getDesignSystem(userMessage = "") {
       return null;
     }
 
+console.log({
+  promptChars: prompt.length,
+  workspaceChars: workspaceContext.length,
+  currentChars: currentContent.length,
+  globalContextChars: JSON.stringify(globalSmartContext).length,
+  fileContextChars: JSON.stringify(fileSmartContext).length,
+});
+
     const response = await client.chat.completions.create({
       model: MODEL,
       temperature: 0.1,
@@ -526,7 +534,13 @@ ${loadedFilesText}
     role: "user",
     content: userMessage,
   });
-
+console.log({
+  promptChars: prompt.length,
+  workspaceChars: workspaceContext.length,
+  currentChars: currentContent.length,
+  globalContextChars: JSON.stringify(globalSmartContext).length,
+  fileContextChars: JSON.stringify(fileSmartContext).length,
+});
   for (let step = 0; step < 15; step++) {
     const response = await client.chat.completions.create({
       model: MODEL,

@@ -1,30 +1,61 @@
+/**
+ * utils/file.util.mjs
+ * Self-contained file helpers (previously depended on the deleted root tools/).
+ * Used by attachments.service and response.service.
+ */
+
 import path from "path";
 import fsSync from "fs";
-import { readFile as readFileAsync } from "fs/promises";
-import { listBackendFiles } from "../../tools/list_backend_files.js";
-import { readProjectFile } from "../../tools/readProjectFile.js";
-import { PROJECT_ROOT, PLANS_DIR } from "../config/openai.mjs";
+import { promises as fs } from "fs";
+import { PROJECT_ROOT } from "../config/openai.mjs";
 import {
   buildResolvedPathCandidates,
-  inferLanguageFromPath,
   normalizePath,
 } from "./path.util.mjs";
 import { extractCandidateFilePaths, uniq } from "./text.util.mjs";
+
+const SKIP_DIRS = new Set([
+  "node_modules", ".git", ".next", "dist", "build", "coverage", ".turbo",
+  ".cache", "out", ".agent-history", ".kodo", "uploads", "temp_audio",
+  ".claude", ".vscode", ".idea",
+]);
+
+async function walkFiles(rootAbs, maxDepth = 8, depth = 0, relBase = "") {
+  if (depth > maxDepth) return [];
+  let entries;
+  try { entries = await fs.readdir(rootAbs, { withFileTypes: true }); }
+  catch { return []; }
+
+  const out = [];
+  for (const e of entries) {
+    if (SKIP_DIRS.has(e.name)) continue;
+    const rel = relBase ? `${relBase}/${e.name}` : e.name;
+    if (e.isDirectory()) {
+      out.push({ path: rel, is_dir: true });
+      out.push(...await walkFiles(path.join(rootAbs, e.name), maxDepth, depth + 1, rel));
+    } else {
+      out.push({ path: rel, is_dir: false });
+    }
+  }
+  return out;
+}
 
 export async function readFileContent(relPath, maxBytes = 200000) {
   try {
     const normalized = normalizePath(relPath);
     const abs = path.resolve(PROJECT_ROOT, normalized);
-
+    if (!abs.startsWith(path.resolve(PROJECT_ROOT))) return "";
     if (!fsSync.existsSync(abs)) return "";
-
-    const res = await readProjectFile({
-      path: normalized,
-      maxBytes,
-    });
-
-    if (!res?.success) return "";
-    return String(res.content || "");
+    const stat = await fs.stat(abs);
+    if (!stat.isFile()) return "";
+    if (stat.size > maxBytes) {
+      const fd = await fs.open(abs, "r");
+      const buf = Buffer.alloc(maxBytes);
+      await fd.read(buf, 0, maxBytes, 0);
+      await fd.close();
+      return buf.toString("utf-8");
+    }
+    return await fs.readFile(abs, "utf-8");
   } catch {
     return "";
   }
@@ -39,41 +70,22 @@ export function stripToPreview(content, maxChars = 1800) {
 export async function findFilesByName(filename, { dir = "", limit = 10 } = {}) {
   const target = String(filename || "").trim().toLowerCase();
   if (!target) return [];
-
   const baseName = path.basename(target);
 
-  let res;
-  try {
-    res = await listBackendFiles({
-      dir,
-      maxDepth: 12,
-      includeFiles: true,
-      includeDirs: false,
-      includeMeta: true,
-    });
-  } catch {
-    return [];
-  }
+  const rootAbs = dir ? path.resolve(PROJECT_ROOT, dir) : PROJECT_ROOT;
+  let files;
+  try { files = await walkFiles(rootAbs, 8, 0, dir || ""); }
+  catch { return []; }
 
-  if (!res?.success || !Array.isArray(res.files)) return [];
-
-  const scored = res.files
+  const scored = files
     .filter((item) => !item.is_dir)
     .map((item) => {
       const filePath = String(item.path || "");
       const name = path.basename(filePath).toLowerCase();
-
       const exact = name === baseName ? 100 : 0;
       const ends = name.endsWith(baseName) ? 80 : 0;
       const includes = name.includes(baseName) ? 60 : 0;
-      const areaBonus =
-        filePath.includes("frontend/") ||
-        filePath.includes("app/") ||
-        filePath.includes("src/") ||
-        filePath.includes("uploads/")
-          ? 5
-          : 0;
-
+      const areaBonus = /(?:^|\/)(app|src|components?)\//.test(filePath) ? 5 : 0;
       return {
         path: filePath.replace(/\\/g, "/"),
         score: exact || ends || includes ? (exact || ends || includes) + areaBonus : 0,
@@ -95,118 +107,30 @@ export async function readExactReferencedFiles(userMessage) {
 
   for (const candidate of candidatePaths) {
     const resolvedCandidates = buildResolvedPathCandidates(candidate, PROJECT_ROOT);
-
     for (const absPath of resolvedCandidates) {
       const relPath = path.relative(PROJECT_ROOT, absPath).replace(/\\/g, "/");
-
       if (seen.has(relPath)) continue;
       if (!fsSync.existsSync(absPath)) continue;
-
       let stat;
-      try {
-        stat = fsSync.statSync(absPath);
-      } catch {
-        continue;
-      }
-
+      try { stat = fsSync.statSync(absPath); } catch { continue; }
       if (!stat.isFile()) continue;
 
       const content = await readFileContent(relPath);
       if (!content) continue;
 
-      snippets.push({
-        path: relPath,
-        content: content.slice(0, 3000),
-      });
-
+      snippets.push({ path: relPath, content: content.slice(0, 3000) });
       seen.add(relPath);
-
       if (snippets.length >= 8) return snippets;
     }
   }
-
   return snippets;
-}
-
-export async function collectReferenceSnippets(userMessage) {
-  const seen = new Set();
-  const snippets = [];
-
-  const hints = uniq([
-    "page.tsx",
-    "layout.tsx",
-    "globals.css",
-    "page.jsx",
-    "layout.jsx",
-    "globals.scss",
-    "globals.sass",
-    "globals.less",
-    ...extractCandidateFilePaths(userMessage),
-  ]);
-
-  for (const name of hints) {
-    const matches = await findFilesByName(name, { dir: "", limit: 3 });
-
-    for (const relPath of matches) {
-      if (seen.has(relPath)) continue;
-      seen.add(relPath);
-
-      const content = await readFileContent(relPath);
-      if (!content) continue;
-
-      snippets.push({
-        path: relPath,
-        content: content.slice(0, 3500),
-      });
-
-      if (snippets.length >= 8) return snippets;
-    }
-  }
-
-  return snippets;
-}
-
-export async function summarizeProjectStructure(scope) {
-  const summary = { backend: "", frontend: "" };
-
-  const collect = async (dirLabel, dirRelPath) => {
-    try {
-      const res = await listBackendFiles({
-        dir: dirRelPath,
-        maxDepth: 5,
-        includeFiles: true,
-        includeDirs: true,
-        includeMeta: false,
-      });
-
-      if (res?.success && Array.isArray(res.files)) {
-        const lines = res.files.map((e) => `${e.is_dir ? "DIR " : "FILE"}: ${e.path}`);
-        return lines.length ? lines.join("\n") : `<${dirLabel} dir is empty>`;
-      }
-
-      return `<${dirLabel} dir is empty>`;
-    } catch (e) {
-      return `<error: ${String(e)}>`;
-    }
-  };
-
-  if (scope === "backend" || scope === "fullstack" || scope === "unknown") {
-    summary.backend = await collect("backend", "backend");
-  }
-
-  if (scope === "frontend" || scope === "fullstack" || scope === "unknown") {
-    summary.frontend = await collect("frontend", "frontend");
-  }
-
-  return summary;
 }
 
 function buildInspectionHints(message) {
   const msg = String(message || "").toLowerCase();
   const hints = [];
 
-  const explicitFiles = extractCandidateFilePaths(message);
-  hints.push(...explicitFiles);
+  hints.push(...extractCandidateFilePaths(message));
 
   const folderMatch = msg.match(/\b([a-z0-9._-]+)\s+(folder|directory)\b/i);
   if (folderMatch?.[1]) hints.push(folderMatch[1]);
@@ -214,32 +138,18 @@ function buildInspectionHints(message) {
   if (msg.includes("page")) hints.push("page.tsx", "page.jsx");
   if (msg.includes("layout")) hints.push("layout.tsx", "layout.jsx");
   if (msg.includes("globals")) hints.push("globals.css", "globals.scss");
-  if (msg.includes("login")) hints.push("login.tsx", "login/page.tsx", "page.tsx");
   if (msg.includes("sidebar")) hints.push("sidebar.tsx", "Sidebar.tsx");
   if (msg.includes("header")) hints.push("header.tsx", "Header.tsx");
-  if (msg.includes("chatbot")) hints.push("chatbot", "my-chatbot-ui", "page.tsx", "routes");
-  if (msg.includes("loginform")) hints.push("LoginForm.tsx", "LoginForm.jsx", "LoginForm");
-  if (msg.includes("register") || msg.includes("signup")) {
-    hints.push(
-      "RegisterForm.tsx",
-      "SignupForm.tsx",
-      "register/page.tsx",
-      "signup/page.tsx"
-    );
-  }
+  if (msg.includes("navbar")) hints.push("Navbar.tsx", "NavBar.tsx", "navbar.tsx");
   if (msg.includes("form")) hints.push("Form.tsx", "form.tsx");
   if (msg.includes("button")) hints.push("Button.tsx", "button.tsx");
   if (msg.includes("modal")) hints.push("Modal.tsx", "modal.tsx");
-  if (msg.includes("navbar")) hints.push("Navbar.tsx", "NavBar.tsx", "navbar.tsx");
-  if (msg.includes("dashboard")) hints.push("dashboard/page.tsx", "Dashboard.tsx");
-  if (msg.includes("auth")) hints.push("auth.ts", "auth.tsx", "auth/page.tsx", "[...nextauth]");
 
   return uniq(hints.map((h) => String(h || "").trim()).filter(Boolean));
 }
 
 export async function collectInspectionTargets(message, attachments = []) {
   const hints = buildInspectionHints(message);
-
   for (const item of attachments) {
     hints.push(item.path, item.originalName, path.basename(item.path));
   }
@@ -249,15 +159,12 @@ export async function collectInspectionTargets(message, attachments = []) {
 
   for (const hint of uniq(hints)) {
     const matches = await findFilesByName(hint, { dir: "", limit: 8 });
-
     for (const file of matches) {
       if (seen.has(file)) continue;
       seen.add(file);
       found.push(file);
-
       if (found.length >= 12) return found;
     }
   }
-
   return found;
 }

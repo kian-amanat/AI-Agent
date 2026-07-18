@@ -13,6 +13,7 @@
 import OpenAI from "openai";
 import { readFile } from "fs/promises";
 import path from "path";
+import { chatWithTools, isAnthropicRoute } from "./agentChat.mjs";
 
 const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
 
@@ -97,12 +98,12 @@ function makeClient({ apiKey, baseURL }, timeout = 180_000) {
   });
 }
 
-async function chatCompletionWithRetry(client, params, retries = 1) {
+async function chatCompletionWithRetry(client, params, retries = 1, signal) {
   let lastErr = null;
 
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await client.chat.completions.create(params);
+      return await client.chat.completions.create(params, signal ? { signal } : undefined);
     } catch (err) {
       lastErr = err;
       if (attempt < retries && isRetryableError(err)) {
@@ -125,8 +126,28 @@ export async function callLLM({
   temperature = 0.3,
   retries = 1,
   stream: useStream = false,
+  signal,
 }) {
   const creds = await resolveCredentials(modelRoute);
+
+  // Anthropic goes through the native Messages API adapter — the OpenAI
+  // chat.completions shim on api.anthropic.com is not a supported protocol.
+  if (isAnthropicRoute({ baseURL: creds.baseURL, model: creds.model })) {
+    let lastErr = null;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      try {
+        const { message } = await chatWithTools({
+          creds, system, messages, tools: [], maxTokens, temperature, signal,
+        });
+        return { content: String(message?.content || "") };
+      } catch (err) {
+        lastErr = err;
+        if (attempt < retries && isRetryableError(err)) { await sleep(700 * (attempt + 1)); continue; }
+        throw err;
+      }
+    }
+    throw lastErr;
+  }
 
   // Thinking models (qwen-*-thinking, *-r1, deepseek-reasoner) can reason for
   // minutes. Non-streaming requests get killed by gateway timeouts (504) before
@@ -235,7 +256,8 @@ export async function callLLM({
   const response = await chatCompletionWithRetry(
     client,
     { model: creds.model, messages: fullMessages, max_tokens: maxTokens, temperature },
-    retries
+    retries,
+    signal
   );
 
   const msg = response.choices?.[0]?.message || {};
@@ -277,8 +299,19 @@ export async function streamLLM({
   temperature = 0.3,
   onChunk,
   retries = 1,
+  signal,
 }) {
   const creds = await resolveCredentials(modelRoute);
+
+  // Anthropic: use the native adapter (non-streaming) and deliver the full
+  // answer as a single chunk — correctness over token-level streaming.
+  if (isAnthropicRoute({ baseURL: creds.baseURL, model: creds.model })) {
+    const { message } = await chatWithTools({ creds, system, messages, tools: [], maxTokens, temperature, signal });
+    const content = String(message?.content || "");
+    if (content) onChunk?.(content);
+    return;
+  }
+
   const client = makeClient(creds);
 
   console.log(`[LLM] streamLLM → model=${creds.model} baseURL=${creds.baseURL}`);
