@@ -3,7 +3,7 @@
 import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import {
-  Archive, FolderTree, PanelLeftClose,
+  Archive, Bell, BellOff, BellRing, FolderTree, PanelLeftClose,
   PanelRightClose, Settings, Shield, ShieldCheck,
 } from "lucide-react";
 
@@ -17,6 +17,8 @@ export default function ChatHeader({
   onToggleFileTree,
   fileTreeOpen,
   isSending,
+  notificationPermission,
+  onRequestNotifications,
 }: {
   onToggleSidebar:        () => void;
   permissionMode:         PermissionMode;
@@ -25,6 +27,8 @@ export default function ChatHeader({
   onToggleFileTree:       () => void;
   fileTreeOpen:           boolean;
   isSending:              boolean;
+  notificationPermission?: NotificationPermission;
+  onRequestNotifications?: () => void;
 }) {
   const router = useRouter();
   const isAsk = permissionMode === "ask";
@@ -60,6 +64,29 @@ export default function ChatHeader({
           }
           <span className="hidden sm:inline">{isAsk ? "Ask" : "Auto"}</span>
         </motion.button>
+
+        {/* Notifications */}
+        {onRequestNotifications && (
+          <motion.button
+            whileTap={{ scale: 0.95 }}
+            onClick={onRequestNotifications}
+            disabled={notificationPermission === "denied"}
+            title={
+              notificationPermission === "granted" ? "Notifications on — you'll be alerted when a task finishes or needs approval"
+              : notificationPermission === "denied" ? "Notifications blocked in your browser settings"
+              : "Enable notifications for task-done / approval alerts"
+            }
+            className={`flex h-[34px] w-[34px] items-center justify-center rounded-xl border transition-colors disabled:opacity-40 ${
+              notificationPermission === "granted"
+                ? "border-[#ff8a3d]/25 bg-[#ff8a3d]/8 text-[#ff8a3d]"
+                : "border-white/[0.06] bg-white/[0.03] text-white/45 hover:bg-white/[0.05] hover:text-white/70"
+            }`}
+          >
+            {notificationPermission === "granted" ? <BellRing className="h-3.5 w-3.5" />
+              : notificationPermission === "denied" ? <BellOff className="h-3.5 w-3.5" />
+              : <Bell className="h-3.5 w-3.5" />}
+          </motion.button>
+        )}
 
         {/* Compact */}
         <motion.button

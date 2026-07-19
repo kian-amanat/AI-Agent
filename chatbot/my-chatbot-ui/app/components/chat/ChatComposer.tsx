@@ -3,14 +3,15 @@
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  ChevronDown, FileCode2, GitBranch, Loader2, Mic, Paperclip,
+  ChevronDown, FileCode2, FolderOpen, GitBranch, Loader2, Mic, Paperclip,
   Shield, ShieldCheck, StopCircle, X,
 } from "lucide-react";
 import NorthRoundedIcon from "@mui/icons-material/NorthRounded";
 import StopRoundedIcon from "@mui/icons-material/StopRounded";
 import {
-  fetchGitBranches, fetchGitStatus, switchGitBranch, transcribeAudio,
-  type GitBranchInfo, type GitStatus,
+  fetchGitBranches, fetchGitStatus, fetchWorkspaceRoots, switchGitBranch,
+  switchWorkspaceRoot, transcribeAudio,
+  type GitBranchInfo, type GitStatus, type WorkspaceRootInfo,
 } from "../../lib/api";
 import SlashCommandPalette, { type SlashCommandId } from "./SlashCommandPalette";
 
@@ -87,18 +88,31 @@ export default function ChatComposer({
   const [branchError, setBranchError]             = React.useState<string | null>(null);
   const branchDropdownRef = React.useRef<HTMLDivElement>(null);
 
-  // Close dropdown on outside click
+  // Root (project folder) dropdown state — flat list of SIBLING project
+  // folders (e.g. ai-sandbox and avand under the same parent dir), same
+  // shape as the branch dropdown: no hierarchy, click a name, it switches.
+  const [showRootDropdown, setShowRootDropdown] = React.useState(false);
+  const [rootCurrent, setRootCurrent]           = React.useState<WorkspaceRootInfo | null>(null);
+  const [rootOptions, setRootOptions]           = React.useState<WorkspaceRootInfo[]>([]);
+  const [rootLoading, setRootLoading]           = React.useState(false);
+  const [rootError, setRootError]               = React.useState<string | null>(null);
+  const rootDropdownRef = React.useRef<HTMLDivElement>(null);
+
+  // Close dropdowns on outside click
   React.useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (branchDropdownRef.current && !branchDropdownRef.current.contains(e.target as Node)) {
         setShowBranchDropdown(false);
       }
+      if (rootDropdownRef.current && !rootDropdownRef.current.contains(e.target as Node)) {
+        setShowRootDropdown(false);
+      }
     }
-    if (showBranchDropdown) {
+    if (showBranchDropdown || showRootDropdown) {
       document.addEventListener("mousedown", handleClick);
       return () => document.removeEventListener("mousedown", handleClick);
     }
-  }, [showBranchDropdown]);
+  }, [showBranchDropdown, showRootDropdown]);
 
   // Fetch git status on mount, refresh every 30 s
   React.useEffect(() => {
@@ -153,6 +167,48 @@ export default function ChatComposer({
       return !p;
     });
   }, [loadBranches]);
+
+  // Load sibling projects when dropdown opens — mirrors loadBranches exactly.
+  const loadRoots = React.useCallback(async () => {
+    setRootLoading(true);
+    setRootError(null);
+    try {
+      const result = await fetchWorkspaceRoots();
+      setRootCurrent(result.current);
+      setRootOptions(result.options);
+    } catch (err) {
+      setRootError(err instanceof Error ? err.message : "Failed to load folders");
+    } finally {
+      setRootLoading(false);
+    }
+  }, []);
+
+  const handleRootSelect = React.useCallback(
+    async (root: WorkspaceRootInfo) => {
+      setRootLoading(true);
+      setRootError(null);
+      try {
+        await switchWorkspaceRoot(root);
+        // Refresh so the dropdown reflects the new current project
+        const result = await fetchWorkspaceRoots();
+        setRootCurrent(result.current);
+        setRootOptions(result.options);
+        setShowRootDropdown(false);
+      } catch (err) {
+        setRootError(err instanceof Error ? err.message : "Failed to switch folder");
+      } finally {
+        setRootLoading(false);
+      }
+    },
+    []
+  );
+
+  const toggleRootDropdown = React.useCallback(() => {
+    setShowRootDropdown((p) => {
+      if (!p) void loadRoots();
+      return !p;
+    });
+  }, [loadRoots]);
 
   // @-file mentions extracted from the current input
   const atMentions = React.useMemo(
@@ -261,7 +317,10 @@ export default function ChatComposer({
   }, [isRecording, startRecording, stopRecording]);
 
   const isAsk          = permissionMode === "ask";
-  const showStatusBar  = gitStatus !== null || atMentions.length > 0;
+  // Root picker + permission pill are always available, so the status bar
+  // itself is now always shown (previously it hid the permission pill too
+  // whenever there was no git repo and no @mentions).
+  const showStatusBar  = true;
 
   return (
     <div className="bg-transparent px-4 pb-5 pt-2 md:px-8">
@@ -494,11 +553,11 @@ export default function ChatComposer({
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                             exit={{ opacity: 0, y: 4, scale: 0.97 }}
                             transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
-                            className="absolute bottom-full left-0 z-[1000] mb-2 w-64 overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.03] backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.4)]"
+                            className="absolute bottom-full left-0 z-[1000] mb-2 w-64 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#161616]/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
                           >
                             <div className="max-h-64 overflow-y-auto">
                               {/* Header */}
-                              <div className="sticky top-0 border-b border-white/[0.045] bg-white/[0.03] px-3 py-1.5 backdrop-blur-xl">
+                              <div className="sticky top-0 border-b border-white/[0.05] bg-[#161616]/95 px-3 py-1.5 backdrop-blur-xl">
                                 <span className="text-[10px] font-semibold uppercase tracking-wider text-white/25">
                                   Branches
                                 </span>
@@ -527,7 +586,7 @@ export default function ChatComposer({
                                         className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors ${
                                           b.current
                                             ? "bg-[#ff8a3d]/10 text-[#ff8a3d]/80"
-                                            : "text-white/50 hover:bg-white/[0.04] hover:text-white/70"
+                                            : "text-white/50 hover:bg-white/[0.06] hover:text-white/70"
                                         }`}
                                       >
                                         <GitBranch className={`h-3 w-3 shrink-0 ${b.current ? "text-[#ff8a3d]/60" : "text-white/20"}`} />
@@ -545,7 +604,7 @@ export default function ChatComposer({
                             </div>
 
                             {/* Footer */}
-                            <div className="border-t border-white/[0.045] bg-white/[0.03] px-3 py-1.5 backdrop-blur-xl">
+                            <div className="border-t border-white/[0.05] bg-[#161616]/95 px-3 py-1.5 backdrop-blur-xl">
                               <span className="text-[10px] text-white/18">
                                 {branchLoading ? "Switching…" : `${branches.length} branch${branches.length !== 1 ? "es" : ""}`}
                               </span>
@@ -556,8 +615,95 @@ export default function ChatComposer({
                     </div>
                   )}
 
-                  {/* Divider between branch and files */}
-                  {gitStatus && atMentions.length > 0 && (
+                  {/* Root pill with dropdown — next to Branch. Switches between
+                      SIBLING project folders (e.g. ai-sandbox / avand), not
+                      subfolders of the current project. */}
+                  <div className="relative shrink-0" ref={rootDropdownRef}>
+                    <button
+                      type="button"
+                      onClick={toggleRootDropdown}
+                      disabled={isSending || rootLoading}
+                      className="flex items-center gap-1.5 rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-[3px] transition-colors hover:border-white/12 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                      title="Switch project folder"
+                    >
+                      <FolderOpen className="h-3 w-3 text-white/25" />
+                      <span className="font-mono text-[11px] text-white/40">
+                        {rootCurrent?.name ?? "root"}
+                      </span>
+                      <ChevronDown className="h-2.5 w-2.5 text-white/20 transition-transform duration-150" style={{ transform: showRootDropdown ? "rotate(180deg)" : undefined }} />
+                    </button>
+
+                    {/* Root dropdown */}
+                    <AnimatePresence>
+                      {showRootDropdown && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 4, scale: 0.97 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 4, scale: 0.97 }}
+                          transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+                          className="absolute bottom-full left-0 z-[1000] mb-2 w-64 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#161616]/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
+                        >
+                          <div className="max-h-64 overflow-y-auto">
+                            {/* Header */}
+                            <div className="sticky top-0 border-b border-white/[0.05] bg-[#161616]/95 px-3 py-1.5 backdrop-blur-xl">
+                              <span className="text-[10px] font-semibold uppercase tracking-wider text-white/25">
+                                Projects
+                              </span>
+                            </div>
+
+                            {rootLoading && rootOptions.length === 0 ? (
+                              <div className="flex items-center justify-center gap-2 py-4">
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-white/30" />
+                                <span className="text-[11px] text-white/30">Loading…</span>
+                              </div>
+                            ) : rootError ? (
+                              <div className="px-3 py-4 text-center">
+                                <span className="text-[11px] text-[#ff5e4d]/60">{rootError}</span>
+                              </div>
+                            ) : (
+                              <ul className="py-1">
+                                {rootOptions.map((r) => (
+                                  <li key={r.path}>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!r.current) void handleRootSelect(r);
+                                        else setShowRootDropdown(false);
+                                      }}
+                                      disabled={r.current || rootLoading}
+                                      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors ${
+                                        r.current
+                                          ? "bg-[#ff8a3d]/10 text-[#ff8a3d]/80"
+                                          : "text-white/50 hover:bg-white/[0.06] hover:text-white/70"
+                                      }`}
+                                    >
+                                      <FolderOpen className={`h-3 w-3 shrink-0 ${r.current ? "text-[#ff8a3d]/60" : "text-white/20"}`} />
+                                      <span className="min-w-0 truncate font-mono">{r.name}</span>
+                                      {r.current && (
+                                        <span className="ml-auto text-[10px] text-[#ff8a3d]/50">
+                                          (current)
+                                        </span>
+                                      )}
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+
+                          {/* Footer */}
+                          <div className="border-t border-white/[0.05] bg-[#161616]/95 px-3 py-1.5 backdrop-blur-xl">
+                            <span className="text-[10px] text-white/18">
+                              {rootLoading ? "Switching…" : `${rootOptions.length} project${rootOptions.length !== 1 ? "s" : ""}`}
+                            </span>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  {/* Divider between root/branch and files */}
+                  {atMentions.length > 0 && (
                     <span className="text-[10px] text-white/15 shrink-0">·</span>
                   )}
 

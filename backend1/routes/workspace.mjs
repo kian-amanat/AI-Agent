@@ -139,4 +139,36 @@ export default async function workspaceRoute(fastify) {
     await walk(root);
     return { ok: true, files, root };
   });
+
+  // GET /api/workspace/roots — candidate projects for the root picker: a
+  // flat list of SIBLING project folders (other directories next to the
+  // current one, under the same parent — e.g. current = ~/Developer/ai-sandbox
+  // lists ~/Developer/avand, ~/Developer/whatever-else), exactly the same
+  // shape as GET /git/branches. No hierarchy, no separate browse step —
+  // click a name, it switches, same as picking a branch.
+  fastify.get("/roots", async (request) => {
+    const root       = getWorkspacePath(request) || process.cwd();
+    const siblingDir = path.dirname(root);
+
+    let entries = [];
+    try {
+      entries = await fs.readdir(siblingDir, { withFileTypes: true });
+    } catch {
+      entries = [];
+    }
+
+    const options = entries
+      .filter((e) => e.isDirectory() && !IGNORE.has(e.name) && !e.name.startsWith("."))
+      .map((e) => {
+        const abs = path.join(siblingDir, e.name);
+        return { path: abs, name: e.name, current: abs === root };
+      })
+      .sort((a, b) => a.name.localeCompare(b.name));
+
+    return {
+      ok: true,
+      current: { path: root, name: path.basename(root) || root },
+      options,
+    };
+  });
 }

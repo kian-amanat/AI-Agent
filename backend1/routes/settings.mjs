@@ -2,20 +2,34 @@ import fs from "fs/promises";
 import path from "path";
 import { listProviders, getModel } from "../config/models.mjs";
 import { getCapabilities } from "../services/modelRouter.mjs";
+import db, { getUserSettings, saveUserSettings, userHasSettings } from "../db.mjs";
 
+// Legacy single-file store. Still read ONCE per user to seed their per-user
+// row (so existing installs don't lose their config on upgrade), never written.
 const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
+
+// Resolve the authenticated user from the Bearer token (same scheme the agent
+// route uses). Settings are now per-user, so every settings request needs one.
+function getUserIdFromRequest(request) {
+  try {
+    const auth = request.headers["authorization"];
+    if (!auth?.startsWith("Bearer ")) return null;
+    const token = auth.slice(7).trim();
+    const row = db.prepare("SELECT user_id FROM auth_sessions WHERE token = ?").get(token);
+    return row?.user_id ?? null;
+  } catch {
+    return null;
+  }
+}
 
 // ── GapGPT dynamic models cache ──────────────────────────────────────────────
 let gapgptModelsCache = null;
 let gapgptCacheTime = 0;
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
-// ── Settings file helpers ───────────────────────────────────────────────────
-async function ensureDataDir() {
-  await fs.mkdir(path.dirname(SETTINGS_PATH), { recursive: true });
-}
-
-async function loadSettings() {
+// ── Settings helpers ────────────────────────────────────────────────────────
+// Read the legacy global file (used only to seed a user's first per-user row).
+async function loadGlobalSettingsFile() {
   try {
     const raw = await fs.readFile(SETTINGS_PATH, "utf-8");
     return JSON.parse(raw);
@@ -24,9 +38,26 @@ async function loadSettings() {
   }
 }
 
-async function saveSettingsFile(settings) {
-  await ensureDataDir();
-  await fs.writeFile(SETTINGS_PATH, JSON.stringify(settings, null, 2));
+// Per-user settings load. On a user's very first read, if they have no row yet
+// but the legacy global file exists, migrate it into their row once so existing
+// single-user installs keep working after the multi-user upgrade.
+async function loadSettings(userId) {
+  if (!userId) return null;
+  const existing = getUserSettings(userId);
+  if (existing) return existing;
+
+  if (!userHasSettings(userId)) {
+    const legacy = await loadGlobalSettingsFile();
+    if (legacy) {
+      saveUserSettings(userId, legacy);
+      return legacy;
+    }
+  }
+  return null;
+}
+
+async function saveSettingsFile(userId, settings) {
+  saveUserSettings(userId, settings);
 }
 
 // ── GapGPT API key ──────────────────────────────────────────────────────────
@@ -207,8 +238,10 @@ export default async function settingsRoutes(fastify) {
   });
 
   // ── GET / ─────────────────────────────────────────────────────────────────
-  fastify.get("/", async () => {
-    const settings = await loadSettings();
+  fastify.get("/", async (request, reply) => {
+    const userId = getUserIdFromRequest(request);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
+    const settings = await loadSettings(userId);
 
     if (!settings) {
       return {
@@ -240,10 +273,11 @@ export default async function settingsRoutes(fastify) {
 
   // ── POST / (save settings) ─────────────────────────────────────────────────
   fastify.post("/", async (request, reply) => {
+    const userId = getUserIdFromRequest(request);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
     const body = normalizeSettingsBody(request.body || {});
 
-    console.log("[SETTINGS SAVE] raw body =>", request.body);
-    console.log("[SETTINGS SAVE] normalized =>", body);
+    console.log("[SETTINGS SAVE] user =>", userId, "normalized =>", { ...body, apiKey: body.apiKey ? "***" : "" });
 
     if (!body.provider || !body.model || !body.apiKey) {
       return reply.code(400).send({
@@ -320,7 +354,7 @@ export default async function settingsRoutes(fastify) {
       }
     }
 
-    await saveSettingsFile(settings);
+    await saveSettingsFile(userId, settings);
 
     return {
       ok: true,
@@ -408,8 +442,10 @@ export default async function settingsRoutes(fastify) {
   });
 
   // ── GET /capabilities ──────────────────────────────────────────────────────
-  fastify.get("/capabilities", async () => {
-    const settings = await loadSettings();
+  fastify.get("/capabilities", async (request, reply) => {
+    const userId = getUserIdFromRequest(request);
+    if (!userId) return reply.code(401).send({ ok: false, error: "Unauthorized" });
+    const settings = await loadSettings(userId);
     return { ok: true, ...getCapabilities(settings) };
   });
 }

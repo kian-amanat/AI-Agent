@@ -98,12 +98,16 @@ function StepRow({ step, prevAt, startedAt, isLive, isAllDone, expanded, onToggl
 
   return (
     <motion.div
-      layout
       initial={{ opacity: 0, y: 3 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0 }}
       transition={{ duration: 0.2, ease: "easeOut" }}
-      className="group/row"
+      // No `layout` here: these rows only ever get appended, never reordered
+      // or removed mid-list, so there's nothing for FLIP measurement to do
+      // except occasionally shift a row mid-insert — the actual cause of
+      // the "not stacked vertically" glitch. Plain block flow stacks fine
+      // on its own without it.
+      className="block w-full group/row"
     >
       <button
         type="button"
