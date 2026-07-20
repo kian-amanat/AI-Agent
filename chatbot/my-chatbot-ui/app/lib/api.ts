@@ -85,11 +85,12 @@ export interface QuestionOption {
 }
 
 export interface GitStatus {
-  branch:          string;
-  dirty:           boolean;
-  ahead:           number;
-  hasUpstream?:    boolean;
-  pullRequestUrl?: string | null;
+  branch:            string;
+  dirty:             boolean;
+  uncommittedCount?: number;
+  ahead:             number;
+  hasUpstream?:      boolean;
+  pullRequestUrl?:   string | null;
 }
 
 export interface WorkspaceFileEntry {
@@ -629,8 +630,8 @@ export async function fetchGitStatus(): Promise<GitStatus> {
   const data = await readJson<{ ok: boolean } & GitStatus>(res);
   if (!res.ok || !data.ok) throw new Error("Failed to fetch git status");
   return {
-    branch: data.branch, dirty: data.dirty, ahead: data.ahead,
-    hasUpstream: data.hasUpstream, pullRequestUrl: data.pullRequestUrl ?? null,
+    branch: data.branch, dirty: data.dirty, uncommittedCount: data.uncommittedCount ?? 0,
+    ahead: data.ahead, hasUpstream: data.hasUpstream, pullRequestUrl: data.pullRequestUrl ?? null,
   };
 }
 
