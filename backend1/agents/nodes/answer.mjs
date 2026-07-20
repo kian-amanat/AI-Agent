@@ -7,10 +7,18 @@
  *  - MEMORY.md index is already in userMessage (injected by plannerAgent)
  *  - Before answering: pre-load full content of relevant topic files
  *  - "forget/clear memory" commands are handled here without hitting the LLM
+ *
+ * Web research (Claude Code approach):
+ *  - The model has web_search + fetch_url as tools and decides when to use
+ *    them (e.g. the user references a URL or asks about current external info).
+ *    It runs a small tool loop, then streams the final text answer.
+ *  - Requests that need workspace tools (edits/commands) still escalate to
+ *    agent_loop via the __ESCALATE__ sentinel.
  */
 
-import { callLLM, streamLLM } from "../../services/llm.mjs";
 import { AIMessage } from "@langchain/core/messages";
+import { chatWithTools } from "../../services/agentChat.mjs";
+import { WEB_TOOLS, webSearch, fetchUrl, resolveCreds } from "./agent_loop.mjs";
 import {
   loadRelevantTopics,
   deleteMemoryTopic,
@@ -32,6 +40,14 @@ CAPABILITIES
 - Suggest architecture and best practices.
 - Help debug and troubleshoot.
 - Discuss developer workflows.
+- Search the web and read web pages when you need external or current information.
+
+WEB SEARCH (you have web_search(query) and fetch_url(url))
+- ALWAYS web_search first — do NOT answer from memory — when the question is about anything time-sensitive or that changes over time, even if you think you already know the answer. Your training data is stale, so a confident-sounding answer is often WRONG. This includes: the "latest/newest/current/last/recent" version, release, price, score, winner, standings, ranking, weather, news, or event; anything with "today/now/this year/as of"; who currently holds a role or title; or any fact tied to a date after your training cutoff. When in doubt about freshness, search.
+- Also search when the user shares a URL to read/summarize, or asks about a library/API/error you're unsure of.
+- Flow: web_search to find sources, then fetch_url the most relevant result to read the actual page (search snippets can be stale — prefer fetching the real page for numbers/dates/results). If the user already gave a URL, fetch_url it directly.
+- Do NOT search for questions about the user's own codebase, stable general concepts, or simple chit-chat — answer those directly.
+- After gathering what you need, answer in plain text grounded in what you found, and cite the source URL.
 
 RULES
 - Never start with "I".
@@ -120,7 +136,7 @@ function buildHistoryMessages(messages = []) {
 }
 
 export async function answerNode(state) {
-  const { userMessage, messages, modelRoute, emit, fileContext, workspacePath, rememberedTargetFile } = state;
+  const { userMessage, messages, modelRoute, emit, fileContext, workspacePath, rememberedTargetFile, abortSignal = null } = state;
 
   const cleanUserMessage = cleanMessage(userMessage);
 
@@ -180,87 +196,93 @@ export async function answerNode(state) {
   };
 
   try {
-    const canStream = typeof streamLLM === "function";
+    const creds = await resolveCreds(modelRoute);
 
-    if (canStream) {
-      // Buffered-prefix guard: hold emission until we have enough characters
-      // to rule out the escalation sentinel, so "__ESCALATE__" never streams
-      // to the user. Once the head is proven non-sentinel, flush + stream live.
-      let head = "";        // buffered leading chars, pre-decision
-      let gateOpen = false; // true once we've decided it's a real answer
-      let escalated = false;
-      let full = "";        // complete answer text (post-gate)
+    // Tool-capable conversational loop: the model may call web_search /
+    // fetch_url when it decides it needs external info, then streams a normal
+    // text answer. Text from tool-using turns is shown live as narration but
+    // only the FINAL (no-tool) turn is saved as the answer.
+    const conversation = [
+      ...historyMessages,
+      { role: "user", content: userContent },
+    ];
 
-      await streamLLM({
+    const MAX_TURNS = 5;
+    let answerText = "";
+    let escalated = false;
+
+    for (let turn = 0; turn < MAX_TURNS; turn++) {
+      if (abortSignal?.aborted) break;
+
+      // Per-turn buffered-prefix guard so the "__ESCALATE__" sentinel never
+      // streams to the user (holds only the first ~12 chars back).
+      let head = "";
+      let gateOpen = false;
+      let turnEscalated = false;
+      let turnText = "";
+      const onChunk = (chunk) => {
+        if (turnEscalated) return;
+        if (gateOpen) { turnText += chunk; emit?.({ type: "content", content: chunk }); return; }
+        head += chunk;
+        const trimmed = head.trimStart();
+        if (trimmed.length < ESCALATE_SENTINEL.length && ESCALATE_SENTINEL.startsWith(trimmed)) return;
+        if (trimmed.startsWith(ESCALATE_SENTINEL)) { turnEscalated = true; return; }
+        gateOpen = true; turnText = head; emit?.({ type: "content", content: head });
+      };
+
+      const { message } = await chatWithTools({
+        creds,
         system: SYSTEM_PROMPT,
-        messages: [
-          ...historyMessages,
-          { role: "user", content: userContent },
-        ],
-        modelRoute,
+        messages: conversation,
+        tools: WEB_TOOLS,
         maxTokens: 1400,
         temperature: 0.35,
-        onChunk: (chunk) => {
-          if (escalated) return; // discard trailing tokens after an escalate decision
-          if (gateOpen) {
-            full += chunk;
-            emit?.({ type: "content", content: chunk });
-            return;
-          }
-          head += chunk;
-          const trimmed = head.trimStart();
-          // Still ambiguous — the head could still grow into the sentinel.
-          if (trimmed.length < ESCALATE_SENTINEL.length &&
-              ESCALATE_SENTINEL.startsWith(trimmed)) {
-            return;
-          }
-          // Enough signal to decide.
-          if (trimmed.startsWith(ESCALATE_SENTINEL)) {
-            escalated = true;
-            return;
-          }
-          gateOpen = true;
-          full = head;
-          emit?.({ type: "content", content: head });
-        },
+        signal: abortSignal || undefined,
+        onChunk,
       });
 
-      // Stream ended while still buffering a short answer that never tripped
-      // the gate (e.g. a one-word reply shorter than the sentinel).
-      if (!gateOpen && !escalated) {
+      // Flush a short buffered head that never opened the gate.
+      if (!gateOpen && !turnEscalated && head) {
         const trimmed = head.trimStart();
-        if (trimmed.startsWith(ESCALATE_SENTINEL)) {
-          escalated = true;
-        } else if (head) {
-          full = head;
-          emit?.({ type: "content", content: head });
-        }
+        if (trimmed.startsWith(ESCALATE_SENTINEL)) turnEscalated = true;
+        else { turnText = head; emit?.({ type: "content", content: head }); }
       }
 
-      if (escalated) return escalate();
+      if (turnEscalated) { escalated = true; break; }
 
-      return {
-        finalAnswer: full,
-        messages: [new AIMessage(full)],
-      };
+      conversation.push(message);
+
+      // The model asked to search / fetch — run the tools, feed results back,
+      // and loop for the model to answer with what it found.
+      if (message.tool_calls?.length) {
+        for (const tc of message.tool_calls) {
+          let args = {};
+          try { args = JSON.parse(tc.function.arguments || "{}"); } catch {}
+          let result;
+          if (tc.function.name === "web_search") {
+            emit?.({ type: "progress", stage: "exploring", message: `🔍 web search: "${String(args.query || "").slice(0, 60)}"` });
+            result = await webSearch(args.query);
+          } else if (tc.function.name === "fetch_url") {
+            emit?.({ type: "progress", stage: "exploring", message: `🌐 reading ${String(args.url || "").slice(0, 70)}` });
+            result = await fetchUrl(args.url);
+          } else {
+            result = { success: false, error: `Unknown tool: ${tc.function.name}` };
+          }
+          const raw = JSON.stringify(result);
+          conversation.push({ role: "tool", tool_call_id: tc.id, content: raw.length > 8000 ? raw.slice(0, 8000) + '..."[truncated]"}' : raw });
+        }
+        continue;
+      }
+
+      // Plain text turn = the final answer.
+      answerText = turnText;
+      break;
     }
 
-    const result = await callLLM({
-      system: SYSTEM_PROMPT,
-      messages: [
-        ...historyMessages,
-        { role: "user", content: userContent },
-      ],
-      modelRoute,
-      maxTokens: 1400,
-      temperature: 0.35,
-    });
+    if (escalated) return escalate();
 
-    const raw = result?.content?.trim() || "";
-    if (raw.startsWith(ESCALATE_SENTINEL)) return escalate();
-
-    const finalAnswer = raw || "I couldn't generate a response.";
-    emit?.({ type: "content", content: finalAnswer });
+    const finalAnswer = answerText.trim() || "I couldn't generate a response.";
+    if (!answerText.trim()) emit?.({ type: "content", content: finalAnswer });
 
     return {
       finalAnswer,
