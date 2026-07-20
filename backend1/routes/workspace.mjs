@@ -31,19 +31,36 @@ export default async function workspaceRoute(fastify) {
   fastify.get("/git", async (request) => {
     const root = getWorkspacePath(request) || process.cwd();
 
-    const [branch, statusOut, aheadOut] = await Promise.all([
+    const [branch, statusOut, hasUpstream, hasCommits] = await Promise.all([
       execAsync("git rev-parse --abbrev-ref HEAD", { cwd: root, timeout: 3000 })
         .then((r) => r.stdout.trim())
         .catch(() => "unknown"),
       execAsync("git status --porcelain", { cwd: root, timeout: 3000 })
         .then((r) => r.stdout.trim())
         .catch(() => ""),
-      execAsync("git rev-list --count @{u}..HEAD 2>/dev/null", { cwd: root, timeout: 3000 })
-        .then((r) => parseInt(r.stdout.trim(), 10) || 0)
-        .catch(() => 0),
+      execAsync("git rev-parse --abbrev-ref --symbolic-full-name @{u}", { cwd: root, timeout: 3000 })
+        .then(() => true)
+        .catch(() => false),
+      execAsync("git rev-parse --verify HEAD", { cwd: root, timeout: 3000 })
+        .then(() => true)
+        .catch(() => false),
     ]);
 
-    return { ok: true, branch, dirty: statusOut.length > 0, ahead: aheadOut };
+    // A brand-new local branch has no @{u} to diff against, so the usual
+    // `rev-list @{u}..HEAD` ahead-count always resolves to 0 — which used to
+    // hide the Push button on a branch's very first push. Once it has a
+    // commit and no upstream, it always needs pushing regardless of count.
+    const ahead = hasUpstream
+      ? await execAsync("git rev-list --count @{u}..HEAD", { cwd: root, timeout: 3000 })
+          .then((r) => parseInt(r.stdout.trim(), 10) || 0)
+          .catch(() => 0)
+      : hasCommits
+        ? await execAsync("git rev-list --count HEAD", { cwd: root, timeout: 3000 })
+            .then((r) => parseInt(r.stdout.trim(), 10) || 0)
+            .catch(() => 1)
+        : 0;
+
+    return { ok: true, branch, dirty: statusOut.length > 0, ahead, hasUpstream };
   });
 
   // POST /api/workspace/git/commit — stage everything and commit
