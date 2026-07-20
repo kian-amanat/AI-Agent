@@ -104,10 +104,12 @@ export default async function workspaceRoute(fastify) {
         .catch(() => false);
 
       const pushCmd = hasUpstream ? "git push" : `git push -u origin ${branch.replace(/[^a-zA-Z0-9_./-]/g, "")}`;
-      const { stdout, stderr } = await execAsync(pushCmd, { cwd: root, timeout: 30000 });
+      const { stdout, stderr } = await execAsync(pushCmd, { cwd: root, timeout: 60000 });
       return { ok: true, branch, output: (stdout + stderr).trim().slice(0, 2000) };
     } catch (err) {
-      return { ok: false, error: (err.stderr || err.message || "Push failed").toString().trim().slice(0, 500) };
+      const message = (err.stderr || err.message || "Push failed").toString().trim();
+      console.error(`[workspace] git push failed in ${root}:\n${message}`);
+      return { ok: false, error: message.slice(0, 500) };
     }
   });
 

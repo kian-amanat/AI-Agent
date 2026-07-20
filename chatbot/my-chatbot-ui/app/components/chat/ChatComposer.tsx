@@ -195,6 +195,14 @@ export default function ChatComposer({
   }, [commitMessage, refreshGitStatus]);
 
   const handlePush = React.useCallback(async () => {
+    // Push only sends already-committed history — uncommitted changes would
+    // silently be left behind, which is exactly the confusing case this
+    // guards against. Commit (or discard) first.
+    if (gitStatus?.dirty) {
+      setPushError("You have uncommitted changes — commit them first, then push.");
+      setTimeout(() => setPushError(null), 10000);
+      return;
+    }
     setPushing(true);
     setPushError(null);
     setPushSuccess(false);
@@ -205,11 +213,11 @@ export default function ChatComposer({
       setTimeout(() => setPushSuccess(false), 3000);
     } catch (err) {
       setPushError(err instanceof Error ? err.message : "Push failed");
-      setTimeout(() => setPushError(null), 4000);
+      setTimeout(() => setPushError(null), 10000);
     } finally {
       setPushing(false);
     }
-  }, [refreshGitStatus]);
+  }, [gitStatus?.dirty, refreshGitStatus]);
 
   const toggleBranchDropdown = React.useCallback(() => {
     setShowBranchDropdown((p) => {
@@ -742,30 +750,48 @@ export default function ChatComposer({
 
                   {/* Push pill — only when there's something to push */}
                   {gitStatus && gitStatus.ahead > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => void handlePush()}
-                      disabled={isSending || pushing}
-                      className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-[3px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                        pushSuccess
-                          ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-400"
-                          : pushError
-                          ? "border-[#ff5e4d]/25 bg-[#ff5e4d]/10 text-[#ff5e4d]"
-                          : "border-white/[0.06] bg-white/[0.03] text-white/40 hover:border-white/12 hover:bg-white/[0.06]"
-                      }`}
-                      title={pushError || `Push ${gitStatus.ahead} commit${gitStatus.ahead !== 1 ? "s" : ""}`}
-                    >
-                      {pushing ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : pushSuccess ? (
-                        <Check className="h-3 w-3" />
-                      ) : (
-                        <ArrowUpFromLine className="h-3 w-3" />
-                      )}
-                      <span className="text-[11px]">
-                        {pushing ? "Pushing…" : pushSuccess ? "Pushed" : pushError ? "Failed" : `Push ↑${gitStatus.ahead}`}
-                      </span>
-                    </button>
+                    <div className="relative shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void handlePush()}
+                        disabled={isSending || pushing}
+                        className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-[3px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                          pushSuccess
+                            ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-400"
+                            : pushError
+                            ? "border-[#ff5e4d]/25 bg-[#ff5e4d]/10 text-[#ff5e4d]"
+                            : "border-white/[0.06] bg-white/[0.03] text-white/40 hover:border-white/12 hover:bg-white/[0.06]"
+                        }`}
+                        title={pushError || `Push ${gitStatus.ahead} commit${gitStatus.ahead !== 1 ? "s" : ""}`}
+                      >
+                        {pushing ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : pushSuccess ? (
+                          <Check className="h-3 w-3" />
+                        ) : (
+                          <ArrowUpFromLine className="h-3 w-3" />
+                        )}
+                        <span className="text-[11px]">
+                          {pushing ? "Pushing…" : pushSuccess ? "Pushed" : pushError ? "Failed" : `Push ↑${gitStatus.ahead}`}
+                        </span>
+                      </button>
+
+                      {/* Full error text — the pill itself only has room for "Failed",
+                          and a hover-only tooltip is too easy to miss. */}
+                      <AnimatePresence>
+                        {pushError && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 4 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 4 }}
+                            transition={{ duration: 0.15 }}
+                            className="absolute bottom-full left-0 z-[1000] mb-2 w-72 rounded-xl border border-[#ff5e4d]/25 bg-[#161616]/95 px-3 py-2 text-[11px] leading-5 text-[#ff5e4d]/90 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
+                          >
+                            {pushError}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
                   )}
 
                   {/* Root pill with dropdown — next to Branch. Switches between
