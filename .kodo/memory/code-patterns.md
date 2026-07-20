@@ -1,19 +1,22 @@
 ---
-updated: 2026-07-18T19:15:41.795Z
+updated: 2026-07-19T13:37:51.727Z
 ---
 
-### ChatComposer Dropdown & Input Styling (2026-07-18)
-- **File**: `chatbot/my-chatbot-ui/app/components/chat/ChatComposer.tsx`
-- **Liquid Glass Aesthetic for Dropdowns**:
-  - Replaced solid dark gray backgrounds with transparent glass layers to match the project's "liquid glass" theme.
-  - **Container Styling**: `bg-white/[0.08] backdrop-blur-xl border border-white/[0.06]`
-    - Updated from `bg-white/[0.03]` to `bg-white/[0.08]` to increase opacity as requested.
-    - Matches the transparency and blur intensity of the composer input card.
-  - **Goal**: Visual consistency between the branch dropdown and other UI elements (navbar, input cards).
+### UI Component Patterns (2026-07-19)
+- **File**: `chatbot/my-chatbot-ui/components/ui/n8n-workflow-block-shadcnui.tsx`
+- **Dependencies**: Uses `framer-motion` for animations, `lucide-react` for icons (`ArrowRight`, `Database`, `Mail`, `Plus`, `Settings`).
+- **Shadcn UI Components**: Relies on local shadcn components: `Badge`, `Button`, `Card`.
+- **React Patterns**:
+  - Uses `useRef` and `useState` for state management.
+  - Uses `flushSync` from `react-dom` for synchronous DOM updates.
+  - Imports `React` explicitly when using `React.ComponentType` or similar types.
+- **Note**: Ensure `React` is imported if `React.ComponentType` or JSX factory functions are used directly.
 
-- **Opacity Adjustment for Opaqueness**:
-  - User requested making transparent elements "some opaque".
-  - **Main input container**: Changed from `bg-white/[0.03]` to `bg-white/[0.06]`.
-  - **Attach file button**: Changed from `bg-white/[0.03]` / hover `bg-white/[0.05]` to `bg-white/[0.06]` / hover `bg-white/[0.08]`.
-  - **Mic button (default)**: Changed from `bg-white/[0.03]` / hover `bg-white/[0.05]` to `bg-white/[0.06]` / hover `bg-white/[0.08]`.
-  - **Dropdown Container**: Updated to `bg-white/[0.08]` (merged with dropdown section above).
+### Landing Page Component Updates (2026-07-19)
+- **File**: `chatbot/my-chatbot-ui/app/landing2/page.tsx`
+- **Action**: Replaced `<ParallaxFeatureStrip />` with `<KodoInActionSection />`.
+- **Imports Added**:
+  - `Card`, `CardHeader`, `CardContent`, `CardTitle`, `CardDescription` from `@/components/ui/card`
+  - `Badge` from `@/components/ui/badge`
+  - `Button` from `/components/ui/button`
+- **Status**: Partial progress. Old `PARALLAX_FEATURES` array and `ParallaxFeatureCard` component remain in file but are no longer used by the main section.

@@ -102,6 +102,30 @@ db.exec(`
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
   );
+
+  -- Per-user model/API-key configuration. Replaces the single global
+  -- data/settings.json so multiple users can each use their own provider,
+  -- model, and key at the same time (true multi-user).
+  CREATE TABLE IF NOT EXISTS user_settings (
+    user_id       INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+    settings_json TEXT NOT NULL,
+    updated_at    TEXT NOT NULL
+  );
+
+  -- Background agent runs, decoupled from the HTTP request that started them
+  -- so a task keeps running across page refresh / session switch. The live
+  -- event stream lives in memory (services/jobs.mjs); this table is the
+  -- durable record used to DISCOVER running jobs after a refresh and to detect
+  -- jobs orphaned by a server restart.
+  CREATE TABLE IF NOT EXISTS agent_jobs (
+    request_id   TEXT PRIMARY KEY,
+    session_id   TEXT NOT NULL,
+    user_id      INTEGER NOT NULL,
+    status       TEXT NOT NULL,           -- running | done | error | cancelled | interrupted
+    title        TEXT,
+    created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL
+  );
 `);
 
 ensureColumn("sessions", "user_id", "INTEGER");
@@ -115,7 +139,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_messages_session_user ON messages(session_id, user_id);
   CREATE INDEX IF NOT EXISTS idx_messages_user_id ON messages(user_id);
   CREATE INDEX IF NOT EXISTS idx_memory_session_user ON session_memory(session_id, user_id);
+  CREATE INDEX IF NOT EXISTS idx_agent_jobs_user ON agent_jobs(user_id, status);
+  CREATE INDEX IF NOT EXISTS idx_agent_jobs_session ON agent_jobs(session_id);
 `);
+
+// A server restart wipes the in-memory job registry, so any job still marked
+// "running" in the DB from a previous process can never resume — mark those
+// interrupted on boot so the UI shows an honest state instead of a spinner
+// that will never resolve.
+db.prepare(`UPDATE agent_jobs SET status = 'interrupted', updated_at = ? WHERE status = 'running'`)
+  .run(nowIso());
 
 function normalizeMemoryRow(row) {
   if (!row) return null;
@@ -414,6 +447,72 @@ export function clearSessionMemory(sessionId, userId) {
     DELETE FROM session_memory
     WHERE session_id = ? AND user_id = ?
   `).run(sessionId, userId);
+}
+
+// ── Per-user settings ─────────────────────────────────────────────────────────
+
+export function getUserSettings(userId) {
+  if (!userId) return null;
+  const row = db.prepare(`SELECT settings_json FROM user_settings WHERE user_id = ?`).get(userId);
+  if (!row) return null;
+  return parseJsonText(row.settings_json, null);
+}
+
+export function saveUserSettings(userId, settings) {
+  if (!userId) throw new Error("userId is required to save settings");
+  const now = nowIso();
+  const json = JSON.stringify(settings ?? {});
+  db.prepare(`
+    INSERT INTO user_settings (user_id, settings_json, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET settings_json = excluded.settings_json, updated_at = excluded.updated_at
+  `).run(userId, json, now);
+  return settings;
+}
+
+export function userHasSettings(userId) {
+  if (!userId) return false;
+  return !!db.prepare(`SELECT 1 FROM user_settings WHERE user_id = ?`).get(userId);
+}
+
+// ── Agent jobs (durable discovery record for background runs) ─────────────────
+
+export function createAgentJob({ requestId, sessionId, userId, title }) {
+  const now = nowIso();
+  db.prepare(`
+    INSERT OR REPLACE INTO agent_jobs (request_id, session_id, user_id, status, title, created_at, updated_at)
+    VALUES (?, ?, ?, 'running', ?, ?, ?)
+  `).run(requestId, sessionId, userId, title ?? null, now, now);
+}
+
+export function updateAgentJobStatus(requestId, status) {
+  db.prepare(`UPDATE agent_jobs SET status = ?, updated_at = ? WHERE request_id = ?`)
+    .run(status, nowIso(), requestId);
+}
+
+export function listActiveAgentJobs(userId, sessionId = null) {
+  if (sessionId) {
+    return db.prepare(`
+      SELECT request_id, session_id, status, title, created_at, updated_at
+      FROM agent_jobs
+      WHERE user_id = ? AND session_id = ? AND status = 'running'
+      ORDER BY created_at DESC
+    `).all(userId, sessionId);
+  }
+  return db.prepare(`
+    SELECT request_id, session_id, status, title, created_at, updated_at
+    FROM agent_jobs
+    WHERE user_id = ? AND status = 'running'
+    ORDER BY created_at DESC
+  `).all(userId);
+}
+
+export function getAgentJob(requestId, userId) {
+  return db.prepare(`
+    SELECT request_id, session_id, user_id, status, title, created_at, updated_at
+    FROM agent_jobs
+    WHERE request_id = ? AND user_id = ?
+  `).get(requestId, userId) || null;
 }
 
 export default db;

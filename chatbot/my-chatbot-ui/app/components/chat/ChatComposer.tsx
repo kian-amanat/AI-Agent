@@ -3,14 +3,16 @@
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  ChevronDown, FileCode2, GitBranch, Loader2, Mic, Paperclip,
-  Shield, ShieldCheck, StopCircle, X,
+  ArrowUpFromLine, Check, ChevronDown, ExternalLink, FileCode2, FolderOpen,
+  GitBranch, GitCommit, GitPullRequest, Loader2, Mic, Paperclip, Shield,
+  ShieldCheck, StopCircle, X,
 } from "lucide-react";
 import NorthRoundedIcon from "@mui/icons-material/NorthRounded";
 import StopRoundedIcon from "@mui/icons-material/StopRounded";
 import {
-  fetchGitBranches, fetchGitStatus, switchGitBranch, transcribeAudio,
-  type GitBranchInfo, type GitStatus,
+  fetchGitBranches, fetchGitStatus, fetchWorkspaceRoots, gitCommit, gitPush,
+  switchGitBranch, switchWorkspaceRoot, transcribeAudio,
+  type GitBranchInfo, type GitStatus, type WorkspaceRootInfo,
 } from "../../lib/api";
 import SlashCommandPalette, { type SlashCommandId } from "./SlashCommandPalette";
 
@@ -87,32 +89,64 @@ export default function ChatComposer({
   const [branchError, setBranchError]             = React.useState<string | null>(null);
   const branchDropdownRef = React.useRef<HTMLDivElement>(null);
 
-  // Close dropdown on outside click
+  // Root (project folder) dropdown state — flat list of SIBLING project
+  // folders (e.g. ai-sandbox and avand under the same parent dir), same
+  // shape as the branch dropdown: no hierarchy, click a name, it switches.
+  const [showRootDropdown, setShowRootDropdown] = React.useState(false);
+  const [rootCurrent, setRootCurrent]           = React.useState<WorkspaceRootInfo | null>(null);
+  const [rootOptions, setRootOptions]           = React.useState<WorkspaceRootInfo[]>([]);
+  const [rootLoading, setRootLoading]           = React.useState(false);
+  const [rootError, setRootError]               = React.useState<string | null>(null);
+  const rootDropdownRef = React.useRef<HTMLDivElement>(null);
+
+  // Commit popover state — a tiny message box next to the branch pill.
+  const [showCommitBox, setShowCommitBox] = React.useState(false);
+  const [commitMessage, setCommitMessage] = React.useState("");
+  const [committing, setCommitting]       = React.useState(false);
+  const [commitError, setCommitError]     = React.useState<string | null>(null);
+  const commitBoxRef = React.useRef<HTMLDivElement>(null);
+
+  // Push state — single click, no popover; feedback shown inline on the pill.
+  const [pushing, setPushing]         = React.useState(false);
+  const [pushError, setPushError]     = React.useState<string | null>(null);
+  const [pushSuccess, setPushSuccess] = React.useState(false);
+
+  // Close dropdowns on outside click
   React.useEffect(() => {
     function handleClick(e: MouseEvent) {
       if (branchDropdownRef.current && !branchDropdownRef.current.contains(e.target as Node)) {
         setShowBranchDropdown(false);
       }
+      if (rootDropdownRef.current && !rootDropdownRef.current.contains(e.target as Node)) {
+        setShowRootDropdown(false);
+      }
+      if (commitBoxRef.current && !commitBoxRef.current.contains(e.target as Node)) {
+        setShowCommitBox(false);
+      }
     }
-    if (showBranchDropdown) {
+    if (showBranchDropdown || showRootDropdown || showCommitBox) {
       document.addEventListener("mousedown", handleClick);
       return () => document.removeEventListener("mousedown", handleClick);
     }
-  }, [showBranchDropdown]);
+  }, [showBranchDropdown, showRootDropdown, showCommitBox]);
+
+  const refreshGitStatus = React.useCallback(async () => {
+    try {
+      const s = await fetchGitStatus();
+      setGitStatus(s);
+      return s;
+    } catch {
+      return null;
+    }
+  }, []);
 
   // Fetch git status on mount, refresh every 30 s
   React.useEffect(() => {
-    let cancelled = false;
-    async function poll() {
-      try {
-        const s = await fetchGitStatus();
-        if (!cancelled) setGitStatus(s);
-      } catch {}
-    }
+    async function poll() { await refreshGitStatus(); }
     void poll();
     const id = setInterval(poll, 30_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
+    return () => clearInterval(id);
+  }, [refreshGitStatus]);
 
   // Load branches when dropdown opens
   const loadBranches = React.useCallback(async () => {
@@ -134,9 +168,7 @@ export default function ChatComposer({
       setBranchError(null);
       try {
         await switchGitBranch(branchName);
-        // Refresh git status to reflect new branch
-        const s = await fetchGitStatus();
-        setGitStatus(s);
+        await refreshGitStatus();
         setShowBranchDropdown(false);
       } catch (err) {
         setBranchError(err instanceof Error ? err.message : "Failed to switch branch");
@@ -144,8 +176,49 @@ export default function ChatComposer({
         setBranchLoading(false);
       }
     },
-    []
+    [refreshGitStatus]
   );
+
+  const handleCommit = React.useCallback(async () => {
+    if (!commitMessage.trim()) return;
+    setCommitting(true);
+    setCommitError(null);
+    try {
+      await gitCommit(commitMessage.trim());
+      setCommitMessage("");
+      setShowCommitBox(false);
+      await refreshGitStatus();
+    } catch (err) {
+      setCommitError(err instanceof Error ? err.message : "Commit failed");
+    } finally {
+      setCommitting(false);
+    }
+  }, [commitMessage, refreshGitStatus]);
+
+  const handlePush = React.useCallback(async () => {
+    // Push only sends already-committed history — uncommitted changes would
+    // silently be left behind, which is exactly the confusing case this
+    // guards against. Commit (or discard) first.
+    if (gitStatus?.dirty) {
+      setPushError("You have uncommitted changes — commit them first, then push.");
+      setTimeout(() => setPushError(null), 10000);
+      return;
+    }
+    setPushing(true);
+    setPushError(null);
+    setPushSuccess(false);
+    try {
+      await gitPush();
+      await refreshGitStatus();
+      setPushSuccess(true);
+      setTimeout(() => setPushSuccess(false), 3000);
+    } catch (err) {
+      setPushError(err instanceof Error ? err.message : "Push failed");
+      setTimeout(() => setPushError(null), 10000);
+    } finally {
+      setPushing(false);
+    }
+  }, [gitStatus?.dirty, refreshGitStatus]);
 
   const toggleBranchDropdown = React.useCallback(() => {
     setShowBranchDropdown((p) => {
@@ -153,6 +226,48 @@ export default function ChatComposer({
       return !p;
     });
   }, [loadBranches]);
+
+  // Load sibling projects when dropdown opens — mirrors loadBranches exactly.
+  const loadRoots = React.useCallback(async () => {
+    setRootLoading(true);
+    setRootError(null);
+    try {
+      const result = await fetchWorkspaceRoots();
+      setRootCurrent(result.current);
+      setRootOptions(result.options);
+    } catch (err) {
+      setRootError(err instanceof Error ? err.message : "Failed to load folders");
+    } finally {
+      setRootLoading(false);
+    }
+  }, []);
+
+  const handleRootSelect = React.useCallback(
+    async (root: WorkspaceRootInfo) => {
+      setRootLoading(true);
+      setRootError(null);
+      try {
+        await switchWorkspaceRoot(root);
+        // Refresh so the dropdown reflects the new current project
+        const result = await fetchWorkspaceRoots();
+        setRootCurrent(result.current);
+        setRootOptions(result.options);
+        setShowRootDropdown(false);
+      } catch (err) {
+        setRootError(err instanceof Error ? err.message : "Failed to switch folder");
+      } finally {
+        setRootLoading(false);
+      }
+    },
+    []
+  );
+
+  const toggleRootDropdown = React.useCallback(() => {
+    setShowRootDropdown((p) => {
+      if (!p) void loadRoots();
+      return !p;
+    });
+  }, [loadRoots]);
 
   // @-file mentions extracted from the current input
   const atMentions = React.useMemo(
@@ -261,7 +376,10 @@ export default function ChatComposer({
   }, [isRecording, startRecording, stopRecording]);
 
   const isAsk          = permissionMode === "ask";
-  const showStatusBar  = gitStatus !== null || atMentions.length > 0;
+  // Root picker + permission pill are always available, so the status bar
+  // itself is now always shown (previously it hid the permission pill too
+  // whenever there was no git repo and no @mentions).
+  const showStatusBar  = true;
 
   return (
     <div className="bg-transparent px-4 pb-5 pt-2 md:px-8">
@@ -494,11 +612,11 @@ export default function ChatComposer({
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                             exit={{ opacity: 0, y: 4, scale: 0.97 }}
                             transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
-                            className="absolute bottom-full left-0 z-[1000] mb-2 w-64 overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.03] backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.4)]"
+                            className="absolute bottom-full left-0 z-[1000] mb-2 w-64 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#161616]/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
                           >
                             <div className="max-h-64 overflow-y-auto">
                               {/* Header */}
-                              <div className="sticky top-0 border-b border-white/[0.045] bg-white/[0.03] px-3 py-1.5 backdrop-blur-xl">
+                              <div className="sticky top-0 border-b border-white/[0.05] bg-[#161616]/95 px-3 py-1.5 backdrop-blur-xl">
                                 <span className="text-[10px] font-semibold uppercase tracking-wider text-white/25">
                                   Branches
                                 </span>
@@ -527,7 +645,7 @@ export default function ChatComposer({
                                         className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors ${
                                           b.current
                                             ? "bg-[#ff8a3d]/10 text-[#ff8a3d]/80"
-                                            : "text-white/50 hover:bg-white/[0.04] hover:text-white/70"
+                                            : "text-white/50 hover:bg-white/[0.06] hover:text-white/70"
                                         }`}
                                       >
                                         <GitBranch className={`h-3 w-3 shrink-0 ${b.current ? "text-[#ff8a3d]/60" : "text-white/20"}`} />
@@ -545,7 +663,7 @@ export default function ChatComposer({
                             </div>
 
                             {/* Footer */}
-                            <div className="border-t border-white/[0.045] bg-white/[0.03] px-3 py-1.5 backdrop-blur-xl">
+                            <div className="border-t border-white/[0.05] bg-[#161616]/95 px-3 py-1.5 backdrop-blur-xl">
                               <span className="text-[10px] text-white/18">
                                 {branchLoading ? "Switching…" : `${branches.length} branch${branches.length !== 1 ? "es" : ""}`}
                               </span>
@@ -556,8 +674,240 @@ export default function ChatComposer({
                     </div>
                   )}
 
-                  {/* Divider between branch and files */}
-                  {gitStatus && atMentions.length > 0 && (
+                  {/* Commit pill — only when there's something to commit */}
+                  {gitStatus?.dirty && (
+                    <div className="relative shrink-0" ref={commitBoxRef}>
+                      <button
+                        type="button"
+                        onClick={() => setShowCommitBox((p) => !p)}
+                        disabled={isSending || committing}
+                        className="flex items-center gap-1.5 rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-[3px] transition-colors hover:border-white/12 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                        title="Commit changes"
+                      >
+                        {committing ? (
+                          <Loader2 className="h-3 w-3 animate-spin text-white/30" />
+                        ) : (
+                          <GitCommit className="h-3 w-3 text-white/25" />
+                        )}
+                        <span className="text-[11px] text-white/40">Commit</span>
+                      </button>
+
+                      <AnimatePresence>
+                        {showCommitBox && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 4, scale: 0.97 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: 4, scale: 0.97 }}
+                            transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+                            className="absolute bottom-full left-0 z-[1000] mb-2 w-72 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#161616]/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
+                          >
+                            <div className="p-3">
+                              <span className="mb-2 block text-[10px] font-semibold uppercase tracking-wider text-white/25">
+                                Commit message
+                              </span>
+                              <textarea
+                                autoFocus
+                                value={commitMessage}
+                                onChange={(e) => setCommitMessage(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && !e.shiftKey) {
+                                    e.preventDefault();
+                                    void handleCommit();
+                                  }
+                                }}
+                                placeholder="Describe what changed…"
+                                rows={2}
+                                className="w-full resize-none rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[12px] text-white/85 placeholder:text-white/20 outline-none transition-colors focus:border-[#ff8a3d]/40"
+                              />
+                              {commitError && (
+                                <p className="mt-1.5 text-[11px] text-[#ff5e4d]/70">{commitError}</p>
+                              )}
+                              <div className="mt-2 flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setShowCommitBox(false)}
+                                  disabled={committing}
+                                  className="rounded-lg px-2.5 py-1 text-[11px] text-white/40 transition-colors hover:text-white/70"
+                                >
+                                  Cancel
+                                </button>
+                                <motion.button
+                                  whileTap={{ scale: 0.96 }}
+                                  type="button"
+                                  onClick={() => void handleCommit()}
+                                  disabled={committing || !commitMessage.trim()}
+                                  className="flex items-center gap-1.5 rounded-lg border border-[#ff8a3d]/25 bg-[#ff8a3d]/10 px-3 py-1 text-[11px] font-medium text-[#ff8a3d] transition-colors hover:bg-[#ff8a3d]/18 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  {committing ? <Loader2 className="h-3 w-3 animate-spin" /> : <GitCommit className="h-3 w-3" />}
+                                  {committing ? "Committing…" : "Commit"}
+                                </motion.button>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )}
+
+                  {/* Push pill — only when there's something to push */}
+                  {gitStatus && gitStatus.ahead > 0 && (
+                    <div className="relative shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => void handlePush()}
+                        disabled={isSending || pushing || gitStatus.dirty}
+                        className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-[3px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                          pushSuccess
+                            ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-400"
+                            : pushError
+                            ? "border-[#ff5e4d]/25 bg-[#ff5e4d]/10 text-[#ff5e4d]"
+                            : "border-white/[0.06] bg-white/[0.03] text-white/40 hover:border-white/12 hover:bg-white/[0.06]"
+                        }`}
+                        title={
+                          pushError
+                            ? pushError
+                            : gitStatus.dirty
+                            ? "Commit your changes first, then push"
+                            : `Push ${gitStatus.ahead} commit${gitStatus.ahead !== 1 ? "s" : ""}`
+                        }
+                      >
+                        {pushing ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : pushSuccess ? (
+                          <Check className="h-3 w-3" />
+                        ) : (
+                          <ArrowUpFromLine className="h-3 w-3" />
+                        )}
+                        <span className="text-[11px]">
+                          {pushing ? "Pushing…" : pushSuccess ? "Pushed" : pushError ? "Failed" : `Push ↑${gitStatus.ahead}`}
+                        </span>
+                      </button>
+
+                      {/* Full error text — the pill itself only has room for "Failed",
+                          and a hover-only tooltip is too easy to miss. */}
+                      <AnimatePresence>
+                        {pushError && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 4 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            exit={{ opacity: 0, y: 4 }}
+                            transition={{ duration: 0.15 }}
+                            className="absolute bottom-full left-0 z-[1000] mb-2 w-72 rounded-xl border border-[#ff5e4d]/25 bg-[#161616]/95 px-3 py-2 text-[11px] leading-5 text-[#ff5e4d]/90 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
+                          >
+                            {pushError}
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )}
+
+                  {/* Pull request pill — shows once the branch is pushed and
+                      isn't the default branch. Opens GitHub's "open a pull
+                      request" page in a new tab; the user creates the PR there
+                      (no token / API — same as clicking GitHub's own link). */}
+                  {gitStatus?.pullRequestUrl && !gitStatus.dirty && (
+                    <a
+                      href={gitStatus.pullRequestUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="flex shrink-0 items-center gap-1.5 rounded-md border border-[#8957e5]/30 bg-[#8957e5]/10 px-2 py-[3px] text-[#b088f9] transition-colors hover:border-[#8957e5]/50 hover:bg-[#8957e5]/18"
+                      title="Open a pull request on GitHub"
+                    >
+                      <GitPullRequest className="h-3 w-3" />
+                      <span className="text-[11px]">Pull request</span>
+                      <ExternalLink className="h-2.5 w-2.5 opacity-60" />
+                    </a>
+                  )}
+
+                  {/* Root pill with dropdown — next to Branch. Switches between
+                      SIBLING project folders (e.g. ai-sandbox / avand), not
+                      subfolders of the current project. */}
+                  <div className="relative shrink-0" ref={rootDropdownRef}>
+                    <button
+                      type="button"
+                      onClick={toggleRootDropdown}
+                      disabled={isSending || rootLoading}
+                      className="flex items-center gap-1.5 rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-[3px] transition-colors hover:border-white/12 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                      title="Switch project folder"
+                    >
+                      <FolderOpen className="h-3 w-3 text-white/25" />
+                      <span className="font-mono text-[11px] text-white/40">
+                        {rootCurrent?.name ?? "root"}
+                      </span>
+                      <ChevronDown className="h-2.5 w-2.5 text-white/20 transition-transform duration-150" style={{ transform: showRootDropdown ? "rotate(180deg)" : undefined }} />
+                    </button>
+
+                    {/* Root dropdown */}
+                    <AnimatePresence>
+                      {showRootDropdown && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 4, scale: 0.97 }}
+                          animate={{ opacity: 1, y: 0, scale: 1 }}
+                          exit={{ opacity: 0, y: 4, scale: 0.97 }}
+                          transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+                          className="absolute bottom-full left-0 z-[1000] mb-2 w-64 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#161616]/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
+                        >
+                          <div className="max-h-64 overflow-y-auto">
+                            {/* Header */}
+                            <div className="sticky top-0 border-b border-white/[0.05] bg-[#161616]/95 px-3 py-1.5 backdrop-blur-xl">
+                              <span className="text-[10px] font-semibold uppercase tracking-wider text-white/25">
+                                Projects
+                              </span>
+                            </div>
+
+                            {rootLoading && rootOptions.length === 0 ? (
+                              <div className="flex items-center justify-center gap-2 py-4">
+                                <Loader2 className="h-3.5 w-3.5 animate-spin text-white/30" />
+                                <span className="text-[11px] text-white/30">Loading…</span>
+                              </div>
+                            ) : rootError ? (
+                              <div className="px-3 py-4 text-center">
+                                <span className="text-[11px] text-[#ff5e4d]/60">{rootError}</span>
+                              </div>
+                            ) : (
+                              <ul className="py-1">
+                                {rootOptions.map((r) => (
+                                  <li key={r.path}>
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        if (!r.current) void handleRootSelect(r);
+                                        else setShowRootDropdown(false);
+                                      }}
+                                      disabled={r.current || rootLoading}
+                                      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors ${
+                                        r.current
+                                          ? "bg-[#ff8a3d]/10 text-[#ff8a3d]/80"
+                                          : "text-white/50 hover:bg-white/[0.06] hover:text-white/70"
+                                      }`}
+                                    >
+                                      <FolderOpen className={`h-3 w-3 shrink-0 ${r.current ? "text-[#ff8a3d]/60" : "text-white/20"}`} />
+                                      <span className="min-w-0 truncate font-mono">{r.name}</span>
+                                      {r.current && (
+                                        <span className="ml-auto text-[10px] text-[#ff8a3d]/50">
+                                          (current)
+                                        </span>
+                                      )}
+                                    </button>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </div>
+
+                          {/* Footer */}
+                          <div className="border-t border-white/[0.05] bg-[#161616]/95 px-3 py-1.5 backdrop-blur-xl">
+                            <span className="text-[10px] text-white/18">
+                              {rootLoading ? "Switching…" : `${rootOptions.length} project${rootOptions.length !== 1 ? "s" : ""}`}
+                            </span>
+                          </div>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
+                  </div>
+
+                  {/* Divider between root/branch and files */}
+                  {atMentions.length > 0 && (
                     <span className="text-[10px] text-white/15 shrink-0">·</span>
                   )}
 

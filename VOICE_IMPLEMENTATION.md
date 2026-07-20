@@ -106,7 +106,7 @@ Whisper API credentials in `/backend1/routes/plannerAgent.mjs`:
 ```javascript
 const whisperClient = new OpenAI({
   baseURL: "https://api.gapgpt.app/v1",
-  apiKey: "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD",
+  apiKey: "***REMOVED-SECRET***",
 });
 ```
 

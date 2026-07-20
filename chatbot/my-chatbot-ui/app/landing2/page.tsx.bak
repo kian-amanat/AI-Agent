@@ -383,91 +383,178 @@ const HorizontalScrollSection = ({ title, cards }: { title: string; cards: { tit
   );
 };
 
-// --- Kodo in Action (Card/Badge/Button based) ---
+// --- Parallax Feature Cards (Kodo in action) ---
 
-const KODO_IN_ACTION_FEATURES = [
+// Distinctive Kodo capabilities — deliberately NOT the Explore/Plan/Execute/
+// Verify pipeline steps (told in full by the cinematic ScrollPinSteps section
+// below) and deliberately NOT a repeat of the "Features" horizontal-scroll
+// list further down the page. Repeating either one here — as the original
+// build did with the pipeline steps — is what turned this page into the same
+// 4 ideas told three or four times; this teaser earns its own space instead.
+const PARALLAX_FEATURES = [
   {
     title: 'Ask mode vs. Auto mode',
     description: 'Ask mode shows the full plan and waits for your approval before a single file changes; Auto mode applies changes and reports back.',
-    badge: 'Mode',
-    badgeVariant: 'default' as const,
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="m9 11 3 3L22 4"></path>
+        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"></path>
+      </svg>
+    ),
   },
   {
     title: 'Web search & page fetching',
     description: 'Point it at a reference site and it extracts the real design language — colors, layout, copy — and uses that as ground truth, not a guess.',
-    badge: 'Search',
-    badgeVariant: 'secondary' as const,
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="9"></circle>
+        <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"></path>
+      </svg>
+    ),
   },
   {
     title: 'Design skills',
     description: 'A library of curated expert knowledge — UI/UX rules, animation recipes, layout archetypes — pulled in automatically, extensible with your own .md files.',
-    badge: 'Skills',
-    badgeVariant: 'default' as const,
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+      </svg>
+    ),
   },
   {
     title: 'Local-first, no lock-in',
     description: 'Bring your own API key, pick any supported provider, and run it all on your machine — nothing routes through a Kodo-operated server.',
-    badge: 'Privacy',
-    badgeVariant: 'secondary' as const,
+    icon: (
+      <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+        <rect x="3" y="11" width="18" height="10" rx="2"></rect>
+        <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+      </svg>
+    ),
   },
 ];
 
-const KodoInActionSection = () => {
+const ParallaxFeatureCard = ({
+  feature,
+  scrollYProgress,
+  speed,
+  index,
+}: {
+  feature: typeof PARALLAX_FEATURES[0];
+  scrollYProgress: MotionValue<number>;
+  speed: number;
+  index: number;
+}) => {
+  const divRef = useRef<HTMLDivElement>(null);
+  const [position, setPosition] = useState({ x: 0, y: 0 });
+  const [opacity, setOpacity] = useState(0);
+
+  // Real scroll-linked parallax — the previous version set `style={{ y: speed }}`
+  // on a plain (non-motion) <div>, which does nothing: `y` isn't a CSS property,
+  // React silently drops it, and the constant wasn't scroll-linked anyway. This
+  // drives an actual vertical offset off the strip's own scroll progress.
+  const y = useTransform(scrollYProgress, [0, 1], [0, speed]);
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (!divRef.current) return;
+    const rect = divRef.current.getBoundingClientRect();
+    setPosition({ x: e.clientX - rect.left, y: e.clientY - rect.top });
+    setOpacity(1);
+  };
+
+  const handlePointerLeave = () => {
+    setOpacity(0);
+  };
+
   return (
-    <section id="kodo-in-action" className="relative py-24">
-      <div className="mx-auto max-w-7xl px-6">
-        {/* Section header */}
+    <motion.div style={{ y }} className="flex-shrink-0 w-72 md:w-80 will-change-transform">
+      <motion.div
+        initial={{ opacity: 0, y: 30 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true, margin: "-80px" }}
+        transition={{ duration: 0.6, delay: index * 0.12, ease: [0.22, 1, 0.36, 1] }}
+        // `group` lives here (an ancestor of the group-hover glow below) — it
+        // was missing entirely before, so that glow div could never fire.
+        className="group"
+      >
+        <div
+          ref={divRef}
+          onPointerMove={handlePointerMove}
+          onPointerLeave={handlePointerLeave}
+          className="relative overflow-hidden rounded-xl border border-white/[0.06] bg-white/[0.03] backdrop-blur-md transition-transform duration-300 hover:-translate-y-1 hover:border-orange-500/50"
+        >
+          {/* Mouse-follow glow */}
+          <div
+            className="pointer-events-none absolute inset-0 transition-opacity duration-300"
+            style={{
+              opacity,
+              background: `radial-gradient(600px circle at ${position.x}px ${position.y}px, rgba(255, 106, 61, 0.15), transparent 40%)`,
+            }}
+          />
+          {/* Ambient glow */}
+          <div className="absolute -inset-1 bg-gradient-to-r from-[#ff5e4d] to-[#ff8a3d] opacity-0 group-hover:opacity-10 blur-xl transition-opacity duration-500 -z-10" />
+
+          <div className="relative z-10 p-6">
+            {/* Icon */}
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl border border-white/[0.06] bg-white/[0.03] text-orange-400">
+              {feature.icon}
+            </div>
+            {/* Title */}
+            <h3 className="mb-2 text-lg font-semibold text-white tracking-tight">{feature.title}</h3>
+            {/* Description */}
+            <p className="text-sm leading-relaxed text-white/50">{feature.description}</p>
+          </div>
+        </div>
+      </motion.div>
+    </motion.div>
+  );
+};
+
+const ParallaxFeatureStrip = () => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const { scrollYProgress } = useScroll({
+    target: containerRef,
+    offset: ['start end', 'end start'],
+  });
+
+  // Horizontal scroll driven by vertical scroll
+  const x = useTransform(scrollYProgress, [0, 1], ['0%', '-40%']);
+
+  // Parallax speeds in px — each card drifts a different amount over the
+  // strip's scroll range, some up, some down, for visible depth.
+  const speeds = [30, -60, 45, -35] as const;
+
+  return (
+    <section id="kodo-in-action" className="relative py-24 overflow-hidden">
+      {/* Section header */}
+      <div className="mx-auto max-w-7xl px-6 mb-16">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true, margin: "-80px" }}
           transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1] }}
-          className="text-center mb-16"
+          className="text-center"
         >
-          <Badge variant="outline" className="mb-4 border-orange-500/30 text-orange-400">
-            Capabilities
-          </Badge>
           <h2 className="text-3xl md:text-4xl font-bold text-white tracking-tight">Kodo in Action</h2>
           <p className="mt-4 text-lg text-white/50 max-w-2xl mx-auto leading-relaxed">
             What makes Kodo more than a code-completion loop.
           </p>
         </motion.div>
+      </div>
 
-        {/* Feature cards grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-          {KODO_IN_ACTION_FEATURES.map((feature, index) => (
-            <motion.div
+      {/* Horizontal scroll strip with parallax cards */}
+      <div ref={containerRef} className="relative h-[340px] w-full overflow-hidden">
+        <motion.div style={{ x }} className="flex gap-6 pl-[5vw] md:pl-[10vw] pr-[5vw] md:pr-[10vw] items-center">
+          {PARALLAX_FEATURES.map((feature, index) => (
+            <ParallaxFeatureCard
               key={feature.title}
-              initial={{ opacity: 0, y: 30 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-80px" }}
-              transition={{ duration: 0.6, delay: index * 0.12, ease: [0.22, 1, 0.36, 1] }}
-            >
-              <Card className="h-full border-white/[0.06] bg-white/[0.03] backdrop-blur-md hover:border-orange-500/50 transition-colors duration-300">
-                <CardHeader>
-                  <div className="flex items-center justify-between">
-                    <CardTitle className="text-xl text-white tracking-tight">{feature.title}</CardTitle>
-                    <Badge variant={feature.badgeVariant === 'default' ? 'default' : 'secondary'} className="bg-orange-500/20 text-orange-400 border-orange-500/30">
-                      {feature.badge}
-                    </Badge>
-                  </div>
-                </CardHeader>
-                <CardContent>
-                  <CardDescription className="text-white/50 text-base leading-relaxed">{feature.description}</CardDescription>
-                  <div className="mt-4">
-                    <Button variant="outline" className="border-white/[0.06] text-white/70 hover:text-white hover:border-orange-500/50 hover:bg-orange-500/10">
-                      Learn more
-                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="ml-2">
-                        <line x1="5" y1="12" x2="19" y2="12"></line>
-                        <polyline points="12 5 19 12 12 19"></polyline>
-                      </svg>
-                    </Button>
-                  </div>
-                </CardContent>
-              </Card>
-            </motion.div>
+              feature={feature}
+              scrollYProgress={scrollYProgress}
+              speed={speeds[index]}
+              index={index}
+            />
           ))}
-        </div>
+        </motion.div>
       </div>
     </section>
   );
@@ -729,7 +816,7 @@ export default function Landing2Page() {
       </section>
 
       {/* Kodo in Action — parallax horizontal-scroll strip */}
-      <KodoInActionSection />
+      <ParallaxFeatureStrip />
 
       {/* Agent Workflow Section — cinematic scroll-pinned FlowArt */}
       <section id="how-it-works" className="relative overflow-hidden">

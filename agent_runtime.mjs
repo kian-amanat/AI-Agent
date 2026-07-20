@@ -8,7 +8,7 @@ const OPENAI_BASE_URL =
   process.env.OPENAI_BASE_URL || "https://api.gapgpt.app/v1";
 const OPENAI_API_KEY =
   process.env.OPENAI_API_KEY ||
-  "sk-Sy5TxZ3dcQAfM00dTwH5p8HqQ8hCqh2sf9TzNOfIfTYUmMnD";
+  "***REMOVED-SECRET***";
 const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 
 const client = new OpenAI({

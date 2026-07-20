@@ -71,6 +71,7 @@ export type SSEEvent =
   | { type: "file_diff";    action: string; path: string; language: string; hunks: DiffHunk[] }
   | { type: "plan_preview"; steps: PlanStep[] }
   | { type: "todo";         todos: TodoItem[] }
+  | { type: "question";     questionId: string; question: string; header?: string; options?: QuestionOption[] }
   | { type: "usage";        inputTokens: number; outputTokens: number; llmCalls: number; model?: string };
 
 export interface TodoItem {
@@ -78,10 +79,17 @@ export interface TodoItem {
   status: "pending" | "in_progress" | "completed";
 }
 
+export interface QuestionOption {
+  label:        string;
+  description?: string;
+}
+
 export interface GitStatus {
-  branch: string;
-  dirty:  boolean;
-  ahead:  number;
+  branch:          string;
+  dirty:           boolean;
+  ahead:           number;
+  hasUpstream?:    boolean;
+  pullRequestUrl?: string | null;
 }
 
 export interface WorkspaceFileEntry {
@@ -247,6 +255,17 @@ async function parseSSE(
               });
               break;
 
+            // Agent is asking a clarifying question instead of guessing
+            case "question":
+              onEvent({
+                type:       "question",
+                questionId: String(parsed.questionId || ""),
+                question:   String(parsed.question || ""),
+                header:     parsed.header,
+                options:    Array.isArray(parsed.options) ? parsed.options : [],
+              });
+              break;
+
             // Token usage for the request
             case "usage":
               onEvent({
@@ -358,6 +377,77 @@ export function sendMessage(
   return () => controller.abort();
 }
 
+// ─── Background jobs (survive refresh / session switch) ───────────────────────
+
+export interface ActiveJob {
+  requestId: string;
+  sessionId: string;
+  status:    string;
+  title?:    string;
+  createdAt?: number;
+}
+
+/** Jobs still running for the current user (optionally scoped to one session). */
+export async function fetchActiveJobs(sessionId?: string | null): Promise<ActiveJob[]> {
+  const token = getToken();
+  if (!token) return [];
+  const url = sessionId
+    ? `${BASE_URL}/jobs?session_id=${encodeURIComponent(sessionId)}`
+    : `${BASE_URL}/jobs`;
+  const res = await fetch(url, { headers: authHeaders(), cache: "no-store" });
+  if (!res.ok) return [];
+  const data = await readJson<{ ok: boolean; jobs?: ActiveJob[] }>(res);
+  return Array.isArray(data.jobs) ? data.jobs : [];
+}
+
+/**
+ * Re-attach to a still-running job's live event stream (after a page refresh or
+ * session switch). Replays buffered events then streams live ones — same event
+ * shape as sendMessage. Returns a detach function; detaching does NOT stop the
+ * job (use cancelJob for that).
+ */
+export function reconnectJob(
+  requestId: string,
+  onEvent:   (event: SSEEvent) => void,
+  onDone:    (sessionId: string, requestId?: string | null) => void,
+  onError:   (err: string) => void,
+): () => void {
+  const controller = new AbortController();
+
+  void (async () => {
+    try {
+      const res = await fetch(`${BASE_URL}/run/${encodeURIComponent(requestId)}/stream`, {
+        method:  "GET",
+        headers: authHeaders(),
+        signal:  controller.signal,
+      });
+      if (res.status === 404) { onDone("", requestId); return; } // job already finished + GC'd
+      if (!res.ok) {
+        const data = await readJson<{ error?: string }>(res);
+        throw new Error(data.error || `Reconnect failed (${res.status})`);
+      }
+      await parseSSE(res, onEvent, onDone, onError, null);
+    } catch (err) {
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      onError(err instanceof Error ? err.message : "Reconnect error");
+    }
+  })();
+
+  return () => controller.abort();
+}
+
+/** Explicitly stop a running job (the actual "Stop" action). */
+export async function cancelJob(requestId: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/cancel/${encodeURIComponent(requestId)}`, {
+    method: "POST", headers: authHeaders(),
+  });
+  // Best-effort: a 404 just means it already finished.
+  if (!res.ok && res.status !== 404) {
+    const data = await readJson<{ error?: string }>(res);
+    throw new Error(data.error || "Failed to cancel");
+  }
+}
+
 // ─── Sessions ─────────────────────────────────────────────────
 
 export async function fetchSessions(): Promise<Session[]> {
@@ -452,21 +542,22 @@ export async function fetchGapGPTModels(): Promise<GapGPTModel[]> {
 }
 
 export async function fetchCapabilities(): Promise<Capabilities> {
-  const res  = await fetch(`${SETTINGS_URL}/capabilities`, { cache: "no-store" });
+  // Settings are per-user now, so this route requires auth.
+  const res  = await fetch(`${SETTINGS_URL}/capabilities`, { cache: "no-store", headers: authHeaders() });
   const data = await readJson<{ ok: boolean } & Capabilities>(res);
   if (!res.ok || !data.ok) throw new Error("Failed to fetch capabilities");
   return { chatEnabled: data.chatEnabled, uploadEnabled: data.uploadEnabled, textModel: data.textModel, visionModel: data.visionModel };
 }
 
 export async function fetchCurrentSettings(): Promise<{ configured: boolean; settings: any; capabilities: Capabilities }> {
-  const res  = await fetch(`${SETTINGS_URL}`, { cache: "no-store" });
+  const res  = await fetch(`${SETTINGS_URL}`, { cache: "no-store", headers: authHeaders() });
   const data = await readJson<any>(res);
   if (!res.ok || !data.ok) throw new Error("Failed to fetch settings");
   return { configured: data.configured, settings: data.settings, capabilities: data.capabilities };
 }
 
 export async function saveSettings(payload: SettingsPayload): Promise<Capabilities> {
-  const res  = await fetch(`${SETTINGS_URL}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+  const res  = await fetch(`${SETTINGS_URL}`, { method: "POST", headers: authHeaders(), body: JSON.stringify(payload) });
   const data = await readJson<{ ok: boolean; capabilities: Capabilities; error?: string }>(res);
   if (!res.ok || !data.ok) throw new Error(data.error || "Failed to save");
   return data.capabilities;
@@ -537,7 +628,10 @@ export async function fetchGitStatus(): Promise<GitStatus> {
   const res  = await fetch(`${WORKSPACE_URL}/git`, { headers: authHeaders(), cache: "no-store" });
   const data = await readJson<{ ok: boolean } & GitStatus>(res);
   if (!res.ok || !data.ok) throw new Error("Failed to fetch git status");
-  return { branch: data.branch, dirty: data.dirty, ahead: data.ahead };
+  return {
+    branch: data.branch, dirty: data.dirty, ahead: data.ahead,
+    hasUpstream: data.hasUpstream, pullRequestUrl: data.pullRequestUrl ?? null,
+  };
 }
 
 export interface GitBranchInfo {
@@ -563,11 +657,68 @@ export async function switchGitBranch(branch: string): Promise<{ ok: boolean; er
   return data;
 }
 
+export async function gitCommit(message: string): Promise<{ hash: string; message: string }> {
+  const res  = await fetch(`${WORKSPACE_URL}/git/commit`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  const data = await readJson<{ ok: boolean; hash?: string; message?: string; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Commit failed");
+  return { hash: data.hash || "", message: data.message || message };
+}
+
+export async function gitPush(): Promise<{ branch: string; output: string; pullRequestUrl: string | null }> {
+  const res  = await fetch(`${WORKSPACE_URL}/git/push`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  const data = await readJson<{ ok: boolean; branch?: string; output?: string; pullRequestUrl?: string | null; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Push failed");
+  return { branch: data.branch || "", output: data.output || "", pullRequestUrl: data.pullRequestUrl ?? null };
+}
+
 export async function fetchWorkspaceFiles(): Promise<WorkspaceFileEntry[]> {
   const res  = await fetch(`${WORKSPACE_URL}/files`, { headers: authHeaders(), cache: "no-store" });
   const data = await readJson<{ ok: boolean; files: WorkspaceFileEntry[] }>(res);
   if (!res.ok || !data.ok) throw new Error("Failed to fetch workspace files");
   return Array.isArray(data.files) ? data.files : [];
+}
+
+// ─── Root picker ──────────────────────────────────────────────
+// Flat list of SIBLING project folders (e.g. ~/Developer/ai-sandbox and
+// ~/Developer/avand) to switch between — same shape as the branch picker:
+// no hierarchy, no browsing step, click a name and it switches.
+
+export interface WorkspaceRootInfo {
+  path:     string;
+  name:     string;
+  current?: boolean;
+}
+
+export interface WorkspaceRootsResult {
+  current: WorkspaceRootInfo;
+  options: WorkspaceRootInfo[];
+}
+
+export async function fetchWorkspaceRoots(): Promise<WorkspaceRootsResult> {
+  const res  = await fetch(`${WORKSPACE_URL}/roots`, { headers: authHeaders(), cache: "no-store" });
+  const data = await readJson<{ ok: boolean } & WorkspaceRootsResult>(res);
+  if (!res.ok || !data.ok) throw new Error("Failed to fetch workspace roots");
+  return {
+    current: data.current,
+    options: Array.isArray(data.options) ? data.options : [],
+  };
+}
+
+export async function switchWorkspaceRoot(root: WorkspaceRootInfo): Promise<void> {
+  const res  = await fetch(`${AUTH_URL}/workspace`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({ workspacePath: root.path, workspaceName: root.name }),
+  });
+  const data = await readJson<{ ok: boolean; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Failed to switch workspace root");
 }
 
 // ─── Plan approval ────────────────────────────────────────────
@@ -586,6 +737,17 @@ export async function rejectPlan(requestId: string): Promise<void> {
   });
   const data = await readJson<{ ok: boolean; error?: string }>(res);
   if (!res.ok || !data.ok) throw new Error(data.error || "Failed to reject plan");
+}
+
+// ─── Clarifying questions (ask_user tool) ──────────────────────
+
+export async function answerQuestion(requestId: string, answer: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/answer/${encodeURIComponent(requestId)}`, {
+    method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ answer }),
+  });
+  const data = await readJson<{ ok: boolean; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Failed to send answer");
 }
 
 // ─── Compact ──────────────────────────────────────────────────

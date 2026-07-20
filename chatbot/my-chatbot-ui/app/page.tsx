@@ -17,14 +17,20 @@ import {
   callUndo,
   confirmPlan,
   rejectPlan,
+  answerQuestion,
   compactConversation,
+  fetchActiveJobs,
+  reconnectJob,
+  cancelJob,
   type Session,
   type Message as ApiMessage,
   type SSEEvent,
   type UndoResult,
   type PlanStep,
+  type QuestionOption,
 } from "./lib/api";
 import AuthGuard from "./components/AuthGuard";
+import { useNotifications } from "./hooks/useNotifications";
 
 import type { Conversation, Message } from "./components/chat/chat-types";
 
@@ -36,6 +42,7 @@ import TypingIndicator from "./components/chat/TypingIndicator";
 import EmptyStateCard from "./components/chat/EmptyStateCard";
 import ChatComposer from "./components/chat/ChatComposer";
 import PlanPreviewPanel from "./components/chat/PlanPreviewPanel";
+import QuestionPanel from "./components/chat/QuestionPanel";
 import FileTreeSidebar from "./components/chat/FileTreeSidebar";
 import type { SlashCommandId } from "./components/chat/SlashCommandPalette";
 
@@ -126,17 +133,49 @@ export default function MinimalChatComponent() {
     isApproving:      boolean;
   } | null>(null);
 
+  // ── Clarifying question (ask_user tool mid-task) ──────────────
+  const [pendingQuestion, setPendingQuestion] = useState<{
+    questionId:     string;
+    header:         string;
+    question:       string;
+    options:        QuestionOption[];
+    assistantMsgId: string;
+    requestId:      string;
+    isAnswering:    boolean;
+  } | null>(null);
+
   // ── File tree sidebar ─────────────────────────────────────────
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
 
   const pipeline = useAgentPipeline();
   const thinking = useThinkingSteps();
 
+  const notifications = useNotifications();
+
   const scrollRef    = useRef<HTMLDivElement | null>(null);
   const textareaRef  = useRef<HTMLTextAreaElement>(null);
   const abortRequestRef    = useRef<null | (() => void)>(null);
   const messagesRef  = useRef<Message[]>([]);
   const selectedSessionIdRef = useRef<string | null>(null);
+  // The request id of the in-flight agent run, so Stop can cancel the actual
+  // background job (not just detach this client's stream).
+  const activeRequestIdRef   = useRef<string | null>(null);
+  // Jobs we've already reconnected to this session — guards against attaching
+  // the same live stream twice (e.g. re-opening a session while it runs).
+  const reconnectedJobsRef   = useRef<Set<string>>(new Set());
+  // Detach fns for every background reconnect stream, so switching sessions can
+  // cleanly drop them (the jobs keep running server-side and land in the DB).
+  const reconnectDetachersRef = useRef<Array<() => void>>([]);
+
+  function detachAllReconnects() {
+    for (const d of reconnectDetachersRef.current) { try { d(); } catch {} }
+    reconnectDetachersRef.current = [];
+    reconnectedJobsRef.current.clear();
+  }
+
+  // reconnectRunningJobs is declared further down (it needs buildStreamHandlers);
+  // openSession above it calls through this ref to avoid a forward reference.
+  const reconnectRunningJobsRef = useRef<(sessionId: string) => void>(() => {});
 
   const router       = useRouter();
   const searchParams = useSearchParams();
@@ -164,6 +203,9 @@ export default function MinimalChatComponent() {
   }
 
   async function openSession(sessionId: string) {
+    // Leaving the previous session: drop its live reconnect streams (the jobs
+    // keep running server-side; their results land in the DB regardless).
+    detachAllReconnects();
     setSelectedSessionId(sessionId);
     setSelectedFiles([]);
     setMessageInput("");
@@ -185,6 +227,9 @@ export default function MinimalChatComponent() {
     } catch {
       if (!cached?.length) setMessages([]);
     }
+
+    // Re-attach to any agent job still running for this session (survives refresh).
+    reconnectRunningJobsRef.current(sessionId);
   }
 
   useEffect(() => {
@@ -205,7 +250,7 @@ export default function MinimalChatComponent() {
       finally { if (isMounted) setLoadingSessions(false); }
     }
     void loadSessionsAndMaybeOpen();
-    return () => { isMounted = false; abortRequestRef.current?.(); };
+    return () => { isMounted = false; abortRequestRef.current?.(); detachAllReconnects(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -238,6 +283,7 @@ export default function MinimalChatComponent() {
   function startNewChat() {
     abortRequestRef.current?.();
     abortRequestRef.current = null;
+    detachAllReconnects();
     setSelectedSessionId(null);
     setSelectedFiles([]);
     setMessages([]);
@@ -248,8 +294,13 @@ export default function MinimalChatComponent() {
   }
 
   function handleStop() {
+    // The run is a background job now, so detaching this client's stream isn't
+    // enough — explicitly cancel the job so it actually stops server-side.
+    const rid = activeRequestIdRef.current;
+    if (rid) void cancelJob(rid).catch(() => {});
     abortRequestRef.current?.();
     abortRequestRef.current = null;
+    activeRequestIdRef.current = null;
     setIsSending(false);
   }
 
@@ -306,6 +357,19 @@ export default function MinimalChatComponent() {
       await rejectPlan(pendingPlan.requestId);
     } catch {}
     setPendingPlan(null);
+  }
+
+  // ── Clarifying question handler (ask_user tool) ────────────────
+  async function handleAnswerQuestion(answer: string) {
+    if (!pendingQuestion) return;
+    setPendingQuestion((q) => q ? { ...q, isAnswering: true } : null);
+    try {
+      await answerQuestion(pendingQuestion.requestId, answer);
+    } catch (err) {
+      console.error("Answer question failed:", err);
+    } finally {
+      setPendingQuestion(null);
+    }
   }
 
   // ── Compact conversation ──────────────────────────────────────
@@ -368,6 +432,230 @@ export default function MinimalChatComponent() {
     setTimeout(() => textareaRef.current?.focus(), 50);
   }
 
+  // Fire a browser notification only when it's actually useful: the tab is
+  // hidden, or the event belongs to a session the user isn't currently viewing.
+  function maybeNotify(title: string, body: string, sessionId: string | null, tag: string) {
+    const away = (typeof document !== "undefined" && document.hidden) ||
+                 (!!sessionId && sessionId !== selectedSessionIdRef.current);
+    if (!away) return;
+    notifications.notify(title, {
+      body, tag,
+      onClick: () => { if (sessionId) void openSession(sessionId); },
+    });
+  }
+
+  // Shared SSE event handling — used both for a fresh send and for reconnecting
+  // to a job that's still running after a refresh/session switch. jobSessionId
+  // is the session the run belongs to (known for reconnect; the current session
+  // for a fresh send), used to gate notifications and route stream updates.
+  function buildStreamHandlers(assistantMessageId: string, jobSessionId: string | null) {
+    let fileDiffsReceived = false;
+    let resolvedSessionId = jobSessionId;
+
+    const onEvent = (event: SSEEvent) => {
+      pipeline.onSSEEvent(event);
+      thinking.onSSEEvent(assistantMessageId, event);
+
+      if (event.type === "content") {
+        setMessages((prev) => {
+          const updated = prev.map((msg) =>
+            msg.id === assistantMessageId ? { ...msg, content: msg.content + event.chunk } : msg
+          );
+          const sid = resolvedSessionId || selectedSessionIdRef.current;
+          if (sid) setSessionMessagesCache((c) => ({ ...c, [sid]: updated }));
+          return updated;
+        });
+        return;
+      }
+
+      if (event.type === "start") {
+        if (event.requestId) activeRequestIdRef.current = event.requestId;
+        if (event.sessionId) resolvedSessionId = event.sessionId;
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMessageId
+              ? { ...msg, metadata: { ...(msg.metadata || {}), intent: event.intent ?? msg.metadata?.intent, requestId: event.requestId ?? msg.metadata?.requestId } }
+              : msg
+          )
+        );
+        return;
+      }
+
+      if (event.type === "done") {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMessageId
+              ? { ...msg, metadata: { ...(msg.metadata || {}), requestId: event.requestId ?? msg.metadata?.requestId } }
+              : msg
+          )
+        );
+        return;
+      }
+
+      if (event.type === "plan_metadata") {
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMessageId
+              ? { ...msg, metadata: { ...(msg.metadata || {}), planMetadata: event.raw } }
+              : msg
+          )
+        );
+        return;
+      }
+
+      // ── Plan preview (ask mode): the agent is asking for approval ──────────
+      if (event.type === "plan_preview") {
+        const rid = messagesRef.current.find((m) => m.id === assistantMessageId)?.metadata?.requestId
+                  ?? activeRequestIdRef.current;
+        if (rid) {
+          setPendingPlan({ steps: event.steps, assistantMsgId: assistantMessageId, requestId: rid, isApproving: false });
+        }
+        maybeNotify("Kodo needs your approval", "The agent prepared a plan and is waiting for you to review it.", resolvedSessionId, `ask-${rid ?? assistantMessageId}`);
+        return;
+      }
+
+      // ── Clarifying question: the agent is asking instead of guessing ───────
+      if (event.type === "question") {
+        const rid = messagesRef.current.find((m) => m.id === assistantMessageId)?.metadata?.requestId
+                  ?? activeRequestIdRef.current;
+        if (rid) {
+          setPendingQuestion({
+            questionId: event.questionId,
+            header: event.header || "Question",
+            question: event.question,
+            options: event.options || [],
+            assistantMsgId: assistantMessageId,
+            requestId: rid,
+            isAnswering: false,
+          });
+        }
+        maybeNotify("Kodo has a question", event.question, resolvedSessionId, `question-${event.questionId}`);
+        return;
+      }
+
+      if (event.type === "file_diff") {
+        fileDiffsReceived = true;
+        setMessages((prev) =>
+          prev.map((msg) =>
+            msg.id === assistantMessageId
+              ? {
+                  ...msg,
+                  metadata: {
+                    ...(msg.metadata || {}),
+                    fileDiffs: [
+                      ...(msg.metadata?.fileDiffs || []),
+                      { action: event.action, path: event.path, language: event.language, hunks: event.hunks },
+                    ],
+                  },
+                }
+              : msg
+          )
+        );
+        return;
+      }
+    };
+
+    const onDone = (returnedSessionId: string, requestId?: string | null) => {
+      const finalSessionId = returnedSessionId || resolvedSessionId || selectedSessionIdRef.current;
+      if (finalSessionId) {
+        setSelectedSessionId((cur) => cur ?? finalSessionId);
+        setSessionMessagesCache((prev) => ({ ...prev, [finalSessionId]: messagesRef.current }));
+        void refreshSessions();
+        // Only steer the URL if the user is still looking at this session.
+        if (selectedSessionIdRef.current === finalSessionId || selectedSessionIdRef.current === null) {
+          router.replace(`/?session=${encodeURIComponent(finalSessionId)}`, { scroll: false });
+        }
+      }
+      if (requestId) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, metadata: { ...(m.metadata || {}), requestId } }
+              : m
+          )
+        );
+        if (fileDiffsReceived) setUndoableRequestId(requestId);
+        reconnectedJobsRef.current.delete(requestId);
+      }
+      setPendingPlan((p) => (p?.assistantMsgId === assistantMessageId ? null : p));
+      setPendingQuestion((q) => (q?.assistantMsgId === assistantMessageId ? null : q));
+      thinking.end(assistantMessageId);
+      // Only flip the global sending/pipeline state if THIS run is the active one
+      // (a background reconnect for another session shouldn't clear the composer).
+      if (activeRequestIdRef.current === (requestId ?? activeRequestIdRef.current) &&
+          (jobSessionId === null || jobSessionId === selectedSessionIdRef.current)) {
+        pipeline.stop();
+        setIsSending(false);
+        abortRequestRef.current = null;
+        activeRequestIdRef.current = null;
+      }
+      maybeNotify("Task complete", "Kodo finished your request.", finalSessionId ?? null, `done-${requestId ?? assistantMessageId}`);
+    };
+
+    const onError = (err: string) => {
+      setMessages((prev) =>
+        prev.map((msg) =>
+          msg.id === assistantMessageId ? { ...msg, content: (msg.content ? msg.content + "\n\n" : "") + "Error: " + err } : msg
+        )
+      );
+      setPendingPlan((p) => (p?.assistantMsgId === assistantMessageId ? null : p));
+      setPendingQuestion((q) => (q?.assistantMsgId === assistantMessageId ? null : q));
+      thinking.end(assistantMessageId);
+      if (jobSessionId === null || jobSessionId === selectedSessionIdRef.current) {
+        pipeline.stop();
+        setIsSending(false);
+        abortRequestRef.current = null;
+        activeRequestIdRef.current = null;
+      }
+    };
+
+    return { onEvent, onDone, onError };
+  }
+
+  // After (re)opening a session, re-attach to any agent job still running for
+  // it — the task kept going server-side across the refresh/switch, so restore
+  // its live stream into a fresh assistant message. This is what makes work
+  // survive a page refresh.
+  async function reconnectRunningJobs(sessionId: string) {
+    try {
+      const jobs = await fetchActiveJobs(sessionId);
+      for (const job of jobs) {
+        if (reconnectedJobsRef.current.has(job.requestId)) continue;
+        reconnectedJobsRef.current.add(job.requestId);
+
+        const assistantMessageId = uuidv4();
+        const placeholder: Message = {
+          id:        assistantMessageId,
+          role:      "assistant",
+          content:   "",
+          createdAt: nowIso(),
+          metadata:  { requestId: job.requestId },
+        };
+        setMessages((prev) => [...prev, placeholder]);
+        thinking.begin(assistantMessageId);
+        if (job.sessionId === selectedSessionIdRef.current) {
+          setIsSending(true);
+          pipeline.start();
+          activeRequestIdRef.current = job.requestId;
+        }
+
+        const { onEvent, onDone, onError } = buildStreamHandlers(assistantMessageId, job.sessionId);
+        const detach = reconnectJob(job.requestId, onEvent, onDone, onError);
+        reconnectDetachersRef.current.push(detach);
+        // Track detach so the current session's Stop button can drop it too.
+        if (job.sessionId === selectedSessionIdRef.current) abortRequestRef.current = detach;
+      }
+    } catch {
+      /* discovery is best-effort — a failure just means no live reconnect */
+    }
+  }
+  // Keep the forward-reference ref (used by openSession above) pointing at the
+  // latest closure. Assigned in an effect, not during render (refs must not be
+  // mutated while rendering); openSession only reads it in async event flow.
+  useEffect(() => {
+    reconnectRunningJobsRef.current = reconnectRunningJobs;
+  });
+
   async function handleSendMessage() {
     const text = messageInput.trim();
     if ((!text && selectedFiles.length === 0) || isSending) return;
@@ -412,127 +700,15 @@ export default function MinimalChatComponent() {
     setSelectedFiles([]);
     if (textareaRef.current) textareaRef.current.style.height = "auto";
 
-    let fileDiffsReceived = false;
+    const { onEvent, onDone, onError } = buildStreamHandlers(assistantMessageId, selectedSessionIdRef.current);
 
     const cleanup = sendMessage(
       text,
       selectedFiles.length > 0 ? selectedFiles : null,
       selectedSessionIdRef.current,
-      (event: SSEEvent) => {
-        pipeline.onSSEEvent(event);
-        thinking.onSSEEvent(assistantMessageId, event);
-
-        if (event.type === "content") {
-          setMessages((prev) => {
-            const updated = prev.map((msg) =>
-              msg.id === assistantMessageId ? { ...msg, content: msg.content + event.chunk } : msg
-            );
-            const sid = selectedSessionIdRef.current;
-            if (sid) setSessionMessagesCache((c) => ({ ...c, [sid]: updated }));
-            return updated;
-          });
-          return;
-        }
-
-        if (event.type === "start") {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId
-                ? { ...msg, metadata: { ...(msg.metadata || {}), intent: event.intent ?? msg.metadata?.intent, requestId: event.requestId ?? msg.metadata?.requestId } }
-                : msg
-            )
-          );
-          return;
-        }
-
-        if (event.type === "done") {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId
-                ? { ...msg, metadata: { ...(msg.metadata || {}), requestId: event.requestId ?? msg.metadata?.requestId } }
-                : msg
-            )
-          );
-          return;
-        }
-
-        if (event.type === "plan_metadata") {
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId
-                ? { ...msg, metadata: { ...(msg.metadata || {}), planMetadata: event.raw } }
-                : msg
-            )
-          );
-          return;
-        }
-
-        // ── Plan preview (ask mode) ───────────────────────────
-        if (event.type === "plan_preview") {
-          const rid = messagesRef.current.find((m) => m.id === assistantMessageId)?.metadata?.requestId;
-          if (rid) {
-            setPendingPlan({ steps: event.steps, assistantMsgId: assistantMessageId, requestId: rid, isApproving: false });
-          }
-          return;
-        }
-
-        if (event.type === "file_diff") {
-          fileDiffsReceived = true;
-          setMessages((prev) =>
-            prev.map((msg) =>
-              msg.id === assistantMessageId
-                ? {
-                    ...msg,
-                    metadata: {
-                      ...(msg.metadata || {}),
-                      fileDiffs: [
-                        ...(msg.metadata?.fileDiffs || []),
-                        { action: event.action, path: event.path, language: event.language, hunks: event.hunks },
-                      ],
-                    },
-                  }
-                : msg
-            )
-          );
-          return;
-        }
-      },
-      (returnedSessionId, requestId) => {
-        const finalSessionId = returnedSessionId || selectedSessionIdRef.current;
-        if (finalSessionId) {
-          setSelectedSessionId(finalSessionId);
-          setSessionMessagesCache((prev) => ({ ...prev, [finalSessionId]: messagesRef.current }));
-          void refreshSessions(finalSessionId);
-          router.replace(`/?session=${encodeURIComponent(finalSessionId)}`, { scroll: false });
-        }
-        if (requestId) {
-          setMessages((prev) =>
-            prev.map((m) =>
-              m.id === assistantMessageId
-                ? { ...m, metadata: { ...(m.metadata || {}), requestId } }
-                : m
-            )
-          );
-        }
-        if (requestId && fileDiffsReceived) setUndoableRequestId(requestId);
-        setPendingPlan(null);
-        thinking.end(assistantMessageId);
-        pipeline.stop();
-        setIsSending(false);
-        abortRequestRef.current = null;
-      },
-      (err) => {
-        setMessages((prev) =>
-          prev.map((msg) =>
-            msg.id === assistantMessageId ? { ...msg, content: "Error connecting to backend:\n" + err } : msg
-          )
-        );
-        setPendingPlan(null);
-        thinking.end(assistantMessageId);
-        pipeline.stop();
-        setIsSending(false);
-        abortRequestRef.current = null;
-      },
+      onEvent,
+      onDone,
+      onError,
       undefined,
       permissionMode,
     );
@@ -603,6 +779,8 @@ export default function MinimalChatComponent() {
             onToggleFileTree={() => setFileTreeOpen((p) => !p)}
             fileTreeOpen={fileTreeOpen}
             isSending={isSending}
+            notificationPermission={notifications.supported ? notifications.permission : undefined}
+            onRequestNotifications={notifications.supported ? () => void notifications.request() : undefined}
           />
 
           <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -660,6 +838,10 @@ export default function MinimalChatComponent() {
                               m.role === "assistant" &&
                               pendingPlan &&
                               pendingPlan.assistantMsgId === m.id;
+                            const showQuestion =
+                              m.role === "assistant" &&
+                              pendingQuestion &&
+                              pendingQuestion.assistantMsgId === m.id;
 
                             return (
                               <motion.div
@@ -714,6 +896,18 @@ export default function MinimalChatComponent() {
                                         />
                                       )}
 
+                                      {/* Clarifying question (ask_user tool) — not just approval,
+                                          the agent pauses when it would otherwise be guessing */}
+                                      {showQuestion && pendingQuestion && (
+                                        <QuestionPanel
+                                          header={pendingQuestion.header}
+                                          question={pendingQuestion.question}
+                                          options={pendingQuestion.options}
+                                          onAnswer={handleAnswerQuestion}
+                                          isAnswering={pendingQuestion.isAnswering}
+                                        />
+                                      )}
+
                                       {m.content ? (
                                         <AssistantMessage
                                           content={m.content}
@@ -725,7 +919,7 @@ export default function MinimalChatComponent() {
                                           }
                                           isUndoing={undoingMessageId === m.id}
                                         />
-                                      ) : !trace.isActive && !showPlanPreview ? (
+                                      ) : !trace.isActive && !showPlanPreview && !showQuestion ? (
                                         <div className="flex items-center gap-2 text-white/40">
                                           <TypingIndicator />
                                           <span className="text-sm">Running agent…</span>
