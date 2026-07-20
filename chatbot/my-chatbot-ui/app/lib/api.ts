@@ -71,11 +71,17 @@ export type SSEEvent =
   | { type: "file_diff";    action: string; path: string; language: string; hunks: DiffHunk[] }
   | { type: "plan_preview"; steps: PlanStep[] }
   | { type: "todo";         todos: TodoItem[] }
+  | { type: "question";     questionId: string; question: string; header?: string; options?: QuestionOption[] }
   | { type: "usage";        inputTokens: number; outputTokens: number; llmCalls: number; model?: string };
 
 export interface TodoItem {
   content: string;
   status: "pending" | "in_progress" | "completed";
+}
+
+export interface QuestionOption {
+  label:        string;
+  description?: string;
 }
 
 export interface GitStatus {
@@ -244,6 +250,17 @@ async function parseSSE(
               onEvent({
                 type:  "todo",
                 todos: Array.isArray(parsed.todos) ? parsed.todos : [],
+              });
+              break;
+
+            // Agent is asking a clarifying question instead of guessing
+            case "question":
+              onEvent({
+                type:       "question",
+                questionId: String(parsed.questionId || ""),
+                question:   String(parsed.question || ""),
+                header:     parsed.header,
+                options:    Array.isArray(parsed.options) ? parsed.options : [],
               });
               break;
 
@@ -635,6 +652,27 @@ export async function switchGitBranch(branch: string): Promise<{ ok: boolean; er
   return data;
 }
 
+export async function gitCommit(message: string): Promise<{ hash: string; message: string }> {
+  const res  = await fetch(`${WORKSPACE_URL}/git/commit`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  const data = await readJson<{ ok: boolean; hash?: string; message?: string; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Commit failed");
+  return { hash: data.hash || "", message: data.message || message };
+}
+
+export async function gitPush(): Promise<{ branch: string; output: string }> {
+  const res  = await fetch(`${WORKSPACE_URL}/git/push`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  const data = await readJson<{ ok: boolean; branch?: string; output?: string; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Push failed");
+  return { branch: data.branch || "", output: data.output || "" };
+}
+
 export async function fetchWorkspaceFiles(): Promise<WorkspaceFileEntry[]> {
   const res  = await fetch(`${WORKSPACE_URL}/files`, { headers: authHeaders(), cache: "no-store" });
   const data = await readJson<{ ok: boolean; files: WorkspaceFileEntry[] }>(res);
@@ -694,6 +732,17 @@ export async function rejectPlan(requestId: string): Promise<void> {
   });
   const data = await readJson<{ ok: boolean; error?: string }>(res);
   if (!res.ok || !data.ok) throw new Error(data.error || "Failed to reject plan");
+}
+
+// ─── Clarifying questions (ask_user tool) ──────────────────────
+
+export async function answerQuestion(requestId: string, answer: string): Promise<void> {
+  const res = await fetch(`${BASE_URL}/answer/${encodeURIComponent(requestId)}`, {
+    method: "POST", headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify({ answer }),
+  });
+  const data = await readJson<{ ok: boolean; error?: string }>(res);
+  if (!res.ok || !data.ok) throw new Error(data.error || "Failed to send answer");
 }
 
 // ─── Compact ──────────────────────────────────────────────────

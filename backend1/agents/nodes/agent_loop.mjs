@@ -11,15 +11,18 @@
  *
  * Tools: read_file, write_file, edit_file, bash, grep, glob, list_files,
  *        todo_write, list_memory_topics, read_memory_topic, load_skill,
- *        web_search, fetch_url
+ *        web_search, fetch_url, ask_user
  *
  * Safety & UX preserved from the old pipeline:
  *   - pre-write syntax/structural validation (utils/syntax.util.mjs)
  *   - .agent-history undo snapshots (same meta.json format the undo service reads)
- *   - SSE events the existing UI understands: progress, file_diff, plan_preview, todo
+ *   - SSE events the existing UI understands: progress, file_diff, plan_preview, todo, question
  *   - "ask" permission mode: pause for user approval before the FIRST mutation
  *   - "plan" permission mode: mutating tools disabled; the agent presents a plan
  *   - post-edit hooks from {workspace}/.kodo/hooks.json (e.g. prettier)
+ *   - ask_user tool: the agent can pause and ask a clarifying question mid-task
+ *     (not just approve/reject a plan) instead of guessing — mirrors Claude
+ *     Code's own AskUserQuestion behavior. Answered via POST /answer/:requestId.
  */
 
 import path from "path";
@@ -653,6 +656,33 @@ const AGENT_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "ask_user",
+      description: "Ask the user a clarifying question instead of guessing. Use when a requirement is genuinely ambiguous, you're about to make a consequential or hard-to-reverse choice, or you need information only the user has — not when you can find the answer yourself by reading the code. Call this ALONE (no other tool calls in the same turn) and wait for the answer before continuing. Prefer 2-4 concrete options when the choice is discrete; omit options for open-ended questions.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "The question to ask, phrased so the user can answer without extra context." },
+          header: { type: "string", description: "Very short label, under 12 chars, e.g. 'Auth method'" },
+          options: {
+            type: "array",
+            description: "2-4 mutually exclusive choices, if the decision is discrete. Omit entirely for a free-text/open-ended question.",
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string", description: "Short display text, 1-5 words" },
+                description: { type: "string", description: "What this choice means or implies" },
+              },
+              required: ["label"],
+            },
+          },
+        },
+        required: ["question"],
+      },
+    },
+  },
 ];
 
 const MUTATING_TOOLS = new Set(["edit_file", "write_file", "bash"]);
@@ -701,6 +731,9 @@ function buildSystemPrompt({ workspaceTree, kodoMd, memoryIndex, skillIndex, per
 - Keep dependencies minimal; use bash \`npm install <pkg> --prefix <subproject>\` only when the task truly needs a new package.
 - For UI/design/animation work: load the matching skill first (see list), respect the project's design tokens, and keep accessibility (contrast, reduced-motion) intact.
 - Never touch .env, secrets, lockfiles, or files outside the workspace.
+
+# Don't work blind — ask when it matters
+Use ask_user before committing to a consequential guess: an ambiguous requirement with materially different implementations, a destructive/hard-to-reverse choice (deleting data, overwriting config, picking an irreversible approach), or missing information only the user has (which of several plausible targets, a credential/URL you don't have, a design preference with no existing convention to follow). Do NOT ask about anything discoverable by reading the code, grepping, or checking docs — do that instead. Do NOT ask about low-stakes details — just make a reasonable choice and mention it in your final summary. Keep it to at most one or two questions per task, and never combine ask_user with other tool calls in the same turn.
 ${planModeSection}${kodoSection}${memorySection}${skillSection}
 # Workspace layout (partial)
 ${snapshot}
@@ -710,7 +743,7 @@ ${snapshot}
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
 export async function executeTool(name, args, ctx) {
-  const { root, emit, sessionId, requestId, hooks, editedFiles, todosRef, permissionMode } = ctx;
+  const { root, emit, sessionId, requestId, hooks, editedFiles, todosRef, permissionMode, askUser } = ctx;
   try {
     switch (name) {
       case "read_file": {
@@ -903,6 +936,22 @@ export async function executeTool(name, args, ctx) {
         return await fetchUrl(args.url);
       }
 
+      case "ask_user": {
+        const question = String(args.question || "").trim();
+        if (!question) return { success: false, error: "question is required" };
+        if (!askUser) return { success: false, error: "Asking the user isn't available in this context — make your best judgment call and note the assumption in your final summary." };
+        const options = Array.isArray(args.options)
+          ? args.options.map((o) => ({ label: String(o?.label || "").slice(0, 80), description: String(o?.description || "").slice(0, 200) })).filter((o) => o.label).slice(0, 4)
+          : [];
+        emit?.({ type: "progress", stage: "planning", message: `❓ ${question.slice(0, 140)}` });
+        try {
+          const answer = await askUser({ question, header: String(args.header || "").slice(0, 20), options });
+          return { success: true, answer };
+        } catch (err) {
+          return { success: false, error: `Question cancelled: ${String(err?.message || err)}` };
+        }
+      }
+
       default:
         return { success: false, error: `Unknown tool: ${name}` };
     }
@@ -952,6 +1001,7 @@ export async function agentLoopNode(state) {
     workspacePath, userMessage, modelRoute, emit,
     rememberedTargetFile = "", sessionId, requestId,
     permissionMode = "auto", approvalPromise = null, abortSignal = null,
+    askUser = null,
   } = state;
 
   const root = workspacePath || PROJECT_ROOT;
@@ -994,6 +1044,7 @@ export async function agentLoopNode(state) {
     todosRef: { current: [] },
     workspaceSnapshot,
     permissionMode,
+    askUser,
   };
   for (const f of workspaceSnapshot) {
     if (f.isDir || seedBlocks.length >= 3) continue;
@@ -1119,8 +1170,18 @@ export async function agentLoopNode(state) {
         }
       }
 
+      // ask_user must run alone — if the model batched it with other calls,
+      // answer only the question this iteration and tell the model to redo
+      // the rest next turn once it has the answer (never fire tool calls
+      // blindly alongside a pending clarification).
+      const askUserCall = message.tool_calls.find((tc) => tc.function.name === "ask_user");
+      const toolCallsThisTurn = askUserCall && message.tool_calls.length > 1 ? [askUserCall] : message.tool_calls;
+      const deferredCalls = askUserCall && message.tool_calls.length > 1
+        ? message.tool_calls.filter((tc) => tc !== askUserCall)
+        : [];
+
       const toolResults = [];
-      for (const toolCall of message.tool_calls) {
+      for (const toolCall of toolCallsThisTurn) {
         if (abortSignal?.aborted) break;
         const toolName = toolCall.function.name;
         let args = {};
@@ -1134,6 +1195,13 @@ export async function agentLoopNode(state) {
           ? raw.slice(0, MAX_TOOL_OUTPUT_CHARS) + '..."[truncated]"}'
           : raw;
         toolResults.push({ role: "tool", tool_call_id: toolCall.id, content: capped });
+      }
+      for (const deferred of deferredCalls) {
+        toolResults.push({
+          role: "tool",
+          tool_call_id: deferred.id,
+          content: JSON.stringify({ success: false, error: "Not run — you asked a question in the same turn. Wait for the answer, then re-issue this call on its own." }),
+        });
       }
       conversation.push(...toolResults);
 

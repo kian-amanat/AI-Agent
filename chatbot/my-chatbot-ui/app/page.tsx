@@ -17,6 +17,7 @@ import {
   callUndo,
   confirmPlan,
   rejectPlan,
+  answerQuestion,
   compactConversation,
   fetchActiveJobs,
   reconnectJob,
@@ -26,6 +27,7 @@ import {
   type SSEEvent,
   type UndoResult,
   type PlanStep,
+  type QuestionOption,
 } from "./lib/api";
 import AuthGuard from "./components/AuthGuard";
 import { useNotifications } from "./hooks/useNotifications";
@@ -40,6 +42,7 @@ import TypingIndicator from "./components/chat/TypingIndicator";
 import EmptyStateCard from "./components/chat/EmptyStateCard";
 import ChatComposer from "./components/chat/ChatComposer";
 import PlanPreviewPanel from "./components/chat/PlanPreviewPanel";
+import QuestionPanel from "./components/chat/QuestionPanel";
 import FileTreeSidebar from "./components/chat/FileTreeSidebar";
 import type { SlashCommandId } from "./components/chat/SlashCommandPalette";
 
@@ -128,6 +131,17 @@ export default function MinimalChatComponent() {
     assistantMsgId:   string;
     requestId:        string;
     isApproving:      boolean;
+  } | null>(null);
+
+  // ── Clarifying question (ask_user tool mid-task) ──────────────
+  const [pendingQuestion, setPendingQuestion] = useState<{
+    questionId:     string;
+    header:         string;
+    question:       string;
+    options:        QuestionOption[];
+    assistantMsgId: string;
+    requestId:      string;
+    isAnswering:    boolean;
   } | null>(null);
 
   // ── File tree sidebar ─────────────────────────────────────────
@@ -345,6 +359,19 @@ export default function MinimalChatComponent() {
     setPendingPlan(null);
   }
 
+  // ── Clarifying question handler (ask_user tool) ────────────────
+  async function handleAnswerQuestion(answer: string) {
+    if (!pendingQuestion) return;
+    setPendingQuestion((q) => q ? { ...q, isAnswering: true } : null);
+    try {
+      await answerQuestion(pendingQuestion.requestId, answer);
+    } catch (err) {
+      console.error("Answer question failed:", err);
+    } finally {
+      setPendingQuestion(null);
+    }
+  }
+
   // ── Compact conversation ──────────────────────────────────────
   async function handleCompact() {
     const sessionId = selectedSessionIdRef.current;
@@ -487,6 +514,25 @@ export default function MinimalChatComponent() {
         return;
       }
 
+      // ── Clarifying question: the agent is asking instead of guessing ───────
+      if (event.type === "question") {
+        const rid = messagesRef.current.find((m) => m.id === assistantMessageId)?.metadata?.requestId
+                  ?? activeRequestIdRef.current;
+        if (rid) {
+          setPendingQuestion({
+            questionId: event.questionId,
+            header: event.header || "Question",
+            question: event.question,
+            options: event.options || [],
+            assistantMsgId: assistantMessageId,
+            requestId: rid,
+            isAnswering: false,
+          });
+        }
+        maybeNotify("Kodo has a question", event.question, resolvedSessionId, `question-${event.questionId}`);
+        return;
+      }
+
       if (event.type === "file_diff") {
         fileDiffsReceived = true;
         setMessages((prev) =>
@@ -532,6 +578,7 @@ export default function MinimalChatComponent() {
         reconnectedJobsRef.current.delete(requestId);
       }
       setPendingPlan((p) => (p?.assistantMsgId === assistantMessageId ? null : p));
+      setPendingQuestion((q) => (q?.assistantMsgId === assistantMessageId ? null : q));
       thinking.end(assistantMessageId);
       // Only flip the global sending/pipeline state if THIS run is the active one
       // (a background reconnect for another session shouldn't clear the composer).
@@ -552,6 +599,7 @@ export default function MinimalChatComponent() {
         )
       );
       setPendingPlan((p) => (p?.assistantMsgId === assistantMessageId ? null : p));
+      setPendingQuestion((q) => (q?.assistantMsgId === assistantMessageId ? null : q));
       thinking.end(assistantMessageId);
       if (jobSessionId === null || jobSessionId === selectedSessionIdRef.current) {
         pipeline.stop();
@@ -790,6 +838,10 @@ export default function MinimalChatComponent() {
                               m.role === "assistant" &&
                               pendingPlan &&
                               pendingPlan.assistantMsgId === m.id;
+                            const showQuestion =
+                              m.role === "assistant" &&
+                              pendingQuestion &&
+                              pendingQuestion.assistantMsgId === m.id;
 
                             return (
                               <motion.div
@@ -844,6 +896,18 @@ export default function MinimalChatComponent() {
                                         />
                                       )}
 
+                                      {/* Clarifying question (ask_user tool) — not just approval,
+                                          the agent pauses when it would otherwise be guessing */}
+                                      {showQuestion && pendingQuestion && (
+                                        <QuestionPanel
+                                          header={pendingQuestion.header}
+                                          question={pendingQuestion.question}
+                                          options={pendingQuestion.options}
+                                          onAnswer={handleAnswerQuestion}
+                                          isAnswering={pendingQuestion.isAnswering}
+                                        />
+                                      )}
+
                                       {m.content ? (
                                         <AssistantMessage
                                           content={m.content}
@@ -855,7 +919,7 @@ export default function MinimalChatComponent() {
                                           }
                                           isUndoing={undoingMessageId === m.id}
                                         />
-                                      ) : !trace.isActive && !showPlanPreview ? (
+                                      ) : !trace.isActive && !showPlanPreview && !showQuestion ? (
                                         <div className="flex items-center gap-2 text-white/40">
                                           <TypingIndicator />
                                           <span className="text-sm">Running agent…</span>

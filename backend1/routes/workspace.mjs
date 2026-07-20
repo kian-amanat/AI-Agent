@@ -1,4 +1,4 @@
-import { exec } from "child_process";
+import { exec, execFile } from "child_process";
 import { promises as fs } from "fs";
 import path from "path";
 import { promisify } from "util";
@@ -44,6 +44,54 @@ export default async function workspaceRoute(fastify) {
     ]);
 
     return { ok: true, branch, dirty: statusOut.length > 0, ahead: aheadOut };
+  });
+
+  // POST /api/workspace/git/commit — stage everything and commit
+  fastify.post("/git/commit", async (request) => {
+    const root = getWorkspacePath(request) || process.cwd();
+    const message = String(request.body?.message || "").trim();
+    if (!message) return { ok: false, error: "Commit message is required" };
+
+    try {
+      const { stdout: statusOut } = await execAsync("git status --porcelain", { cwd: root, timeout: 5000 });
+      if (!statusOut.trim()) return { ok: false, error: "Nothing to commit — working tree is clean" };
+
+      await execAsync("git add -A", { cwd: root, timeout: 15000 });
+      // -F - reads the message from stdin so it can't be misparsed as flags
+      // or break on quotes/newlines the way string interpolation would.
+      await new Promise((resolve, reject) => {
+        const child = execFile("git", ["commit", "-F", "-"], { cwd: root, timeout: 15000 }, (err, stdout, stderr) => {
+          if (err) reject(new Error(stderr?.trim() || stdout?.trim() || err.message));
+          else resolve(stdout);
+        });
+        child.stdin.write(message);
+        child.stdin.end();
+      });
+
+      const { stdout: hashOut } = await execAsync("git rev-parse --short HEAD", { cwd: root, timeout: 3000 });
+      return { ok: true, hash: hashOut.trim(), message };
+    } catch (err) {
+      return { ok: false, error: err.message || "Commit failed" };
+    }
+  });
+
+  // POST /api/workspace/git/push — push the current branch, setting upstream
+  // on first push if none is configured yet
+  fastify.post("/git/push", async (request) => {
+    const root = getWorkspacePath(request) || process.cwd();
+
+    try {
+      const branch = (await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: root, timeout: 3000 })).stdout.trim();
+      const hasUpstream = await execAsync("git rev-parse --abbrev-ref --symbolic-full-name @{u}", { cwd: root, timeout: 3000 })
+        .then(() => true)
+        .catch(() => false);
+
+      const pushCmd = hasUpstream ? "git push" : `git push -u origin ${branch.replace(/[^a-zA-Z0-9_./-]/g, "")}`;
+      const { stdout, stderr } = await execAsync(pushCmd, { cwd: root, timeout: 30000 });
+      return { ok: true, branch, output: (stdout + stderr).trim().slice(0, 2000) };
+    } catch (err) {
+      return { ok: false, error: (err.stderr || err.message || "Push failed").toString().trim().slice(0, 500) };
+    }
   });
 
   // GET /api/workspace/git/branches — list all branches

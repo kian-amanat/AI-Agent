@@ -85,6 +85,47 @@ function registerSessionSlot(sessionId) {
 // until the user clicks Approve (POST /confirm/:requestId) or Cancel (POST /reject/:requestId)
 const pendingApprovals = new Map(); // requestId → { resolve, reject }
 
+// Clarifying-question promises — the agent's ask_user tool pauses here until
+// the user answers (POST /answer/:requestId). Unlike pendingApprovals this can
+// be armed/cleared multiple times over one run (one open question at a time).
+const pendingQuestions = new Map(); // requestId → { resolve, reject, questionId }
+
+const QUESTION_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Builds the askUser callback threaded into the graph (state.askUser →
+// agent_loop's ctx.askUser). Unanswered after the timeout: resolve with a
+// "no response" note rather than hanging the run forever — the agent proceeds
+// with its own best judgment instead of being stuck.
+function makeAskUser(requestId, jobEmit, abortSignal) {
+  return function askUser({ question, header, options }) {
+    return new Promise((resolve) => {
+      const questionId = `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      const settle = (answer) => {
+        if (pendingQuestions.get(requestId)?.questionId !== questionId) return;
+        clearTimeout(timeoutId);
+        pendingQuestions.delete(requestId);
+        resolve(answer);
+      };
+
+      const timeoutId = setTimeout(() => {
+        settle("(no response from the user in time — proceed using your best judgment and note the assumption)");
+      }, QUESTION_TIMEOUT_MS);
+
+      pendingQuestions.set(requestId, { questionId, resolve: settle });
+      jobEmit({
+        type: "question",
+        questionId,
+        question,
+        header: header || "Question",
+        options: options || [],
+      });
+
+      if (abortSignal?.aborted) settle("(operation cancelled)");
+    });
+  };
+}
+
 // ── Helpers ───────────────────────────────────────────────────
 
 // Per-user settings (multi-user): each user's model/API key is isolated in the
@@ -245,6 +286,11 @@ async function startBackgroundRun(ctx) {
     approvalPromise.catch(() => {});
   }
 
+  const askUser = makeAskUser(requestId, jobEmit, controller.signal);
+  controller.signal.addEventListener("abort", () => {
+    pendingQuestions.get(requestId)?.resolve("(operation cancelled)");
+  });
+
   const doneEvent = (summary, extra = {}) => ({
     type: "done", request_id: requestId, summary,
     metadata: { type: "graph", request_id: requestId, ...modelMeta, ...extra },
@@ -266,6 +312,7 @@ async function startBackgroundRun(ctx) {
       emit: jobEmit,
       abortSignal: controller.signal,
       permissionMode, approvalPromise,
+      askUser,
     }).then((r) => ({ ok: true, result: r })).catch((e) => ({ ok: false, error: e }));
 
     const raceResult = await Promise.race([graphPromise, timeoutPromise]);
@@ -341,6 +388,7 @@ async function startBackgroundRun(ctx) {
   } finally {
     if (approvalTimeoutId !== null) clearTimeout(approvalTimeoutId);
     pendingApprovals.delete(requestId);
+    pendingQuestions.delete(requestId);
     releaseSlot();
   }
 }
@@ -816,6 +864,20 @@ export default async function plannerAgentRoute(fastify) {
     }
     pending.reject(new Error("User cancelled the plan"));
     pendingApprovals.delete(requestId);
+    return { ok: true };
+  });
+
+  // ── Answer a clarifying question (ask_user tool) ─────────────
+  fastify.post("/answer/:requestId", async (request, reply) => {
+    setCors(reply);
+    const { requestId } = request.params;
+    const pending = pendingQuestions.get(requestId);
+    if (!pending) {
+      return reply.code(404).send({ ok: false, error: "No pending question for this request" });
+    }
+    const body = await parseIncomingPayload(request).catch(() => ({}));
+    const answer = String(body?.answer ?? "").trim();
+    pending.resolve(answer || "(user submitted an empty answer)");
     return { ok: true };
   });
 

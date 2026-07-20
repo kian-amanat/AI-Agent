@@ -27,6 +27,7 @@ export async function runKodoGraph({
   abortSignal = null,
   permissionMode = "auto",
   approvalPromise = null,
+  askUser = null,
 }) {
   const graph = getGraph();
 
@@ -48,6 +49,7 @@ export async function runKodoGraph({
     abortSignal,
     permissionMode,
     approvalPromise,
+    askUser,
   };
 
   console.log(`[KodoGraph] 🚀 session=${sessionId} request=${requestId}`);

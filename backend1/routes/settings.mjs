@@ -2,6 +2,7 @@ import fs from "fs/promises";
 import path from "path";
 import { listProviders, getModel } from "../config/models.mjs";
 import { getCapabilities } from "../services/modelRouter.mjs";
+import { chatWithTools } from "../services/agentChat.mjs";
 import db, { getUserSettings, saveUserSettings, userHasSettings } from "../db.mjs";
 
 // Legacy single-file store. Still read ONCE per user to seed their per-user
@@ -77,8 +78,12 @@ function inferVisionFromId(modelId) {
   return /(\bvision\b|\bvl\b|multimodal|image)/i.test(String(modelId || ""));
 }
 
+// Providers not in this fixed registry (config/models.mjs) still work — any
+// base URL that doesn't match a known provider falls back to "custom", a
+// generic OpenAI-compatible passthrough (see CUSTOM_PROVIDER_IDS below).
 function inferProviderFromBaseUrl(baseUrl = "") {
   const url = String(baseUrl || "").toLowerCase();
+  if (!url) return "";
 
   if (url.includes("gapgpt.app")) return "gapgpt";
   if (url.includes("api.openai.com")) return "openai";
@@ -86,11 +91,18 @@ function inferProviderFromBaseUrl(baseUrl = "") {
   if (url.includes("dashscope") || url.includes("qwen")) return "qwen";
   if (url.includes("deepseek")) return "deepseek";
   if (url.includes("ollama") || url.includes("localhost") || url.includes("127.0.0.1")) {
-    return "";
+    return "local";
   }
 
-  return "";
+  return "custom";
 }
+
+// Providers whose models aren't (and can't be) enumerated in config/models.mjs:
+// GapGPT is fetched dynamically from its /v1/models endpoint, "custom" is any
+// other OpenAI-compatible endpoint the user points at (self-hosted gateways,
+// third-party resellers, etc). Both skip the fixed-registry model lookup and
+// are used exactly as typed — provider, model id, baseUrl, apiKey.
+const OPEN_MODEL_PROVIDERS = new Set(["gapgpt", "custom", "local"]);
 
 function normalizeGapGPTModel(raw) {
   const id = String(raw?.id || "").trim();
@@ -196,19 +208,32 @@ async function buildProvidersWithGapGPT() {
   return next;
 }
 
+// Users sometimes paste the full endpoint URL (as shown in a provider's docs/
+// curl example) instead of just the API root — e.g. ".../v1/chat/completions"
+// instead of ".../v1". The OpenAI SDK appends "/chat/completions" itself, so
+// leaving the suffix in place doubles it up and 404s. Strip it back to the root.
+function stripEndpointSuffix(url) {
+  return String(url || "")
+    .trim()
+    .replace(/\/+$/, "")
+    .replace(/\/(chat\/completions|completions|messages)$/i, "");
+}
+
 function normalizeSettingsBody(body = {}) {
-  const baseUrl = String(body.baseUrl || body.textBaseUrl || body.visionBaseUrl || "").trim();
-  const inferredProvider = inferProviderFromBaseUrl(baseUrl);
+  const baseUrl = stripEndpointSuffix(body.baseUrl || body.textBaseUrl || "");
+  const visionBaseUrl = stripEndpointSuffix(body.visionBaseUrl || "");
+  const inferredProvider = inferProviderFromBaseUrl(baseUrl || body.visionBaseUrl || "");
+  const inferredVisionProvider = inferProviderFromBaseUrl(visionBaseUrl || baseUrl);
 
   return {
     provider: String(body.provider || body.textProvider || inferredProvider || "").trim(),
     model: String(body.model || body.textModel || "").trim(),
     apiKey: String(body.apiKey || body.textApiKey || "").trim(),
-    baseUrl,
-    visionProvider: String(body.visionProvider || "").trim(),
+    baseUrl: baseUrl || visionBaseUrl,
+    visionProvider: String(body.visionProvider || (visionBaseUrl ? inferredVisionProvider : "")).trim(),
     visionModel: String(body.visionModel || "").trim(),
     visionApiKey: String(body.visionApiKey || "").trim(),
-    visionBaseUrl: String(body.visionBaseUrl || "").trim(),
+    visionBaseUrl,
     useVisionSameKey: Boolean(body.useVisionSameKey),
   };
 }
@@ -286,8 +311,17 @@ export default async function settingsRoutes(fastify) {
       });
     }
 
-    // Validate non-GapGPT text model only
-    if (body.provider !== "gapgpt") {
+    // "custom" providers have no fixed base URL — the user must supply one.
+    if (body.provider === "custom" && !body.baseUrl) {
+      return reply.code(400).send({
+        ok: false,
+        error: "baseUrl is required for a custom provider.",
+      });
+    }
+
+    // Validate against the fixed model registry only for providers that have
+    // one; GapGPT and custom endpoints use whatever model id was typed.
+    if (!OPEN_MODEL_PROVIDERS.has(body.provider)) {
       const textModel = getModel(body.provider, body.model);
       if (!textModel) {
         return reply.code(400).send({
@@ -299,7 +333,8 @@ export default async function settingsRoutes(fastify) {
 
     const resolvedBaseUrl =
       body.baseUrl ||
-      (body.provider === "gapgpt" ? "https://api.gapgpt.app/v1" : null);
+      (body.provider === "gapgpt" ? "https://api.gapgpt.app/v1" : null) ||
+      (body.provider === "local" ? "http://localhost:11434/v1" : null);
 
     const settings = {
       // canonical shape
@@ -337,6 +372,8 @@ export default async function settingsRoutes(fastify) {
             error: `${gapgptModel.name} does not support vision/file uploads.`,
           });
         }
+      } else if (settings.visionProvider === "custom") {
+        // Can't verify vision support for an arbitrary endpoint — trust the user.
       } else {
         const vm = getModel(settings.visionProvider, settings.visionModel);
         if (!vm) {
@@ -385,6 +422,13 @@ export default async function settingsRoutes(fastify) {
       });
     }
 
+    if (provider === "custom" && !body.baseUrl) {
+      return reply.code(400).send({
+        ok: false,
+        error: "baseUrl is required for a custom provider.",
+      });
+    }
+
     let baseUrl = body.baseUrl || "";
     let modelName = body.model;
 
@@ -393,6 +437,8 @@ export default async function settingsRoutes(fastify) {
 
       const gapgptModel = await getGapGPTModelById(body.model);
       modelName = gapgptModel?.name || prettifyModelName(body.model);
+    } else if (provider === "custom" || provider === "local") {
+      modelName = prettifyModelName(body.model);
     } else {
       const modelInfo = getModel(provider, body.model);
       if (!modelInfo) {
@@ -406,28 +452,18 @@ export default async function settingsRoutes(fastify) {
       modelName = modelInfo.name;
     }
 
+    // Route through the same protocol adapter real chat requests use — this
+    // is what makes the test correct for Anthropic (native Messages API,
+    // x-api-key header) instead of assuming every provider speaks the OpenAI
+    // /chat/completions shape.
     try {
-      const res = await fetch(`${baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${body.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: body.model,
-          messages: [{ role: "user", content: "Hi" }],
-          max_tokens: 5,
-        }),
+      await chatWithTools({
+        creds: { apiKey: body.apiKey, baseURL: baseUrl, model: body.model },
+        messages: [{ role: "user", content: "Hi" }],
+        maxTokens: 5,
+        temperature: 0,
         signal: AbortSignal.timeout(10000),
       });
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        return {
-          ok: false,
-          error: err.error?.message || `API returned ${res.status}`,
-        };
-      }
 
       return {
         ok: true,

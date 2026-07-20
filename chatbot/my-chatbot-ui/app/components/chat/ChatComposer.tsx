@@ -3,14 +3,14 @@
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  ChevronDown, FileCode2, FolderOpen, GitBranch, Loader2, Mic, Paperclip,
-  Shield, ShieldCheck, StopCircle, X,
+  ArrowUpFromLine, Check, ChevronDown, FileCode2, FolderOpen, GitBranch,
+  GitCommit, Loader2, Mic, Paperclip, Shield, ShieldCheck, StopCircle, X,
 } from "lucide-react";
 import NorthRoundedIcon from "@mui/icons-material/NorthRounded";
 import StopRoundedIcon from "@mui/icons-material/StopRounded";
 import {
-  fetchGitBranches, fetchGitStatus, fetchWorkspaceRoots, switchGitBranch,
-  switchWorkspaceRoot, transcribeAudio,
+  fetchGitBranches, fetchGitStatus, fetchWorkspaceRoots, gitCommit, gitPush,
+  switchGitBranch, switchWorkspaceRoot, transcribeAudio,
   type GitBranchInfo, type GitStatus, type WorkspaceRootInfo,
 } from "../../lib/api";
 import SlashCommandPalette, { type SlashCommandId } from "./SlashCommandPalette";
@@ -98,6 +98,18 @@ export default function ChatComposer({
   const [rootError, setRootError]               = React.useState<string | null>(null);
   const rootDropdownRef = React.useRef<HTMLDivElement>(null);
 
+  // Commit popover state — a tiny message box next to the branch pill.
+  const [showCommitBox, setShowCommitBox] = React.useState(false);
+  const [commitMessage, setCommitMessage] = React.useState("");
+  const [committing, setCommitting]       = React.useState(false);
+  const [commitError, setCommitError]     = React.useState<string | null>(null);
+  const commitBoxRef = React.useRef<HTMLDivElement>(null);
+
+  // Push state — single click, no popover; feedback shown inline on the pill.
+  const [pushing, setPushing]         = React.useState(false);
+  const [pushError, setPushError]     = React.useState<string | null>(null);
+  const [pushSuccess, setPushSuccess] = React.useState(false);
+
   // Close dropdowns on outside click
   React.useEffect(() => {
     function handleClick(e: MouseEvent) {
@@ -107,26 +119,33 @@ export default function ChatComposer({
       if (rootDropdownRef.current && !rootDropdownRef.current.contains(e.target as Node)) {
         setShowRootDropdown(false);
       }
+      if (commitBoxRef.current && !commitBoxRef.current.contains(e.target as Node)) {
+        setShowCommitBox(false);
+      }
     }
-    if (showBranchDropdown || showRootDropdown) {
+    if (showBranchDropdown || showRootDropdown || showCommitBox) {
       document.addEventListener("mousedown", handleClick);
       return () => document.removeEventListener("mousedown", handleClick);
     }
-  }, [showBranchDropdown, showRootDropdown]);
+  }, [showBranchDropdown, showRootDropdown, showCommitBox]);
+
+  const refreshGitStatus = React.useCallback(async () => {
+    try {
+      const s = await fetchGitStatus();
+      setGitStatus(s);
+      return s;
+    } catch {
+      return null;
+    }
+  }, []);
 
   // Fetch git status on mount, refresh every 30 s
   React.useEffect(() => {
-    let cancelled = false;
-    async function poll() {
-      try {
-        const s = await fetchGitStatus();
-        if (!cancelled) setGitStatus(s);
-      } catch {}
-    }
+    async function poll() { await refreshGitStatus(); }
     void poll();
     const id = setInterval(poll, 30_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
+    return () => clearInterval(id);
+  }, [refreshGitStatus]);
 
   // Load branches when dropdown opens
   const loadBranches = React.useCallback(async () => {
@@ -148,9 +167,7 @@ export default function ChatComposer({
       setBranchError(null);
       try {
         await switchGitBranch(branchName);
-        // Refresh git status to reflect new branch
-        const s = await fetchGitStatus();
-        setGitStatus(s);
+        await refreshGitStatus();
         setShowBranchDropdown(false);
       } catch (err) {
         setBranchError(err instanceof Error ? err.message : "Failed to switch branch");
@@ -158,8 +175,41 @@ export default function ChatComposer({
         setBranchLoading(false);
       }
     },
-    []
+    [refreshGitStatus]
   );
+
+  const handleCommit = React.useCallback(async () => {
+    if (!commitMessage.trim()) return;
+    setCommitting(true);
+    setCommitError(null);
+    try {
+      await gitCommit(commitMessage.trim());
+      setCommitMessage("");
+      setShowCommitBox(false);
+      await refreshGitStatus();
+    } catch (err) {
+      setCommitError(err instanceof Error ? err.message : "Commit failed");
+    } finally {
+      setCommitting(false);
+    }
+  }, [commitMessage, refreshGitStatus]);
+
+  const handlePush = React.useCallback(async () => {
+    setPushing(true);
+    setPushError(null);
+    setPushSuccess(false);
+    try {
+      await gitPush();
+      await refreshGitStatus();
+      setPushSuccess(true);
+      setTimeout(() => setPushSuccess(false), 3000);
+    } catch (err) {
+      setPushError(err instanceof Error ? err.message : "Push failed");
+      setTimeout(() => setPushError(null), 4000);
+    } finally {
+      setPushing(false);
+    }
+  }, [refreshGitStatus]);
 
   const toggleBranchDropdown = React.useCallback(() => {
     setShowBranchDropdown((p) => {
@@ -613,6 +663,109 @@ export default function ChatComposer({
                         )}
                       </AnimatePresence>
                     </div>
+                  )}
+
+                  {/* Commit pill — only when there's something to commit */}
+                  {gitStatus?.dirty && (
+                    <div className="relative shrink-0" ref={commitBoxRef}>
+                      <button
+                        type="button"
+                        onClick={() => setShowCommitBox((p) => !p)}
+                        disabled={isSending || committing}
+                        className="flex items-center gap-1.5 rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-[3px] transition-colors hover:border-white/12 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
+                        title="Commit changes"
+                      >
+                        {committing ? (
+                          <Loader2 className="h-3 w-3 animate-spin text-white/30" />
+                        ) : (
+                          <GitCommit className="h-3 w-3 text-white/25" />
+                        )}
+                        <span className="text-[11px] text-white/40">Commit</span>
+                      </button>
+
+                      <AnimatePresence>
+                        {showCommitBox && (
+                          <motion.div
+                            initial={{ opacity: 0, y: 4, scale: 0.97 }}
+                            animate={{ opacity: 1, y: 0, scale: 1 }}
+                            exit={{ opacity: 0, y: 4, scale: 0.97 }}
+                            transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+                            className="absolute bottom-full left-0 z-[1000] mb-2 w-72 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#161616]/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
+                          >
+                            <div className="p-3">
+                              <span className="mb-2 block text-[10px] font-semibold uppercase tracking-wider text-white/25">
+                                Commit message
+                              </span>
+                              <textarea
+                                autoFocus
+                                value={commitMessage}
+                                onChange={(e) => setCommitMessage(e.target.value)}
+                                onKeyDown={(e) => {
+                                  if (e.key === "Enter" && !e.shiftKey) {
+                                    e.preventDefault();
+                                    void handleCommit();
+                                  }
+                                }}
+                                placeholder="Describe what changed…"
+                                rows={2}
+                                className="w-full resize-none rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[12px] text-white/85 placeholder:text-white/20 outline-none transition-colors focus:border-[#ff8a3d]/40"
+                              />
+                              {commitError && (
+                                <p className="mt-1.5 text-[11px] text-[#ff5e4d]/70">{commitError}</p>
+                              )}
+                              <div className="mt-2 flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={() => setShowCommitBox(false)}
+                                  disabled={committing}
+                                  className="rounded-lg px-2.5 py-1 text-[11px] text-white/40 transition-colors hover:text-white/70"
+                                >
+                                  Cancel
+                                </button>
+                                <motion.button
+                                  whileTap={{ scale: 0.96 }}
+                                  type="button"
+                                  onClick={() => void handleCommit()}
+                                  disabled={committing || !commitMessage.trim()}
+                                  className="flex items-center gap-1.5 rounded-lg border border-[#ff8a3d]/25 bg-[#ff8a3d]/10 px-3 py-1 text-[11px] font-medium text-[#ff8a3d] transition-colors hover:bg-[#ff8a3d]/18 disabled:cursor-not-allowed disabled:opacity-40"
+                                >
+                                  {committing ? <Loader2 className="h-3 w-3 animate-spin" /> : <GitCommit className="h-3 w-3" />}
+                                  {committing ? "Committing…" : "Commit"}
+                                </motion.button>
+                              </div>
+                            </div>
+                          </motion.div>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  )}
+
+                  {/* Push pill — only when there's something to push */}
+                  {gitStatus && gitStatus.ahead > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => void handlePush()}
+                      disabled={isSending || pushing}
+                      className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-[3px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                        pushSuccess
+                          ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-400"
+                          : pushError
+                          ? "border-[#ff5e4d]/25 bg-[#ff5e4d]/10 text-[#ff5e4d]"
+                          : "border-white/[0.06] bg-white/[0.03] text-white/40 hover:border-white/12 hover:bg-white/[0.06]"
+                      }`}
+                      title={pushError || `Push ${gitStatus.ahead} commit${gitStatus.ahead !== 1 ? "s" : ""}`}
+                    >
+                      {pushing ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : pushSuccess ? (
+                        <Check className="h-3 w-3" />
+                      ) : (
+                        <ArrowUpFromLine className="h-3 w-3" />
+                      )}
+                      <span className="text-[11px]">
+                        {pushing ? "Pushing…" : pushSuccess ? "Pushed" : pushError ? "Failed" : `Push ↑${gitStatus.ahead}`}
+                      </span>
+                    </button>
                   )}
 
                   {/* Root pill with dropdown — next to Branch. Switches between

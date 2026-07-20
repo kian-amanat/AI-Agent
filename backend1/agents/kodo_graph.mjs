@@ -61,6 +61,10 @@ export const KodoStateAnnotation = {
   abortSignal:     { default: () => null },
   permissionMode:  { default: () => "auto" },
   approvalPromise: { default: () => null },
+  // Lets agent_loop's ask_user tool pause and surface a question to the user
+  // mid-task, the same way approvalPromise gates a mutation — a function
+  // ({question, header, options}) => Promise<answer>, injected by graph_runner.
+  askUser:         { default: () => null },
 };
 
 // ── Error boundary ────────────────────────────────────────────────────────────
