@@ -350,7 +350,7 @@ export async function fetchUrl(rawUrl) {
   }
 }
 
-async function webSearch(query) {
+export async function webSearch(query) {
   const q = String(query || "").trim().slice(0, 200);
   if (!q) return { success: false, error: "query is required" };
   try {
@@ -713,6 +713,11 @@ const SUBAGENT_TOOL_NAMES = new Set([
 ]);
 const SUBAGENT_TOOLS = AGENT_TOOLS.filter((t) => SUBAGENT_TOOL_NAMES.has(t.function.name));
 const SUBAGENT_MAX_ITERATIONS = 12;
+
+// The web-research tools, shared with the conversational answer node so it can
+// also search/fetch when the model decides to (Claude Code-style: the model
+// has the tools and chooses when to use them).
+export const WEB_TOOLS = AGENT_TOOLS.filter((t) => t.function.name === "web_search" || t.function.name === "fetch_url");
 
 const MUTATING_TOOLS = new Set(["edit_file", "write_file", "bash"]);
 // bash commands that only read — exempt from ask-mode approval
@@ -1112,7 +1117,7 @@ export async function executeTool(name, args, ctx) {
 
 // ── Credentials ───────────────────────────────────────────────────────────────
 
-async function resolveCreds(modelRoute) {
+export async function resolveCreds(modelRoute) {
   if (modelRoute?.ok && modelRoute?.apiKey && modelRoute?.model) {
     return { apiKey: modelRoute.apiKey, baseURL: modelRoute.baseUrl || "https://api.openai.com/v1", model: modelRoute.model };
   }
