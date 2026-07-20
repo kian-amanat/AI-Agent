@@ -32,7 +32,12 @@ import { PLANS_DIR, OPENAI_API_KEY, OPENAI_BASE_URL, WHISPER_MODEL, openai } fro
 import { uniq }                        from "../utils/text.util.mjs";
 import { undoRequestChanges }          from "../services/undo.service.mjs";
 import { routeModel, getCapabilities } from "../services/modelRouter.mjs";
-import db                              from "../db.mjs";
+import db, {
+  getUserSettings,
+  createAgentJob,
+  updateAgentJobStatus,
+  getAgentJob,
+} from "../db.mjs";
 
 // ★ LangGraph runner + working-set memory
 import { runKodoGraph } from "../services/graph_runner.mjs";
@@ -42,6 +47,9 @@ import {
   buildWorkingSetContext,
 } from "../services/workingset.mjs";
 import { loadMemoryIndex, writeAgentMemory } from "../services/agentMemory.mjs";
+import {
+  createJob, emitToJob, subscribe, finishJob, cancelJob, getRunningJobs,
+} from "../services/jobs.mjs";
 
 const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
 const ALLOWED_ORIGIN = process.env.KODO_ALLOWED_ORIGIN || "http://localhost:3000";
@@ -77,9 +85,57 @@ function registerSessionSlot(sessionId) {
 // until the user clicks Approve (POST /confirm/:requestId) or Cancel (POST /reject/:requestId)
 const pendingApprovals = new Map(); // requestId → { resolve, reject }
 
+// Clarifying-question promises — the agent's ask_user tool pauses here until
+// the user answers (POST /answer/:requestId). Unlike pendingApprovals this can
+// be armed/cleared multiple times over one run (one open question at a time).
+const pendingQuestions = new Map(); // requestId → { resolve, reject, questionId }
+
+const QUESTION_TIMEOUT_MS = 10 * 60 * 1000;
+
+// Builds the askUser callback threaded into the graph (state.askUser →
+// agent_loop's ctx.askUser). Unanswered after the timeout: resolve with a
+// "no response" note rather than hanging the run forever — the agent proceeds
+// with its own best judgment instead of being stuck.
+function makeAskUser(requestId, jobEmit, abortSignal) {
+  return function askUser({ question, header, options }) {
+    return new Promise((resolve) => {
+      const questionId = `q_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+      const settle = (answer) => {
+        if (pendingQuestions.get(requestId)?.questionId !== questionId) return;
+        clearTimeout(timeoutId);
+        pendingQuestions.delete(requestId);
+        resolve(answer);
+      };
+
+      const timeoutId = setTimeout(() => {
+        settle("(no response from the user in time — proceed using your best judgment and note the assumption)");
+      }, QUESTION_TIMEOUT_MS);
+
+      pendingQuestions.set(requestId, { questionId, resolve: settle });
+      jobEmit({
+        type: "question",
+        questionId,
+        question,
+        header: header || "Question",
+        options: options || [],
+      });
+
+      if (abortSignal?.aborted) settle("(operation cancelled)");
+    });
+  };
+}
+
 // ── Helpers ───────────────────────────────────────────────────
 
-async function loadSettings() {
+// Per-user settings (multi-user): each user's model/API key is isolated in the
+// DB. Falls back to the legacy global data/settings.json only if a user has no
+// row yet (keeps single-user installs working through the upgrade).
+async function loadSettings(userId) {
+  if (userId) {
+    const perUser = getUserSettings(userId);
+    if (perUser) return perUser;
+  }
   try {
     const raw = await fs.readFile(SETTINGS_PATH, "utf-8");
     return JSON.parse(raw);
@@ -179,6 +235,200 @@ function syncSessionMemory(sessionId, userId, {
   if (targetFile.trim())            rememberTargetFile(sessionId, targetFile.trim());
 }
 
+// ── Background agent run (decoupled from the HTTP request) ────────────────────
+// Runs the graph inside a job so the task survives page refresh / disconnect.
+// The HTTP request that started it is just a live subscriber (see
+// streamJobToResponse). This function owns everything durable: emitting events
+// into the job, persisting the result, updating memory, and releasing the
+// per-session queue slot — all independent of whether any client is listening.
+async function startBackgroundRun(ctx) {
+  const {
+    requestId, sessionId, userId, workspacePath, modelRoute, modelMeta,
+    plannerContextMessage, rememberedFile, attachmentPaths, effectiveMessage,
+    permissionMode, controller, releaseSlot, startEvent,
+  } = ctx;
+
+  const title = String(effectiveMessage || "").slice(0, 60);
+  createJob({ requestId, sessionId, userId, controller, title });
+
+  let finished = false;
+  const markFinished = (status) => {
+    if (finished) return;
+    finished = true;
+    try { updateAgentJobStatus(requestId, status); } catch {}
+    finishJob(requestId, status);
+  };
+
+  // Track whether content streamed + collect diffs for the saved message.
+  let contentEmitted = false;
+  const collectedFileDiffs = [];
+  const jobEmit = (event) => {
+    if (event.type === "content") contentEmitted = true;
+    if (event.type === "file_diff") {
+      collectedFileDiffs.push({ action: event.action, path: event.path, language: event.language, hunks: event.hunks });
+    }
+    emitToJob(requestId, event);
+  };
+
+  // Ask-mode approval promise (execute waits on this before the first write).
+  let approvalPromise = null;
+  let approvalTimeoutId = null;
+  if (permissionMode === "ask") {
+    approvalPromise = new Promise((resolve, reject) => {
+      pendingApprovals.set(requestId, { resolve, reject });
+      approvalTimeoutId = setTimeout(() => {
+        if (pendingApprovals.has(requestId)) {
+          pendingApprovals.delete(requestId);
+          reject(new Error("Plan approval timed out"));
+        }
+      }, 5 * 60 * 1000);
+    });
+    approvalPromise.catch(() => {});
+  }
+
+  const askUser = makeAskUser(requestId, jobEmit, controller.signal);
+  controller.signal.addEventListener("abort", () => {
+    pendingQuestions.get(requestId)?.resolve("(operation cancelled)");
+  });
+
+  const doneEvent = (summary, extra = {}) => ({
+    type: "done", request_id: requestId, summary,
+    metadata: { type: "graph", request_id: requestId, ...modelMeta, ...extra },
+  });
+
+  try {
+    createAgentJob({ requestId, sessionId, userId, title });
+    jobEmit(startEvent);
+
+    const GRAPH_TIMEOUT_MS = 15 * 60 * 1000;
+    const timeoutPromise = new Promise((resolve) =>
+      setTimeout(() => resolve({ ok: false, timedOut: true }), GRAPH_TIMEOUT_MS)
+    );
+    const graphPromise = runKodoGraph({
+      userMessage:          plannerContextMessage,
+      rememberedTargetFile: rememberedFile,
+      sessionId, requestId, userId, workspacePath, modelRoute,
+      attachmentPaths,
+      emit: jobEmit,
+      abortSignal: controller.signal,
+      permissionMode, approvalPromise,
+      askUser,
+    }).then((r) => ({ ok: true, result: r })).catch((e) => ({ ok: false, error: e }));
+
+    const raceResult = await Promise.race([graphPromise, timeoutPromise]);
+
+    if (approvalTimeoutId !== null) clearTimeout(approvalTimeoutId);
+    pendingApprovals.delete(requestId);
+
+    if (raceResult.timedOut) {
+      jobEmit({ type: "content", content: "The task is taking longer than expected. Please try again." });
+      jobEmit(doneEvent(""));
+      saveMessage(sessionId, userId, "assistant", "(timed out)", "graph", requestId, null);
+      touchSession(sessionId, userId);
+      markFinished("error");
+      return;
+    }
+
+    if (!raceResult.ok) {
+      const cancelled = controller.signal.aborted;
+      const graphError = raceResult.error;
+      if (cancelled) {
+        jobEmit({ type: "content", content: "Operation cancelled." });
+        saveMessage(sessionId, userId, "assistant", "Operation cancelled.", "graph", requestId, null);
+      } else {
+        console.error("❌ LangGraph error:", graphError);
+        jobEmit({ type: "error", error: "Graph execution failed", details: graphError?.message });
+        saveMessage(sessionId, userId, "assistant", `Error: ${graphError?.message}`, "error");
+        syncSessionMemory(sessionId, userId, { assistantMessage: `Error: ${graphError?.message}` });
+      }
+      jobEmit(doneEvent(""));
+      touchSession(sessionId, userId);
+      markFinished(cancelled ? "cancelled" : "error");
+      return;
+    }
+
+    const finalAnswer = raceResult.result.finalAnswer || "";
+    const editedFiles = raceResult.result.editedFiles || [];
+    const usage = raceResult.result.usage || null;
+    // A clean cancel resolves successfully (agent_loop returns "Operation
+    // cancelled." rather than throwing), so detect the abort here for status.
+    const wasCancelled = controller.signal.aborted;
+
+    if (finalAnswer && !contentEmitted) jobEmit({ type: "content", content: finalAnswer });
+    jobEmit(doneEvent(finalAnswer, usage ? { usage } : {}));
+
+    saveMessage(
+      sessionId, userId, "assistant", finalAnswer || "(no output)", "graph",
+      requestId, collectedFileDiffs.length > 0 ? collectedFileDiffs : null,
+    );
+    touchSession(sessionId, userId);
+
+    if (editedFiles.length > 0) {
+      recordFilesTouched(sessionId, editedFiles, effectiveMessage.slice(0, 80));
+    }
+
+    const isRememberCommand = /^remember[:\s]/i.test(effectiveMessage);
+    const shouldWriteMemory = !wasCancelled && finalAnswer && (editedFiles.length > 0 || String(effectiveMessage).length > 60 || isRememberCommand);
+    if (shouldWriteMemory) {
+      writeAgentMemory({ workspacePath, userMessage: effectiveMessage, assistantAnswer: finalAnswer, editedFiles, modelRoute })
+        .catch((err) => console.warn("[AgentMemory] background write failed:", err.message));
+    }
+    syncSessionMemory(sessionId, userId, {
+      assistantMessage: finalAnswer, task: effectiveMessage, taskType: "graph", targetFile: editedFiles[0] || "",
+    });
+
+    markFinished(wasCancelled ? "cancelled" : "done");
+  } catch (err) {
+    console.error("[BackgroundRun] fatal:", err);
+    try {
+      jobEmit({ type: "error", error: "Internal error", details: String(err?.message || err) });
+      jobEmit(doneEvent(""));
+    } catch {}
+    markFinished("error");
+  } finally {
+    if (approvalTimeoutId !== null) clearTimeout(approvalTimeoutId);
+    pendingApprovals.delete(requestId);
+    pendingQuestions.delete(requestId);
+    releaseSlot();
+  }
+}
+
+// Attach an HTTP response as a live subscriber to a running job. Replays any
+// buffered events (so a reconnecting client catches up), then streams live
+// ones. Resolves when a terminal event arrives OR the client disconnects —
+// and a disconnect DETACHES only, it never stops the job.
+function streamJobToResponse(requestId, reply, request) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let unsub = null;
+
+    const finish = () => {
+      if (settled) return;
+      settled = true;
+      try { request.raw.removeListener("close", onClose); } catch {}
+      if (unsub) { try { unsub(); } catch {} }
+      try { if (!reply.raw.writableEnded) reply.raw.end(); } catch {}
+      resolve();
+    };
+
+    const onClose = () => finish(); // client went away — job keeps running
+
+    const write = (event) => {
+      if (settled) return;
+      try {
+        if (!reply.raw.writableEnded) reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+      } catch (e) {
+        console.warn("[SSE write]", e.message);
+      }
+      if (event.type === "done" || event.type === "error") finish();
+    };
+
+    request.raw.on("close", onClose);
+    unsub = subscribe(requestId, write);
+    if (unsub === null) finish(); // job not found (already GC'd)
+  });
+}
+
 // ── Slash commands (Claude Code approach: /init, /memory, /skills, /help) ────
 
 async function handleSlashCommand(message, { workspacePath, modelRoute }) {
@@ -249,7 +499,8 @@ export default async function plannerAgentRoute(fastify) {
 
   fastify.get("/capabilities", async (request, reply) => {
     setCors(reply);
-    const settings = await loadSettings();
+    const authSession = getAuthSessionFromRequest(request);
+    const settings = await loadSettings(authSession?.user_id);
     return { ok: true, ...getCapabilities(settings) };
   });
 
@@ -286,7 +537,7 @@ export default async function plannerAgentRoute(fastify) {
 
     const workspacePath = authSession.workspace_path || "";
 
-    const settings       = await loadSettings();
+    const settings       = await loadSettings(userId);
     const hasAttachments = attachment_paths.length > 0;
     const modelRoute     = routeModel(settings, hasAttachments);
 
@@ -372,49 +623,37 @@ export default async function plannerAgentRoute(fastify) {
 
     startSSE(reply);
 
-    reply.raw.write(`data: ${JSON.stringify({
+    const startEvent = {
       type:       "start",
       id:         msgId,
       session_id: sessionId,
       request_id: requestId,
       createdAt:  timestamp,
       metadata:   { intent: "graph", ...modelMeta },
-    })}\n\n`);
+    };
 
-    let contentEmitted = false;
-    const collectedFileDiffs = [];
-    function emit(event) {
-      try {
-        if (!reply.raw.writableEnded) {
-          if (event.type === "content") contentEmitted = true;
-          if (event.type === "file_diff") {
-            collectedFileDiffs.push({
-              action: event.action, path: event.path,
-              language: event.language, hunks: event.hunks,
-            });
-          }
-          reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
-        }
-      } catch (e) {
-        console.warn("[SSE emit] write error:", e.message);
-      }
-    }
+    // Direct writer for events produced BEFORE the background job exists
+    // (queue notice, slash-command replies). Graph events go through the job.
+    const sseWrite = (event) => {
+      try { if (!reply.raw.writableEnded) reply.raw.write(`data: ${JSON.stringify(event)}\n\n`); }
+      catch (e) { console.warn("[SSE emit] write error:", e.message); }
+    };
 
-    // Now that the SSE stream is open, wait for our turn if a previous request
-    // for this session is still running — the client sees a "queued" progress
-    // event instead of dead air (or, as before, a hard 409 rejection).
+    // Wait for our turn if a previous request for this session is still
+    // running — the client sees a "queued" notice instead of dead air.
     if (sessionSlotQueued) {
-      emit({ type: "progress", stage: "queued", message: "⏳ Waiting for a previous request in this session to finish..." });
+      sseWrite({ type: "progress", stage: "queued", message: "⏳ Waiting for a previous request in this session to finish..." });
     }
     await sessionSlotPrevTail.catch(() => {}); // don't let a prior failure jam the queue
 
-    // ── Slash commands: handled without touching the graph ───────────────────
+    // ── Slash commands: fast, synchronous, no background job ─────────────────
     if (effectiveMessage.startsWith("/")) {
       try {
         const slashReply = await handleSlashCommand(effectiveMessage, { workspacePath, modelRoute });
         if (slashReply) {
-          emit({ type: "content", content: slashReply });
-          emit({ type: "done", request_id: requestId, summary: slashReply, metadata: { type: "command", request_id: requestId, ...modelMeta } });
+          sseWrite(startEvent);
+          sseWrite({ type: "content", content: slashReply });
+          sseWrite({ type: "done", request_id: requestId, summary: slashReply, metadata: { type: "command", request_id: requestId, ...modelMeta } });
           reply.raw.end();
           saveMessage(sessionId, userId, "assistant", slashReply, "command");
           touchSession(sessionId, userId);
@@ -423,159 +662,79 @@ export default async function plannerAgentRoute(fastify) {
         }
       } catch (err) {
         const msg = `Command failed: ${err.message}`;
-        emit({ type: "content", content: msg });
-        emit({ type: "done", request_id: requestId, summary: msg, metadata: { type: "command", request_id: requestId, ...modelMeta } });
+        sseWrite(startEvent);
+        sseWrite({ type: "content", content: msg });
+        sseWrite({ type: "done", request_id: requestId, summary: msg, metadata: { type: "command", request_id: requestId, ...modelMeta } });
         reply.raw.end();
         releaseSessionSlot();
         return reply;
       }
     }
 
-    // ── Run the LangGraph (with hard timeout so SSE always closes) ───────────
-    const GRAPH_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutes max
-
-    // Client disconnect handling
-    const controller = new AbortController();
-    const abortListener = () => controller.abort();
-    request.raw.on("close", abortListener);
-
-    let finalAnswer = "";
-    let editedFiles = [];
-
-    // In "ask" mode create a promise that execute_changes awaits before writing files.
-    // It resolves when POST /confirm/:requestId arrives, rejects on POST /reject/:requestId.
-    let approvalPromise = null;
-    let approvalTimeoutId = null;
-    if (permissionMode === "ask") {
-      approvalPromise = new Promise((resolve, reject) => {
-        pendingApprovals.set(requestId, { resolve, reject });
-        approvalTimeoutId = setTimeout(() => {
-          if (pendingApprovals.has(requestId)) {
-            pendingApprovals.delete(requestId);
-            reject(new Error("Plan approval timed out"));
-          }
-        }, 5 * 60 * 1000);
-      });
-      // Prevent unhandled rejection crash if the graph finishes without ever awaiting this
-      // (e.g. intent routed to "answer" instead of "explore"). The rejection is handled
-      // internally when runKodoGraph awaits it; this suppresses the dangling-promise crash.
-      approvalPromise.catch(() => {});
-    }
-
-    const graphPromise = runKodoGraph({
-      userMessage:          plannerContextMessage,
-      rememberedTargetFile: rememberedFile,
-      sessionId,
-      requestId,
-      userId,
-      workspacePath,
-      modelRoute,
+    // ── Start the agent as a BACKGROUND JOB, then stream it to this request ──
+    // The job runs independently of this HTTP connection: if the client
+    // refreshes or disconnects, the job keeps going and can be reconnected via
+    // GET /run/:requestId/stream. The job (not this request) owns persistence
+    // and the per-session queue-slot release. abortSignal is only tripped by an
+    // explicit POST /cancel/:requestId — never by the connection closing.
+    const jobController = new AbortController();
+    void startBackgroundRun({
+      requestId, sessionId, userId, workspacePath, modelRoute, modelMeta,
+      plannerContextMessage, rememberedFile,
       attachmentPaths: attachment_paths,
-      emit,
-      abortSignal: controller.signal,
-      permissionMode,
-      approvalPromise,
-    }).then(r => ({ ok: true, result: r })).catch(e => ({ ok: false, error: e }));
-
-    const timeoutPromise = new Promise(resolve =>
-      setTimeout(() => resolve({ ok: false, timedOut: true }), GRAPH_TIMEOUT_MS)
-    );
-
-    const raceResult = await Promise.race([graphPromise, timeoutPromise]);
-
-    // Always clean up so the 5-min timer can't fire after this handler exits
-    // and crash the process with an unhandled rejection.
-    if (approvalTimeoutId !== null) clearTimeout(approvalTimeoutId);
-    pendingApprovals.delete(requestId);
-
-    if (raceResult.timedOut) {
-      console.warn("[Agent] ⏱️ Graph timeout — closing SSE stream");
-      releaseSessionSlot();
-      emit({ type: "content", content: "The task is taking longer than expected. Please try again." });
-      emit({ type: "done", request_id: requestId, summary: "",
-             metadata: { type: "graph", request_id: requestId, ...modelMeta } });
-      reply.raw.end();
-      return reply;
-    }
-
-    if (!raceResult.ok) {
-      const graphError = raceResult.error;
-      console.error("❌ LangGraph error:", graphError);
-      releaseSessionSlot();
-      emit({ type: "error", error: "Graph execution failed", details: graphError.message });
-      reply.raw.end();
-      saveMessage(sessionId, userId, "assistant", `Error: ${graphError.message}`, "error");
-      touchSession(sessionId, userId);
-      syncSessionMemory(sessionId, userId, { assistantMessage: `Error: ${graphError.message}` });
-      return reply;
-    }
-
-    finalAnswer = raceResult.result.finalAnswer || "";
-    editedFiles  = raceResult.result.editedFiles  || [];
-    const usage  = raceResult.result.usage || null;
-
-    // ── Done ──────────────────────────────────────────────────
-    // The answer node streams content chunks during execution (contentEmitted=true).
-    // Explore/plan paths never emit content events — emit finalAnswer now so the
-    // UI message is never left empty (which causes "Running agent…" to persist).
-    if (finalAnswer && !contentEmitted) {
-      emit({ type: "content", content: finalAnswer });
-    }
-
-    emit({
-      type:     "done",
-      request_id: requestId,
-      summary:  finalAnswer,
-      metadata: {
-        type:       "graph",
-        request_id: requestId,
-        ...modelMeta,
-        ...(usage ? { usage } : {}),
-      },
+      effectiveMessage, permissionMode,
+      controller: jobController,
+      releaseSlot: releaseSessionSlot,
+      startEvent,
     });
 
-    reply.raw.end();
-
-    saveMessage(
-      sessionId, userId, "assistant", finalAnswer || "(no output)", "graph",
-      requestId,
-      collectedFileDiffs.length > 0 ? collectedFileDiffs : null,
-    );
-    touchSession(sessionId, userId);
-
-    // ★ Memory: record which files were edited this turn
-    if (editedFiles.length > 0) {
-      recordFilesTouched(sessionId, editedFiles, effectiveMessage.slice(0, 80));
-      console.log(`[Memory] 📝 Recorded ${editedFiles.length} edited file(s): ${editedFiles.join(", ")}`);
-    }
-
-    // ★ Agent memory: fire-and-forget LLM-driven write to .kodo/memory/
-    // Only run when the explore/edit pipeline actually did something — skip pure Q&A answers
-    // to avoid a wasted LLM call on every chat message.
-    const isRememberCommand = /^remember[:\s]/i.test(effectiveMessage);
-    const shouldWriteMemory = finalAnswer && (editedFiles.length > 0 || String(effectiveMessage).length > 60 || isRememberCommand);
-    if (shouldWriteMemory) {
-      writeAgentMemory({
-        workspacePath,
-        userMessage:     effectiveMessage,
-        assistantAnswer: finalAnswer,
-        editedFiles,
-        modelRoute,
-      }).catch(err => console.warn("[AgentMemory] background write failed:", err.message));
-    }
-
-        syncSessionMemory(sessionId, userId, {
-      assistantMessage: finalAnswer,
-      task:             effectiveMessage,
-      taskType:         "graph",
-      targetFile:       editedFiles[0] || "",
-    });
-
-    // Release session lock and cleanup abort listener
-    releaseSessionSlot();
-    request.raw.removeListener("close", abortListener);
-
+    await streamJobToResponse(requestId, reply, request);
     return reply;
+  });
+
+  // ── GET /jobs — running background jobs for the user (reconnect discovery) ──
+  // Called on page load / session open so the UI can re-attach to a task that's
+  // still running after a refresh.
+  fastify.get("/jobs", async (request, reply) => {
+    setCors(reply);
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+    const sessionId = typeof request.query?.session_id === "string" ? request.query.session_id.trim() : null;
+    const live = getRunningJobs(authSession.user_id, sessionId || null);
+    return reply.send({ ok: true, jobs: live });
+  });
+
+  // ── GET /run/:requestId/stream — reconnect to a running job's live stream ──
+  fastify.get("/run/:requestId/stream", async (request, reply) => {
+    setCors(reply);
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+    const { requestId } = request.params;
+
+    // Ownership check via the durable job record.
+    const record = getAgentJob(requestId, authSession.user_id);
+    if (!record) {
+      return reply.code(404).send({ ok: false, error: "No such job for this user" });
+    }
+
+    startSSE(reply);
+    // subscribe replays buffered events then streams live ones; if the job is
+    // already gone from memory (finished + GC'd), the stream just ends and the
+    // client falls back to the saved session messages.
+    await streamJobToResponse(requestId, reply, request);
+    return reply;
+  });
+
+  // ── POST /cancel/:requestId — explicitly stop a running job ────────────────
+  fastify.post("/cancel/:requestId", async (request, reply) => {
+    setCors(reply);
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+    const { requestId } = request.params;
+    const record = getAgentJob(requestId, authSession.user_id);
+    if (!record) return reply.code(404).send({ ok: false, error: "No such job for this user" });
+    const ok = cancelJob(requestId);
+    return reply.send({ ok: true, cancelled: ok });
   });
 
   // ── Unchanged endpoints ────────────────────────────────────
@@ -708,6 +867,20 @@ export default async function plannerAgentRoute(fastify) {
     return { ok: true };
   });
 
+  // ── Answer a clarifying question (ask_user tool) ─────────────
+  fastify.post("/answer/:requestId", async (request, reply) => {
+    setCors(reply);
+    const { requestId } = request.params;
+    const pending = pendingQuestions.get(requestId);
+    if (!pending) {
+      return reply.code(404).send({ ok: false, error: "No pending question for this request" });
+    }
+    const body = await parseIncomingPayload(request).catch(() => ({}));
+    const answer = String(body?.answer ?? "").trim();
+    pending.resolve(answer || "(user submitted an empty answer)");
+    return { ok: true };
+  });
+
   // ── Compact conversation ─────────────────────────────────────
   // Returns a plain-text summary of the session messages so the UI can
   // replace its message list with a compact placeholder.
@@ -733,7 +906,7 @@ export default async function plannerAgentRoute(fastify) {
 
       let summary;
       try {
-        const settings   = await loadSettings();
+        const settings   = await loadSettings(authSession.user_id);
         const modelRoute = routeModel(settings, false);
         const { callLLM } = await import("../services/llm.mjs");
         const result = await callLLM({

@@ -1,19 +1,19 @@
 /**
  * services/agentMemory.mjs
  * File-based persistent memory: {workspace}/.kodo/memory/
+ * Same shape as Claude Code's own memory system.
  *
  * Layout:
- *   MEMORY.md            — index (≤200 lines), loaded into every request
- *   project-context.md   — project stack, architecture, directory layout
- *   user-preferences.md  — how the user wants things done
- *   code-patterns.md     — recurring patterns in this codebase
- *   debugging-history.md — bugs found + root causes
- *   ...                  — any topic the LLM decides to create
+ *   MEMORY.md   — index of one-line pointers (≤200 lines), loaded into every request
+ *   *.md        — topic files, each with frontmatter { name, description, metadata: { type } }
+ *                 type is one of: user, feedback, project, reference — see WRITER_SYSTEM below
+ *                 for what each type means and when the LLM should use it
  *
  * Workflow:
  *  1. On every request → loadMemoryIndex() → injected into agent context
  *  2. Explore node → read_memory_topic(topic) tool → agentic retrieval
- *  3. After successful graph run → writeAgentMemory() → fire-and-forget
+ *  3. After successful graph run → writeAgentMemory() → fire-and-forget, LLM classifies
+ *     each fact into a type and writes/merges the topic file
  */
 
 import path from "path";
@@ -177,12 +177,20 @@ export async function clearAllMemory(workspacePath) {
 
 // ── Write ─────────────────────────────────────────────────────────────────────
 
-async function writeTopicFile(dir, name, content) {
+const VALID_TYPES = new Set(["user", "feedback", "project", "reference"]);
+
+function normalizeType(type) {
+  const t = String(type || "").trim().toLowerCase();
+  return VALID_TYPES.has(t) ? t : "project";
+}
+
+async function writeTopicFile(dir, name, content, { description = "", type = "project" } = {}) {
   const now = new Date().toISOString();
+  const safe = toSafeName(name);
   // Strip any existing front-matter before writing so it never doubles up
   const stripped = String(content).replace(/^---[\s\S]*?---\n+/, "").trimStart();
-  const body = `---\nupdated: ${now}\n---\n\n${stripped}`;
-  await fs.writeFile(path.join(dir, `${toSafeName(name)}.md`), body, "utf-8");
+  const body = `---\nname: ${safe}\ndescription: ${String(description || name).slice(0, 100)}\nmetadata:\n  type: ${normalizeType(type)}\nupdated: ${now}\n---\n\n${stripped}`;
+  await fs.writeFile(path.join(dir, `${safe}.md`), body, "utf-8");
 }
 
 async function updateIndex(dir, entries) {
@@ -213,19 +221,24 @@ async function updateIndex(dir, entries) {
 
 // ── LLM-driven writer ─────────────────────────────────────────────────────────
 
-const WRITER_SYSTEM = `You are Kodo's memory curator. After each conversation, decide what facts are worth persisting across sessions.
+const WRITER_SYSTEM = `You are Kodo's memory curator. After each conversation, decide what facts are worth persisting across sessions — the same way Claude Code's own memory works.
 
-WHAT TO SAVE:
-- Project stack, architecture, directory structure → topic: "project-context"
-- User preferences, corrections, desired style → topic: "user-preferences"
-- Recurring code patterns (component structure, state names, imports) → topic: "code-patterns"
-- Bugs found + root causes → topic: "debugging-history"
-- Create other topics if clearly useful
+Every topic you save must be classified into exactly one of four types:
+
+- "user" — the user's role, goals, responsibilities, and knowledge. Helps tailor future answers to who they are (e.g. senior engineer vs. first-time coder).
+- "feedback" — corrections or confirmations about HOW to do the work: things the user told you to stop doing, or a non-obvious approach they confirmed worked. Save the rule, WHY it matters (the reason given), and HOW to apply it (when it kicks in).
+- "project" — ongoing work, goals, bugs, or decisions in this codebase that aren't derivable from reading the code itself (stack, architecture, current initiatives, who's doing what by when). Lead with the fact, then WHY (motivation/constraint) and HOW TO APPLY (how it should shape suggestions).
+- "reference" — pointers to where information lives in external systems (issue trackers, dashboards, docs) — not the information itself.
 
 WHAT NOT TO SAVE:
-- The conversation transcript or ephemeral task details
-- Anything obvious from reading the current code
-- Sensitive values (API keys, passwords)
+- Code patterns, architecture, file paths, or structure derivable by reading the current code
+- The conversation transcript or ephemeral task details already finished
+- Debugging fixes or recipes — the fix is in the code/commit, not memory
+- Sensitive values (API keys, passwords, tokens)
+
+TOPIC NAMING:
+- Pick a short kebab-case name specific to the fact (e.g. "user-role", "feedback-testing-approach", "project-auth-rewrite"), not a generic bucket. Reuse an existing topic name if this fact clearly belongs with it.
+- Link related topics with [[topic-name]] inside content when relevant.
 
 MERGE RULES:
 - Your "content" field REPLACES the existing topic file — merge old facts with new ones
@@ -236,7 +249,8 @@ Return ONLY valid JSON:
 {
   "topics": [
     {
-      "name": "code-patterns",
+      "name": "feedback-testing-approach",
+      "type": "user" | "feedback" | "project" | "reference",
       "description": "One-line summary for the index (≤80 chars)",
       "content": "Full markdown content for this topic (merged old + new facts)"
     }
@@ -295,7 +309,10 @@ export async function writeFactDirectly(workspacePath, fact) {
     const stripped = existing.replace(/^---[\s\S]*?---\n+/, "").trimStart();
     const updated = stripped ? `${stripped.trimEnd()}\n- ${fact}\n` : `- ${fact}\n`;
 
-    await writeTopicFile(dir, topicName, updated);
+    await writeTopicFile(dir, topicName, updated, {
+      description: "User preferences, corrections, desired coding style",
+      type: "feedback",
+    });
     await updateIndex(dir, [{ name: topicName, description: "User preferences, corrections, desired coding style" }]);
     console.log(`[AgentMemory] ⚡ Direct write → ${topicName}: "${fact.slice(0, 60)}"`);
   } catch (err) {
@@ -355,7 +372,10 @@ async function _doWrite({ workspacePath, userMessage, assistantAnswer, editedFil
     const saved = [];
     for (const topic of parsed.topics) {
       if (!topic?.name || !topic?.content) continue;
-      await writeTopicFile(dir, topic.name, String(topic.content).slice(0, MAX_TOPIC_CHARS));
+      await writeTopicFile(dir, topic.name, String(topic.content).slice(0, MAX_TOPIC_CHARS), {
+        description: topic.description,
+        type: topic.type,
+      });
       saved.push({ name: topic.name, description: topic.description || topic.name });
       console.log(`[AgentMemory] ✏️  Saved topic: ${topic.name}`);
     }

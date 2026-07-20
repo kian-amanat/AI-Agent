@@ -11,15 +11,22 @@
  *
  * Tools: read_file, write_file, edit_file, bash, grep, glob, list_files,
  *        todo_write, list_memory_topics, read_memory_topic, load_skill,
- *        web_search, fetch_url
+ *        web_search, fetch_url, ask_user, spawn_agent
+ *
+ * spawn_agent runs a nested, READ-ONLY agent loop (runSubAgent) with its own
+ * context window and returns only a findings report — Claude Code-style task
+ * delegation. Depth capped at 1; sub-agents run in plan mode so they can't edit.
  *
  * Safety & UX preserved from the old pipeline:
  *   - pre-write syntax/structural validation (utils/syntax.util.mjs)
  *   - .agent-history undo snapshots (same meta.json format the undo service reads)
- *   - SSE events the existing UI understands: progress, file_diff, plan_preview, todo
+ *   - SSE events the existing UI understands: progress, file_diff, plan_preview, todo, question
  *   - "ask" permission mode: pause for user approval before the FIRST mutation
  *   - "plan" permission mode: mutating tools disabled; the agent presents a plan
  *   - post-edit hooks from {workspace}/.kodo/hooks.json (e.g. prettier)
+ *   - ask_user tool: the agent can pause and ask a clarifying question mid-task
+ *     (not just approve/reject a plan) instead of guessing — mirrors Claude
+ *     Code's own AskUserQuestion behavior. Answered via POST /answer/:requestId.
  */
 
 import path from "path";
@@ -653,11 +660,162 @@ const AGENT_TOOLS = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "ask_user",
+      description: "Ask the user a clarifying question instead of guessing. Use when a requirement is genuinely ambiguous, you're about to make a consequential or hard-to-reverse choice, or you need information only the user has — not when you can find the answer yourself by reading the code. Call this ALONE (no other tool calls in the same turn) and wait for the answer before continuing. Prefer 2-4 concrete options when the choice is discrete; omit options for open-ended questions.",
+      parameters: {
+        type: "object",
+        properties: {
+          question: { type: "string", description: "The question to ask, phrased so the user can answer without extra context." },
+          header: { type: "string", description: "Very short label, under 12 chars, e.g. 'Auth method'" },
+          options: {
+            type: "array",
+            description: "2-4 mutually exclusive choices, if the decision is discrete. Omit entirely for a free-text/open-ended question.",
+            items: {
+              type: "object",
+              properties: {
+                label: { type: "string", description: "Short display text, 1-5 words" },
+                description: { type: "string", description: "What this choice means or implies" },
+              },
+              required: ["label"],
+            },
+          },
+        },
+        required: ["question"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "spawn_agent",
+      description: "Delegate a focused, READ-ONLY investigation to a sub-agent that runs in its own separate context window and returns a concise findings report. Use it to explore a large or unfamiliar area of the codebase, research how something works across many files, or gather context — WITHOUT filling your own context with every file it reads. The sub-agent can read, grep, glob, list, run read-only commands, search the web, and read memory; it CANNOT edit files or run commands that change anything — you make the actual edits yourself after reading its report. Give it a self-contained prompt (it doesn't see this conversation). You may spawn several for independent questions.",
+      parameters: {
+        type: "object",
+        properties: {
+          description: { type: "string", description: "3-5 word summary of the task, e.g. 'trace auth flow'" },
+          prompt: { type: "string", description: "The complete, self-contained investigation task. Include enough context for the sub-agent to work without seeing this conversation. Tell it exactly what to report back." },
+        },
+        required: ["prompt"],
+      },
+    },
+  },
 ];
+
+// Tools a sub-agent may use — read-only only (it runs in plan mode, so any
+// mutating call is also blocked defensively at the executor). No spawn_agent
+// (depth is capped at 1) and no ask_user (sub-agents don't talk to the user).
+const SUBAGENT_TOOL_NAMES = new Set([
+  "read_file", "grep", "glob", "list_files", "bash",
+  "list_memory_topics", "read_memory_topic", "web_search", "fetch_url",
+]);
+const SUBAGENT_TOOLS = AGENT_TOOLS.filter((t) => SUBAGENT_TOOL_NAMES.has(t.function.name));
+const SUBAGENT_MAX_ITERATIONS = 12;
 
 const MUTATING_TOOLS = new Set(["edit_file", "write_file", "bash"]);
 // bash commands that only read — exempt from ask-mode approval
 const BASH_READONLY_RE = /^\s*(ls|cat|grep|rg|find|wc|head|tail|pwd|which|stat|du|tree|git\s+(status|log|diff|show|branch)|npm\s+(ls|view|outdated)|node\s+--check)\b[^;&|]*$/;
+
+// ── Sub-agent (spawn_agent) ────────────────────────────────────────────────────
+// A self-contained, read-only agent loop with its OWN context window. The parent
+// delegates a focused investigation; only the sub-agent's final report crosses
+// back, so the parent's context stays lean. Runs in "plan" mode → every mutating
+// tool is disabled at the executor. Depth is capped at 1 (no nested spawns).
+
+const SUBAGENT_SYSTEM = `You are a focused sub-agent spawned by Kodo's main coding agent to investigate one thing and report back.
+
+- You are READ-ONLY: read files, grep, glob, list, run read-only shell commands, search the web. You CANNOT edit files or change anything — don't try.
+- You do NOT see the main conversation. Work only from the task you were given.
+- Be efficient: gather exactly what the task asks for, then STOP.
+- Finish with a plain-text report (no tool calls): concrete findings — file paths with line numbers, the specific answer, and anything the main agent needs to act. Lead with the answer, keep it tight. Don't pad.`;
+
+async function runSubAgent({ creds, root, description, task, workspaceSnapshot, hooks, emit, abortSignal }) {
+  const label = String(description || "investigating").slice(0, 60);
+  emit?.({ type: "progress", stage: "exploring", message: `🔍 sub-agent: ${label}` });
+
+  // Read-only ctx. permissionMode:"plan" makes edit_file/write_file/mutating
+  // bash fail inside executeTool even if the sub-agent's model tries them.
+  // isSubAgent guards against a sub-agent spawning further sub-agents.
+  const subCtx = {
+    root,
+    emit: (e) => {
+      if (e?.type === "progress") emit?.({ ...e, message: `  ↳ ${e.message}` });
+    },
+    sessionId: "subagent",
+    requestId: "subagent",
+    hooks,
+    editedFiles: new Map(),
+    readFiles: new Set(),
+    todosRef: { current: [] },
+    workspaceSnapshot,
+    permissionMode: "plan",
+    askUser: null,
+    isSubAgent: true,
+    creds,
+  };
+
+  const conversation = [{ role: "user", content: String(task || "").slice(0, 8000) }];
+  let iteration = 0;
+
+  while (iteration < SUBAGENT_MAX_ITERATIONS) {
+    if (abortSignal?.aborted) return "Sub-agent cancelled.";
+    iteration++;
+
+    let message;
+    try {
+      ({ message } = await chatWithTools({
+        creds,
+        system: SUBAGENT_SYSTEM,
+        messages: conversation,
+        tools: SUBAGENT_TOOLS,
+        maxTokens: 4000,
+        temperature: 0,
+        signal: abortSignal || undefined,
+      }));
+    } catch (err) {
+      return `Sub-agent failed: ${String(err?.message || err).slice(0, 200)}`;
+    }
+
+    conversation.push(message);
+
+    if (!message.tool_calls?.length) {
+      return String(message.content || "").trim() || "Sub-agent returned no findings.";
+    }
+
+    const toolResults = [];
+    for (const toolCall of message.tool_calls) {
+      if (abortSignal?.aborted) break;
+      let args = {};
+      try { args = JSON.parse(toolCall.function.arguments || "{}"); } catch {}
+      const result = await executeTool(toolCall.function.name, args, subCtx);
+      const raw = JSON.stringify(result);
+      toolResults.push({
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: raw.length > MAX_TOOL_OUTPUT_CHARS ? raw.slice(0, MAX_TOOL_OUTPUT_CHARS) + '..."[truncated]"}' : raw,
+      });
+    }
+    conversation.push(...toolResults);
+  }
+
+  // Budget exhausted — ask for a final report with no more tools.
+  try {
+    const { message } = await chatWithTools({
+      creds,
+      system: SUBAGENT_SYSTEM,
+      messages: [...conversation, { role: "user", content: "Stop investigating and report your findings so far as plain text." }],
+      tools: [],
+      maxTokens: 1500,
+      temperature: 0,
+      signal: abortSignal || undefined,
+    });
+    return String(message.content || "").trim() || "Sub-agent reached its step limit without a conclusion.";
+  } catch {
+    return "Sub-agent reached its step limit without producing a report.";
+  }
+}
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
@@ -701,6 +859,12 @@ function buildSystemPrompt({ workspaceTree, kodoMd, memoryIndex, skillIndex, per
 - Keep dependencies minimal; use bash \`npm install <pkg> --prefix <subproject>\` only when the task truly needs a new package.
 - For UI/design/animation work: load the matching skill first (see list), respect the project's design tokens, and keep accessibility (contrast, reduced-motion) intact.
 - Never touch .env, secrets, lockfiles, or files outside the workspace.
+
+# Don't work blind — ask when it matters
+Use ask_user before committing to a consequential guess: an ambiguous requirement with materially different implementations, a destructive/hard-to-reverse choice (deleting data, overwriting config, picking an irreversible approach), or missing information only the user has (which of several plausible targets, a credential/URL you don't have, a design preference with no existing convention to follow). Do NOT ask about anything discoverable by reading the code, grepping, or checking docs — do that instead. Do NOT ask about low-stakes details — just make a reasonable choice and mention it in your final summary. Keep it to at most one or two questions per task, and never combine ask_user with other tool calls in the same turn.
+
+# Delegate heavy exploration to sub-agents
+For a big or open-ended investigation — "how does X work across the codebase", "find everywhere Y is used", "research this library" — use spawn_agent to hand it to a read-only sub-agent with its own context. It returns just a findings report, keeping your context focused for the actual editing. Prefer it over reading a dozen files yourself when you only need the conclusions. Spawn several for independent questions. Don't use it for small lookups you can do in one or two grep/read calls, and remember sub-agents can't edit — you make the changes based on what they report.
 ${planModeSection}${kodoSection}${memorySection}${skillSection}
 # Workspace layout (partial)
 ${snapshot}
@@ -710,7 +874,7 @@ ${snapshot}
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
 export async function executeTool(name, args, ctx) {
-  const { root, emit, sessionId, requestId, hooks, editedFiles, todosRef, permissionMode } = ctx;
+  const { root, emit, sessionId, requestId, hooks, editedFiles, todosRef, permissionMode, askUser, creds, isSubAgent, workspaceSnapshot, abortSignal } = ctx;
   try {
     switch (name) {
       case "read_file": {
@@ -903,6 +1067,41 @@ export async function executeTool(name, args, ctx) {
         return await fetchUrl(args.url);
       }
 
+      case "spawn_agent": {
+        if (isSubAgent) {
+          return { success: false, error: "Sub-agents cannot spawn further sub-agents. Do the investigation directly." };
+        }
+        const task = String(args.prompt || "").trim();
+        if (!task) return { success: false, error: "prompt is required" };
+        if (!creds) return { success: false, error: "Sub-agents are unavailable in this context." };
+        const report = await runSubAgent({
+          creds, root,
+          description: String(args.description || "").trim(),
+          task,
+          workspaceSnapshot,
+          hooks,
+          emit,
+          abortSignal,
+        });
+        return { success: true, report };
+      }
+
+      case "ask_user": {
+        const question = String(args.question || "").trim();
+        if (!question) return { success: false, error: "question is required" };
+        if (!askUser) return { success: false, error: "Asking the user isn't available in this context — make your best judgment call and note the assumption in your final summary." };
+        const options = Array.isArray(args.options)
+          ? args.options.map((o) => ({ label: String(o?.label || "").slice(0, 80), description: String(o?.description || "").slice(0, 200) })).filter((o) => o.label).slice(0, 4)
+          : [];
+        emit?.({ type: "progress", stage: "planning", message: `❓ ${question.slice(0, 140)}` });
+        try {
+          const answer = await askUser({ question, header: String(args.header || "").slice(0, 20), options });
+          return { success: true, answer };
+        } catch (err) {
+          return { success: false, error: `Question cancelled: ${String(err?.message || err)}` };
+        }
+      }
+
       default:
         return { success: false, error: `Unknown tool: ${name}` };
     }
@@ -952,6 +1151,7 @@ export async function agentLoopNode(state) {
     workspacePath, userMessage, modelRoute, emit,
     rememberedTargetFile = "", sessionId, requestId,
     permissionMode = "auto", approvalPromise = null, abortSignal = null,
+    askUser = null,
   } = state;
 
   const root = workspacePath || PROJECT_ROOT;
@@ -994,6 +1194,10 @@ export async function agentLoopNode(state) {
     todosRef: { current: [] },
     workspaceSnapshot,
     permissionMode,
+    askUser,
+    creds,          // lets the spawn_agent tool run a nested sub-agent loop
+    isSubAgent: false,
+    abortSignal,
   };
   for (const f of workspaceSnapshot) {
     if (f.isDir || seedBlocks.length >= 3) continue;
@@ -1119,8 +1323,18 @@ export async function agentLoopNode(state) {
         }
       }
 
+      // ask_user must run alone — if the model batched it with other calls,
+      // answer only the question this iteration and tell the model to redo
+      // the rest next turn once it has the answer (never fire tool calls
+      // blindly alongside a pending clarification).
+      const askUserCall = message.tool_calls.find((tc) => tc.function.name === "ask_user");
+      const toolCallsThisTurn = askUserCall && message.tool_calls.length > 1 ? [askUserCall] : message.tool_calls;
+      const deferredCalls = askUserCall && message.tool_calls.length > 1
+        ? message.tool_calls.filter((tc) => tc !== askUserCall)
+        : [];
+
       const toolResults = [];
-      for (const toolCall of message.tool_calls) {
+      for (const toolCall of toolCallsThisTurn) {
         if (abortSignal?.aborted) break;
         const toolName = toolCall.function.name;
         let args = {};
@@ -1134,6 +1348,13 @@ export async function agentLoopNode(state) {
           ? raw.slice(0, MAX_TOOL_OUTPUT_CHARS) + '..."[truncated]"}'
           : raw;
         toolResults.push({ role: "tool", tool_call_id: toolCall.id, content: capped });
+      }
+      for (const deferred of deferredCalls) {
+        toolResults.push({
+          role: "tool",
+          tool_call_id: deferred.id,
+          content: JSON.stringify({ success: false, error: "Not run — you asked a question in the same turn. Wait for the answer, then re-issue this call on its own." }),
+        });
       }
       conversation.push(...toolResults);
 

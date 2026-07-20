@@ -38,7 +38,17 @@ RULES
 - Do not use filler phrases like "Certainly", "Of course", "Great question", "Absolutely".
 - Keep greetings short.
 - For technical questions, be structured and useful — include code snippets and examples whenever they make the answer clearer.
-- Do not mention inability to edit files here; if the user actually wants files changed, the agent pipeline handles it in a separate mode.`;
+- Do not mention inability to edit files here; if the user actually wants files changed, the agent pipeline handles it in a separate mode.
+
+ESCALATION (important)
+- You can only talk — you cannot edit files, create files, run commands, or install anything.
+- If actually fulfilling the user's request would require any of those workspace actions, do NOT try to answer or describe the change. Reply with EXACTLY this token and nothing else: __ESCALATE__
+- The system will then hand the request to the agent that can do the work — so escalate instead of explaining what you "would" change.
+- Only escalate for real work. Explanations, advice, questions, and read-only discussion about their code are yours to answer — never escalate those.`;
+
+// Sentinel the answer LLM emits when a request actually needs workspace tools.
+// The node suppresses it from the stream and routes to agent_loop instead.
+const ESCALATE_SENTINEL = "__ESCALATE__";
 
 // Detect explicit memory-management commands (not general questions about memory)
 function isForgetCommand(msg) {
@@ -161,11 +171,25 @@ export async function answerNode(state) {
 
   const historyMessages = buildHistoryMessages(messages);
 
+  const escalate = () => {
+    console.log("[Answer] escalating to agent_loop — request needs workspace tools");
+    emit?.({ type: "progress", stage: "routed", message: "🤖 This needs workspace changes — switching to agent..." });
+    // No finalAnswer, no AIMessage: the agent_loop node produces the real
+    // output. `escalate` flips the conditional edge in kodo_graph.mjs.
+    return { escalate: true };
+  };
+
   try {
     const canStream = typeof streamLLM === "function";
 
     if (canStream) {
-      let buffer = "";
+      // Buffered-prefix guard: hold emission until we have enough characters
+      // to rule out the escalation sentinel, so "__ESCALATE__" never streams
+      // to the user. Once the head is proven non-sentinel, flush + stream live.
+      let head = "";        // buffered leading chars, pre-decision
+      let gateOpen = false; // true once we've decided it's a real answer
+      let escalated = false;
+      let full = "";        // complete answer text (post-gate)
 
       await streamLLM({
         system: SYSTEM_PROMPT,
@@ -177,14 +201,47 @@ export async function answerNode(state) {
         maxTokens: 1400,
         temperature: 0.35,
         onChunk: (chunk) => {
-          buffer += chunk;
-          emit?.({ type: "content", content: chunk });
+          if (escalated) return; // discard trailing tokens after an escalate decision
+          if (gateOpen) {
+            full += chunk;
+            emit?.({ type: "content", content: chunk });
+            return;
+          }
+          head += chunk;
+          const trimmed = head.trimStart();
+          // Still ambiguous — the head could still grow into the sentinel.
+          if (trimmed.length < ESCALATE_SENTINEL.length &&
+              ESCALATE_SENTINEL.startsWith(trimmed)) {
+            return;
+          }
+          // Enough signal to decide.
+          if (trimmed.startsWith(ESCALATE_SENTINEL)) {
+            escalated = true;
+            return;
+          }
+          gateOpen = true;
+          full = head;
+          emit?.({ type: "content", content: head });
         },
       });
 
+      // Stream ended while still buffering a short answer that never tripped
+      // the gate (e.g. a one-word reply shorter than the sentinel).
+      if (!gateOpen && !escalated) {
+        const trimmed = head.trimStart();
+        if (trimmed.startsWith(ESCALATE_SENTINEL)) {
+          escalated = true;
+        } else if (head) {
+          full = head;
+          emit?.({ type: "content", content: head });
+        }
+      }
+
+      if (escalated) return escalate();
+
       return {
-        finalAnswer: buffer,
-        messages: [new AIMessage(buffer)],
+        finalAnswer: full,
+        messages: [new AIMessage(full)],
       };
     }
 
@@ -199,7 +256,10 @@ export async function answerNode(state) {
       temperature: 0.35,
     });
 
-    const finalAnswer = result?.content?.trim() || "I couldn't generate a response.";
+    const raw = result?.content?.trim() || "";
+    if (raw.startsWith(ESCALATE_SENTINEL)) return escalate();
+
+    const finalAnswer = raw || "I couldn't generate a response.";
     emit?.({ type: "content", content: finalAnswer });
 
     return {

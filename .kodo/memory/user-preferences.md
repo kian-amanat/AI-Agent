@@ -1,20 +1,33 @@
 ---
-updated: 2026-07-18T19:51:52.389Z
+name: user-preferences
+description: User communication style and UI preferences
+metadata:
+  type: user
+updated: 2026-07-20T20:38:26.898Z
 ---
 
-- **Landing Page Aesthetic**: Premium dark, cinematic, high-end (Linear/Vercel/Apple style).
-- **Color Palette**: Warm, dark, orange-red brand (`#ff6b2b` context). No purple/blue/cold neon.
-- **Animation**: `framer-motion` exclusively.
-- **Component Constraints**: 
-  - Do NOT add new dependencies (only `framer-motion`, `lucide-react`).
-  - Hero: `GlowHorizonFM` remains the main visual centerpiece. **Do NOT redesign from scratch**; refine existing structure for premium feel.
-  - Card Design: Immersive, large (85-90vw), generous padding, strong typography.
-- **Navbar Specifics**:
-  - **Height**: Slimmer, reduced to `h-12` (reduced padding and font size).
-  - **Background**: Liquid glass effect with higher transparency (`bg-white/[0.05]`).
-  - **Borders**: Very soft white border (`border-white/[0.06]`).
-  - **Effects**: Strong backdrop blur, gentle inner highlight, faint outer glow. No heavy dark fill.
-  - **Visibility**: Visible across the whole page, wider width.
-  - **Logo**: Use `/icon.png` (pure icon, no background, no circle, no container) instead of "Kodo" text. Size: 28–34px, vertically centered.
-  - **Links**: Includes 'More' link.
-- **Specific Request**: Replace "How it works" section with "Colors used in Kodo" section.
+### Agent Persona: "Claude Code" Style
+- **Goal**: Make Kodo agent feel like Claude Code (highly opinionated, efficient, context-aware CLI/IDE partner).
+- **Communication Style**:
+  - **Brevity**: No unnecessary chatter or explanations of obvious code.
+  - **Proactive**: Assume intent based on context; provide fixes directly.
+  - **Format**: "Here is the fix. I assumed X because of Y."
+  - **Tone**: Professional, direct, and confident.
+- **Behavioral Shift**:
+  - From: "Here is the code, let me explain it."
+  - To: Action-oriented responses with minimal preamble.
+- **Implementation**:
+  - **Answer Node (`backend1/agents/nodes/answer.mjs`)**: Updated system prompt to enforce "Direct, opinionated, efficient" personality.
+  - **Anti-patterns**: Explicitly banned phrases like "I can help with that", "Great question", "Certainly".
+  - **Agent Loop (`backend1/agents/nodes/agent_loop.mjs`)**: Updated to support this persona in the main loop.
+- **Constraint**: Do NOT modify UI files for this specific persona change.
+
+### UI Styling Preferences (2026-07-19)
+- **Context**: `chatbot/my-chatbot-ui/app/landing2/page.tsx` "How it works" section.
+- **Preference**: Gradient styling preferences for landing page components.
+
+### Language Preference (2026-07-19)
+- **Language**: Persian (Farsi)
+- **Scope**: All responses in this session and future sessions should be in Farsi.
+- **User Instruction**: "in entire of this session fully speak farsi, i asked english you response to me in farsi"
+- **Application**: Respond exclusively in Farsi regardless of the language used in user queries.
