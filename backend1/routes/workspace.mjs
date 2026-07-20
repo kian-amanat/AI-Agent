@@ -110,7 +110,14 @@ export default async function workspaceRoute(fastify) {
     // GitHub's compare page needs the branch pushed, or it 404s.
     const pullRequestUrl = hasUpstream ? await buildPullRequestUrl(root, branch) : null;
 
-    return { ok: true, branch, dirty: statusOut.length > 0, ahead, hasUpstream, pullRequestUrl };
+    // Count of changed files (for the "N uncommitted" summary in the Git panel).
+    const uncommittedCount = statusOut ? statusOut.split("\n").filter(Boolean).length : 0;
+
+    return {
+      ok: true, branch,
+      dirty: statusOut.length > 0, uncommittedCount,
+      ahead, hasUpstream, pullRequestUrl,
+    };
   });
 
   // POST /api/workspace/git/commit — stage everything and commit

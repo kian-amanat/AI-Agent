@@ -99,14 +99,16 @@ export default function ChatComposer({
   const [rootError, setRootError]               = React.useState<string | null>(null);
   const rootDropdownRef = React.useRef<HTMLDivElement>(null);
 
-  // Commit popover state — a tiny message box next to the branch pill.
-  const [showCommitBox, setShowCommitBox] = React.useState(false);
+  // Unified Git panel — one button opens a popover with the contextual
+  // commit / push / open-PR actions and a state summary, instead of three
+  // separate pills scattered across the composer.
+  const [showGitPanel, setShowGitPanel]   = React.useState(false);
   const [commitMessage, setCommitMessage] = React.useState("");
   const [committing, setCommitting]       = React.useState(false);
   const [commitError, setCommitError]     = React.useState<string | null>(null);
-  const commitBoxRef = React.useRef<HTMLDivElement>(null);
+  const gitPanelRef = React.useRef<HTMLDivElement>(null);
 
-  // Push state — single click, no popover; feedback shown inline on the pill.
+  // Push state.
   const [pushing, setPushing]         = React.useState(false);
   const [pushError, setPushError]     = React.useState<string | null>(null);
   const [pushSuccess, setPushSuccess] = React.useState(false);
@@ -120,15 +122,15 @@ export default function ChatComposer({
       if (rootDropdownRef.current && !rootDropdownRef.current.contains(e.target as Node)) {
         setShowRootDropdown(false);
       }
-      if (commitBoxRef.current && !commitBoxRef.current.contains(e.target as Node)) {
-        setShowCommitBox(false);
+      if (gitPanelRef.current && !gitPanelRef.current.contains(e.target as Node)) {
+        setShowGitPanel(false);
       }
     }
-    if (showBranchDropdown || showRootDropdown || showCommitBox) {
+    if (showBranchDropdown || showRootDropdown || showGitPanel) {
       document.addEventListener("mousedown", handleClick);
       return () => document.removeEventListener("mousedown", handleClick);
     }
-  }, [showBranchDropdown, showRootDropdown, showCommitBox]);
+  }, [showBranchDropdown, showRootDropdown, showGitPanel]);
 
   const refreshGitStatus = React.useCallback(async () => {
     try {
@@ -186,7 +188,8 @@ export default function ChatComposer({
     try {
       await gitCommit(commitMessage.trim());
       setCommitMessage("");
-      setShowCommitBox(false);
+      // Keep the panel open — after committing, Push becomes the next action
+      // right here, so the flow stays in one place.
       await refreshGitStatus();
     } catch (err) {
       setCommitError(err instanceof Error ? err.message : "Commit failed");
@@ -674,150 +677,142 @@ export default function ChatComposer({
                     </div>
                   )}
 
-                  {/* Commit pill — only when there's something to commit */}
-                  {gitStatus?.dirty && (
-                    <div className="relative shrink-0" ref={commitBoxRef}>
-                      <button
-                        type="button"
-                        onClick={() => setShowCommitBox((p) => !p)}
-                        disabled={isSending || committing}
-                        className="flex items-center gap-1.5 rounded-md border border-white/[0.06] bg-white/[0.03] px-2 py-[3px] transition-colors hover:border-white/12 hover:bg-white/[0.06] disabled:cursor-not-allowed disabled:opacity-50"
-                        title="Commit changes"
-                      >
-                        {committing ? (
-                          <Loader2 className="h-3 w-3 animate-spin text-white/30" />
-                        ) : (
-                          <GitCommit className="h-3 w-3 text-white/25" />
-                        )}
-                        <span className="text-[11px] text-white/40">Commit</span>
-                      </button>
+                  {/* ── Git panel — one button, all source-control actions inside.
+                      Replaces the old scattered Commit/Push/PR pills: the button
+                      shows at-a-glance state (dot when dirty, ↑N when ahead) and
+                      opens a contextual popover that guides commit → push → PR. */}
+                  {gitStatus && (() => {
+                    const dirty = gitStatus.dirty;
+                    const ahead = gitStatus.ahead;
+                    const uncommitted = gitStatus.uncommittedCount ?? 0;
+                    const canOpenPr = !!gitStatus.pullRequestUrl && !dirty;
+                    const allClear = !dirty && ahead === 0 && !gitStatus.pullRequestUrl;
+                    return (
+                      <div className="relative shrink-0" ref={gitPanelRef}>
+                        <button
+                          type="button"
+                          onClick={() => setShowGitPanel((p) => !p)}
+                          disabled={isSending}
+                          className={`flex items-center gap-1.5 rounded-md border px-2 py-[3px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                            dirty || ahead > 0
+                              ? "border-[#ff8a3d]/25 bg-[#ff8a3d]/[0.06] hover:bg-[#ff8a3d]/12"
+                              : "border-white/[0.06] bg-white/[0.03] hover:border-white/12 hover:bg-white/[0.06]"
+                          }`}
+                          title="Source control"
+                        >
+                          <GitCommit className={`h-3 w-3 ${dirty || ahead > 0 ? "text-[#ff8a3d]/70" : "text-white/25"}`} />
+                          <span className={`text-[11px] ${dirty || ahead > 0 ? "text-[#ffb27d]" : "text-white/40"}`}>Git</span>
+                          {dirty && <span className="h-[5px] w-[5px] rounded-full bg-[#ff8a3d]" title={`${uncommitted} uncommitted`} />}
+                          {ahead > 0 && <span className="text-[10px] text-[#34d399]/80">↑{ahead}</span>}
+                          <ChevronDown className="h-2.5 w-2.5 text-white/20 transition-transform duration-150" style={{ transform: showGitPanel ? "rotate(180deg)" : undefined }} />
+                        </button>
 
-                      <AnimatePresence>
-                        {showCommitBox && (
-                          <motion.div
-                            initial={{ opacity: 0, y: 4, scale: 0.97 }}
-                            animate={{ opacity: 1, y: 0, scale: 1 }}
-                            exit={{ opacity: 0, y: 4, scale: 0.97 }}
-                            transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
-                            className="absolute bottom-full left-0 z-[1000] mb-2 w-72 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#161616]/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
-                          >
-                            <div className="p-3">
-                              <span className="mb-2 block text-[10px] font-semibold uppercase tracking-wider text-white/25">
-                                Commit message
-                              </span>
-                              <textarea
-                                autoFocus
-                                value={commitMessage}
-                                onChange={(e) => setCommitMessage(e.target.value)}
-                                onKeyDown={(e) => {
-                                  if (e.key === "Enter" && !e.shiftKey) {
-                                    e.preventDefault();
-                                    void handleCommit();
-                                  }
-                                }}
-                                placeholder="Describe what changed…"
-                                rows={2}
-                                className="w-full resize-none rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[12px] text-white/85 placeholder:text-white/20 outline-none transition-colors focus:border-[#ff8a3d]/40"
-                              />
-                              {commitError && (
-                                <p className="mt-1.5 text-[11px] text-[#ff5e4d]/70">{commitError}</p>
-                              )}
-                              <div className="mt-2 flex items-center justify-end gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => setShowCommitBox(false)}
-                                  disabled={committing}
-                                  className="rounded-lg px-2.5 py-1 text-[11px] text-white/40 transition-colors hover:text-white/70"
-                                >
-                                  Cancel
-                                </button>
-                                <motion.button
-                                  whileTap={{ scale: 0.96 }}
-                                  type="button"
-                                  onClick={() => void handleCommit()}
-                                  disabled={committing || !commitMessage.trim()}
-                                  className="flex items-center gap-1.5 rounded-lg border border-[#ff8a3d]/25 bg-[#ff8a3d]/10 px-3 py-1 text-[11px] font-medium text-[#ff8a3d] transition-colors hover:bg-[#ff8a3d]/18 disabled:cursor-not-allowed disabled:opacity-40"
-                                >
-                                  {committing ? <Loader2 className="h-3 w-3 animate-spin" /> : <GitCommit className="h-3 w-3" />}
-                                  {committing ? "Committing…" : "Commit"}
-                                </motion.button>
+                        <AnimatePresence>
+                          {showGitPanel && (
+                            <motion.div
+                              initial={{ opacity: 0, y: 4, scale: 0.97 }}
+                              animate={{ opacity: 1, y: 0, scale: 1 }}
+                              exit={{ opacity: 0, y: 4, scale: 0.97 }}
+                              transition={{ duration: 0.15, ease: [0.22, 1, 0.36, 1] }}
+                              className="absolute bottom-full left-0 z-[1000] mb-2 w-80 overflow-hidden rounded-2xl border border-white/[0.08] bg-[#161616]/95 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
+                            >
+                              {/* Header — branch + one-line state summary */}
+                              <div className="border-b border-white/[0.06] px-3.5 py-2.5">
+                                <div className="flex items-center gap-1.5">
+                                  <GitBranch className="h-3 w-3 text-white/30" />
+                                  <span className="font-mono text-[12px] text-white/70">{gitStatus.branch}</span>
+                                </div>
+                                <div className="mt-1 flex items-center gap-1.5 text-[10.5px] text-white/35">
+                                  {dirty ? (
+                                    <span className="flex items-center gap-1"><span className="h-[5px] w-[5px] rounded-full bg-[#ff8a3d]" />{uncommitted} uncommitted</span>
+                                  ) : (
+                                    <span className="flex items-center gap-1"><Check className="h-2.5 w-2.5 text-emerald-400/70" />clean</span>
+                                  )}
+                                  {ahead > 0 && <><span className="text-white/15">·</span><span className="text-[#34d399]/70">↑{ahead} to push</span></>}
+                                  {!dirty && ahead === 0 && gitStatus.hasUpstream && <><span className="text-white/15">·</span><span>up to date</span></>}
+                                </div>
                               </div>
-                            </div>
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  )}
 
-                  {/* Push pill — only when there's something to push */}
-                  {gitStatus && gitStatus.ahead > 0 && (
-                    <div className="relative shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => void handlePush()}
-                        disabled={isSending || pushing || gitStatus.dirty}
-                        className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-[3px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
-                          pushSuccess
-                            ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-400"
-                            : pushError
-                            ? "border-[#ff5e4d]/25 bg-[#ff5e4d]/10 text-[#ff5e4d]"
-                            : "border-white/[0.06] bg-white/[0.03] text-white/40 hover:border-white/12 hover:bg-white/[0.06]"
-                        }`}
-                        title={
-                          pushError
-                            ? pushError
-                            : gitStatus.dirty
-                            ? "Commit your changes first, then push"
-                            : `Push ${gitStatus.ahead} commit${gitStatus.ahead !== 1 ? "s" : ""}`
-                        }
-                      >
-                        {pushing ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : pushSuccess ? (
-                          <Check className="h-3 w-3" />
-                        ) : (
-                          <ArrowUpFromLine className="h-3 w-3" />
-                        )}
-                        <span className="text-[11px]">
-                          {pushing ? "Pushing…" : pushSuccess ? "Pushed" : pushError ? "Failed" : `Push ↑${gitStatus.ahead}`}
-                        </span>
-                      </button>
+                              <div className="flex flex-col gap-2.5 p-3">
+                                {/* Step 1 — Commit (when there are changes) */}
+                                {dirty && (
+                                  <div>
+                                    <label className="mb-1.5 block text-[10px] font-semibold uppercase tracking-wider text-white/25">Commit message</label>
+                                    <textarea
+                                      autoFocus
+                                      value={commitMessage}
+                                      onChange={(e) => setCommitMessage(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); void handleCommit(); }
+                                      }}
+                                      placeholder="Describe what changed…"
+                                      rows={2}
+                                      className="w-full resize-none rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-2 text-[12px] text-white/85 placeholder:text-white/20 outline-none transition-colors focus:border-[#ff8a3d]/40"
+                                    />
+                                    {commitError && <p className="mt-1.5 text-[11px] text-[#ff5e4d]/70">{commitError}</p>}
+                                    <motion.button
+                                      whileTap={{ scale: 0.98 }}
+                                      type="button"
+                                      onClick={() => void handleCommit()}
+                                      disabled={committing || !commitMessage.trim()}
+                                      className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-xl border border-[#ff8a3d]/25 bg-[#ff8a3d]/10 px-3 py-2 text-[12px] font-medium text-[#ff8a3d] transition-colors hover:bg-[#ff8a3d]/18 disabled:cursor-not-allowed disabled:opacity-40"
+                                    >
+                                      {committing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <GitCommit className="h-3.5 w-3.5" />}
+                                      {committing ? "Committing…" : `Commit ${uncommitted} file${uncommitted !== 1 ? "s" : ""}`}
+                                    </motion.button>
+                                  </div>
+                                )}
 
-                      {/* Full error text — the pill itself only has room for "Failed",
-                          and a hover-only tooltip is too easy to miss. */}
-                      <AnimatePresence>
-                        {pushError && (
-                          <motion.div
-                            initial={{ opacity: 0, y: 4 }}
-                            animate={{ opacity: 1, y: 0 }}
-                            exit={{ opacity: 0, y: 4 }}
-                            transition={{ duration: 0.15 }}
-                            className="absolute bottom-full left-0 z-[1000] mb-2 w-72 rounded-xl border border-[#ff5e4d]/25 bg-[#161616]/95 px-3 py-2 text-[11px] leading-5 text-[#ff5e4d]/90 backdrop-blur-xl shadow-[0_16px_48px_rgba(0,0,0,0.5)]"
-                          >
-                            {pushError}
-                          </motion.div>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  )}
+                                {/* Step 2 — Push (when there are commits ahead) */}
+                                {ahead > 0 && (
+                                  <div>
+                                    <motion.button
+                                      whileTap={{ scale: 0.98 }}
+                                      type="button"
+                                      onClick={() => void handlePush()}
+                                      disabled={pushing || dirty}
+                                      className={`flex w-full items-center justify-center gap-1.5 rounded-xl border px-3 py-2 text-[12px] font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+                                        pushSuccess
+                                          ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-400"
+                                          : "border-white/[0.1] bg-white/[0.04] text-white/70 hover:bg-white/[0.08]"
+                                      }`}
+                                    >
+                                      {pushing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : pushSuccess ? <Check className="h-3.5 w-3.5" /> : <ArrowUpFromLine className="h-3.5 w-3.5" />}
+                                      {pushing ? "Pushing…" : pushSuccess ? "Pushed" : `Push ↑${ahead}`}
+                                    </motion.button>
+                                    {dirty && <p className="mt-1.5 text-[10.5px] text-white/30">Commit your changes first, then push.</p>}
+                                    {pushError && <p className="mt-1.5 text-[11px] leading-5 text-[#ff5e4d]/80">{pushError}</p>}
+                                  </div>
+                                )}
 
-                  {/* Pull request pill — shows once the branch is pushed and
-                      isn't the default branch. Opens GitHub's "open a pull
-                      request" page in a new tab; the user creates the PR there
-                      (no token / API — same as clicking GitHub's own link). */}
-                  {gitStatus?.pullRequestUrl && !gitStatus.dirty && (
-                    <a
-                      href={gitStatus.pullRequestUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="flex shrink-0 items-center gap-1.5 rounded-md border border-[#8957e5]/30 bg-[#8957e5]/10 px-2 py-[3px] text-[#b088f9] transition-colors hover:border-[#8957e5]/50 hover:bg-[#8957e5]/18"
-                      title="Open a pull request on GitHub"
-                    >
-                      <GitPullRequest className="h-3 w-3" />
-                      <span className="text-[11px]">Pull request</span>
-                      <ExternalLink className="h-2.5 w-2.5 opacity-60" />
-                    </a>
-                  )}
+                                {/* Step 3 — Open pull request (tokenless GitHub link).
+                                    When a GitHub token is configured in Settings, this
+                                    is where an inline "Create PR" + status chip goes. */}
+                                {canOpenPr && (
+                                  <a
+                                    href={gitStatus.pullRequestUrl!}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    onClick={() => setShowGitPanel(false)}
+                                    className="flex items-center justify-center gap-1.5 rounded-xl border border-[#8957e5]/30 bg-[#8957e5]/10 px-3 py-2 text-[12px] font-medium text-[#b088f9] transition-colors hover:bg-[#8957e5]/18"
+                                  >
+                                    <GitPullRequest className="h-3.5 w-3.5" />
+                                    Open pull request
+                                    <ExternalLink className="h-3 w-3 opacity-60" />
+                                  </a>
+                                )}
+
+                                {/* Nothing to do */}
+                                {allClear && (
+                                  <p className="py-1 text-center text-[11px] text-white/35">Nothing to commit or push — you&apos;re all caught up.</p>
+                                )}
+                              </div>
+                            </motion.div>
+                          )}
+                        </AnimatePresence>
+                      </div>
+                    );
+                  })()}
 
                   {/* Root pill with dropdown — next to Branch. Switches between
                       SIBLING project folders (e.g. ai-sandbox / avand), not
