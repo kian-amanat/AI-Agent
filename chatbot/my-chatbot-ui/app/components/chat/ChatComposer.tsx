@@ -754,7 +754,7 @@ export default function ChatComposer({
                       <button
                         type="button"
                         onClick={() => void handlePush()}
-                        disabled={isSending || pushing}
+                        disabled={isSending || pushing || gitStatus.dirty}
                         className={`flex shrink-0 items-center gap-1.5 rounded-md border px-2 py-[3px] transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
                           pushSuccess
                             ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-400"
@@ -762,7 +762,13 @@ export default function ChatComposer({
                             ? "border-[#ff5e4d]/25 bg-[#ff5e4d]/10 text-[#ff5e4d]"
                             : "border-white/[0.06] bg-white/[0.03] text-white/40 hover:border-white/12 hover:bg-white/[0.06]"
                         }`}
-                        title={pushError || `Push ${gitStatus.ahead} commit${gitStatus.ahead !== 1 ? "s" : ""}`}
+                        title={
+                          pushError
+                            ? pushError
+                            : gitStatus.dirty
+                            ? "Commit your changes first, then push"
+                            : `Push ${gitStatus.ahead} commit${gitStatus.ahead !== 1 ? "s" : ""}`
+                        }
                       >
                         {pushing ? (
                           <Loader2 className="h-3 w-3 animate-spin" />
