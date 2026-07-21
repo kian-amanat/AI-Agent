@@ -222,6 +222,55 @@ function SkeletonRow() {
   );
 }
 
+/* ── User section at the bottom (Claude-style) ── */
+function UserSection({ name, email, onNavigate }: { name?: string; email?: string; onNavigate?: () => void }) {
+  const initials = (name || "U")
+    .split(" ")
+    .map((w) => w[0])
+    .join("")
+    .toUpperCase()
+    .slice(0, 2);
+
+  return (
+    <div className="border-t border-white/[0.06] px-3 py-2.5">
+      <button
+        onClick={onNavigate}
+        className="flex w-full items-center gap-2.5 rounded-xl px-2 py-1.5 text-left transition-colors duration-150 hover:bg-white/[0.05]"
+        title={name || "User settings"}
+      >
+        {/* Avatar circle with initials */}
+        <div
+          className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold text-white"
+          style={{ background: "linear-gradient(135deg, #ff8a3d, #ff5e4d)" }}
+        >
+          {initials}
+        </div>
+
+        {/* Name + email */}
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[12.5px] font-medium leading-tight text-white/80">
+            {name || "User"}
+          </p>
+          {email && (
+            <p className="truncate text-[11px] leading-tight text-white/30">{email}</p>
+          )}
+        </div>
+
+        {/* Chevron */}
+        <svg
+          className="h-3.5 w-3.5 shrink-0 text-white/20"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={2}
+        >
+          <path strokeLinecap="round" strokeLinejoin="round" d="M9 5l7 7-7 7" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 /* ═══════════════════════════════════════════════════════════
    ChatSidebar — floating, premium, synced with project tokens
    ═══════════════════════════════════════════════════════════ */
@@ -237,6 +286,8 @@ export default function ChatSidebar({
   onDeleteSession,
   loadingSessions,
   userName,
+  userEmail,
+  onNavigateProfile,
 }: {
   isSidebarCollapsed: boolean;
   onToggleSidebar: () => void;
@@ -249,6 +300,8 @@ export default function ChatSidebar({
   onDeleteSession: (sessionId: string) => void;
   loadingSessions: boolean;
   userName?: string;
+  userEmail?: string;
+  onNavigateProfile?: () => void;
 }) {
   const [isSidebarHovered, setIsSidebarHovered] = useState(false);
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -270,7 +323,7 @@ export default function ChatSidebar({
 
       {/* ── Header ── */}
       <div className="relative flex items-center justify-between gap-2 px-3 py-3">
-        {/* Logo + name (hidden when collapsed) */}
+        {/* Logo only (hidden when collapsed) */}
         {!isSidebarCollapsed && (
           <div className="flex items-center gap-2.5 overflow-hidden">
             <Image
@@ -281,12 +334,6 @@ export default function ChatSidebar({
               quality={100}
               className="shrink-0 rounded-lg"
             />
-            <motion.p
-              className="truncate text-[13px] font-semibold tracking-tight text-white/85"
-              whileHover={{ scale: 1.02 }}
-            >
-              {userName || "Kodo"}
-            </motion.p>
           </div>
         )}
 
@@ -423,6 +470,11 @@ export default function ChatSidebar({
           })
         )}
       </div>
+
+      {/* ── User section (bottom) ── */}
+      {!isSidebarCollapsed && (
+        <UserSection name={userName} email={userEmail} onNavigate={onNavigateProfile} />
+      )}
     </motion.aside>
   );
 }

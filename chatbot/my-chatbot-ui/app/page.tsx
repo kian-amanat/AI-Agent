@@ -22,12 +22,14 @@ import {
   fetchActiveJobs,
   reconnectJob,
   cancelJob,
+  apiMe,
   type Session,
   type Message as ApiMessage,
   type SSEEvent,
   type UndoResult,
   type PlanStep,
   type QuestionOption,
+  type User,
 } from "./lib/api";
 import AuthGuard from "./components/AuthGuard";
 import { useNotifications } from "./hooks/useNotifications";
@@ -118,6 +120,26 @@ export default function MinimalChatComponent() {
   const [loadingSessions, setLoadingSessions] = useState(false);
   const [undoingMessageId, setUndoingMessageId] = useState<string | null>(null);
   const [undoableRequestId, setUndoableRequestId] = useState<string | null>(null);
+  const [userName, setUserName] = useState<string | undefined>();
+  const [userEmail, setUserEmail] = useState<string | undefined>();
+
+  // ── Fetch current user ───────────────────────────────────────
+  useEffect(() => {
+    apiMe().then((u: User | null) => {
+      if (u) {
+        setUserName(u.name);
+        setUserEmail(u.email);
+      }
+    }).catch(() => {});
+  }, []);
+
+  // ── Router for profile navigation (uses existing router from line 203) ──
+  const navigateToProfile = () => {
+    if (userName) {
+      const slug = userName.toLowerCase().replace(/\s+/g, "-");
+      router.push(`/profile/${slug}`);
+    }
+  };
 
   // ── Permission mode (persisted to localStorage) ──────────────
   const [permissionMode, setPermissionMode] = useState<PermissionMode>(() => {
@@ -768,6 +790,9 @@ export default function MinimalChatComponent() {
           onOpenSession={openSession}
           onDeleteSession={handleDeleteSession}
           loadingSessions={loadingSessions}
+          userName={userName}
+          userEmail={userEmail}
+          onNavigateProfile={navigateToProfile}
         />
 
         <section className="flex min-w-0 flex-1 flex-col overflow-hidden">
