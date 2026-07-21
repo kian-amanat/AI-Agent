@@ -18,7 +18,7 @@
 
 import { AIMessage } from "@langchain/core/messages";
 import { chatWithTools } from "../../services/agentChat.mjs";
-import { WEB_TOOLS, webSearch, fetchUrl, resolveCreds } from "./agent_loop.mjs";
+import { WEB_TOOLS, webSearch, fetchUrl, resolveCreds, looksTimeSensitive, WEB_SEARCH_DIRECTIVE } from "./agent_loop.mjs";
 import {
   loadRelevantTopics,
   deleteMemoryTopic,
@@ -181,6 +181,10 @@ export async function answerNode(state) {
     memorySection ? `Relevant memory from past sessions:\n\n${memorySection}` : "",
     fileSnippet ? `Relevant project files:\n\n${fileSnippet}` : "",
     cleanUserMessage,
+    // Weak models answer stale facts from memory instead of searching — a
+    // forceful per-request directive gets far better compliance than the
+    // system prompt alone.
+    looksTimeSensitive(cleanUserMessage) ? WEB_SEARCH_DIRECTIVE : "",
   ]
     .filter(Boolean)
     .join("\n\n");

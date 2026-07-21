@@ -870,6 +870,9 @@ Use ask_user before committing to a consequential guess: an ambiguous requiremen
 
 # Delegate heavy exploration to sub-agents
 For a big or open-ended investigation — "how does X work across the codebase", "find everywhere Y is used", "research this library" — use spawn_agent to hand it to a read-only sub-agent with its own context. It returns just a findings report, keeping your context focused for the actual editing. Prefer it over reading a dozen files yourself when you only need the conclusions. Spawn several for independent questions. Don't use it for small lookups you can do in one or two grep/read calls, and remember sub-agents can't edit — you make the changes based on what they report.
+
+# Web search — don't answer stale facts from memory
+You have web_search(query) and fetch_url(url). ALWAYS web_search first — never answer from memory — when the question is about anything time-sensitive or that changes over time, even if you think you already know: the "latest/newest/current/last/recent" version, release, price, score, WINNER, standings, ranking, or news; anything with "today/now/this year/as of"; who currently holds a role or title; or any fact tied to a date near or after your training cutoff. Your training data is stale, so a confident answer is often WRONG. Flow: web_search to find sources, then fetch_url the best result to read the real page (snippets can be stale). If the user gives a URL, fetch_url it. Do NOT search for the user's own codebase or stable general knowledge.
 ${planModeSection}${kodoSection}${memorySection}${skillSection}
 # Workspace layout (partial)
 ${snapshot}
@@ -1149,6 +1152,24 @@ function looksMultiStep(msg) {
 // context so the instruction is honored even if tool-calling compliance slips.
 const EXPLICIT_SKILL_LOAD_RE = /\bload\b[^.]{0,40}\bskills?\b|\ball\b[^.]{0,20}\bskills?\b|\bwhatever\b[^.]{0,20}\bskills?\b/i;
 
+// Questions about current/recent facts a model can't know reliably. Weak models
+// answer these confidently from stale training data instead of calling
+// web_search, so when detected we inject a forceful inline directive (models
+// follow an explicit per-request instruction far better than a system-prompt
+// rule). Deliberately broad — over-triggering a search is cheaper than shipping
+// a confidently-wrong stale fact.
+const TIME_SENSITIVE_RE = /\b(latest|newest|current(?:ly)?|recent(?:ly)?|last|this\s+(?:year|month|week)|nowadays|as\s+of|up[- ]?to[- ]?date|today|right\s+now)\b|\bwho\s+(?:is|are|won|holds|leads|owns|runs)\b|\bwhen\s+(?:is|was|will)\b|\bprice\s+of\b|\b(?:20[2-9]\d)\b|\bwinner\b|\bstandings?\b|\bversion\b/i;
+export function looksTimeSensitive(msg) {
+  return TIME_SENSITIVE_RE.test(String(msg || ""));
+}
+// The exact directive both nodes inject when a question looks time-sensitive.
+// The "don't put a remembered year in the query" rule is critical: weak models
+// otherwise anchor the search on their stale assumption (e.g. searching "last
+// World Cup winner 2022"), which just confirms their wrong belief instead of
+// discovering the actual latest answer.
+export const WEB_SEARCH_DIRECTIVE =
+  "\n[This question is about current, recent, or time-sensitive information. You MUST call web_search BEFORE answering — do NOT answer from memory, your training data is out of date and would be wrong. CRITICAL: do NOT put any year or date you remember into the search query — you are probably wrong about which is the latest. Search NEUTRALLY (e.g. \"most recent World Cup winner\", \"latest Next.js stable version\", \"current Bitcoin price\") and let the results tell you the year/answer. Then read the most authoritative result (fetch_url) and base your answer ONLY on what the search returned, not on what you thought you knew. Only skip searching if this is clearly about the user's own codebase.]";
+
 // ── Main node ─────────────────────────────────────────────────────────────────
 
 export async function agentLoopNode(state) {
@@ -1235,6 +1256,7 @@ export async function agentLoopNode(state) {
     memoryTail ? `\n[Session context]\n${memoryTail.slice(0, 1500)}` : "",
     seedBlocks.length ? `\n[Preloaded files referenced in the request]\n${seedBlocks.join("\n\n")}` : "",
     looksMultiStep(cleanMessage) ? "\n[This request has multiple distinct steps — call todo_write with the full breakdown before making any edits, and keep it updated as you complete each step.]" : "",
+    looksTimeSensitive(cleanMessage) ? WEB_SEARCH_DIRECTIVE : "",
     preloadedSkills,
   ].filter(Boolean).join("\n");
 
@@ -1418,39 +1440,34 @@ export async function agentLoopNode(state) {
   }
 
   // Enforced verification: run the project's real typecheck/lint regardless of
-  // whether the model chose to, and force one bounded fix-up pass on failure —
-  // this is what makes a silently-broken change (dead style prop, missing
-  // `group` ancestor, an unused var) actually get caught instead of reported
-  // as done.
+  // whether the model chose to, then loop the fix-up until it actually passes
+  // (bounded). A single fix-up pass often isn't enough for subtler failures
+  // (a type error, a duplicate declaration, a bad framer-motion Variants), so
+  // a weaker model would otherwise ship code that doesn't build. Retrying — and
+  // re-feeding the *current* remaining errors each round — is what stops those
+  // build breaks from reaching the user.
+  const MAX_FIX_ATTEMPTS = 3;
   if (!abortSignal?.aborted && ctx.editedFiles.size > 0) {
-    const editedList = [...ctx.editedFiles.keys()];
-    const failureReport = await autoVerifyFrontendEdits(root, editedList, emit);
-    if (failureReport) {
-      emit?.({ type: "progress", stage: "executing", message: "⚠️ Automated verification found issues — fixing..." });
+    let failureReport = await autoVerifyFrontendEdits(root, [...ctx.editedFiles.keys()], emit);
+    let attempt = 0;
+
+    while (failureReport && attempt < MAX_FIX_ATTEMPTS && !abortSignal?.aborted) {
+      attempt++;
+      emit?.({ type: "progress", stage: "executing", message: `⚠️ Verification failed — fixing (attempt ${attempt}/${MAX_FIX_ATTEMPTS})...` });
       conversation.push({
         role: "user",
-        content: `Automated verification (typecheck/lint) found problems your changes introduced. Fix them now, then reply with a final summary (no more tool calls once fixed).\n\n${failureReport.slice(0, 6000)}`,
+        content: `Automated verification (typecheck/lint) is FAILING because of your changes — the code does not build. Fix EVERY error listed below. Read the offending files if needed, make the edits, and do NOT claim you're done until these pass. When genuinely fixed, reply with a short summary.\n\n${failureReport.slice(0, 6000)}`,
       });
-      const fixResult = await runToolLoop({ iterationBudget: 8, approvalState: null });
-      if (fixResult.finalAnswer) {
-        const sep = `\n\n---\n${fixResult.finalAnswer}`;
-        finalAnswer += sep;
-        // fixResult's own text already streamed via onChunk inside runToolLoop;
-        // only the separator itself needs an explicit chunk.
-        emit?.({ type: "content", content: "\n\n---\n" });
-      }
-
-      const secondCheck = await autoVerifyFrontendEdits(root, [...ctx.editedFiles.keys()], null);
-      const note = secondCheck
-        ? `\n\n⚠️ Verification still failing after one auto-fix attempt:\n${secondCheck.slice(0, 800)}`
-        : `\n\n✅ Verified: typecheck and lint pass.`;
-      finalAnswer += note;
-      emit?.({ type: "content", content: note });
-    } else {
-      const note = `\n\n✅ Verified: typecheck and lint pass.`;
-      finalAnswer += note;
-      emit?.({ type: "content", content: note });
+      await runToolLoop({ iterationBudget: 8, approvalState: null });
+      // The fix pass streamed its own narration live; re-check the real state.
+      failureReport = await autoVerifyFrontendEdits(root, [...ctx.editedFiles.keys()], null);
     }
+
+    const note = failureReport
+      ? `\n\n⚠️ **This change does not build** — automated typecheck/lint is still failing after ${attempt} fix attempt(s). Review before using; the remaining errors are:\n${failureReport.slice(0, 800)}`
+      : `\n\n✅ Verified: typecheck and lint pass.`;
+    finalAnswer += note;
+    emit?.({ type: "content", content: note });
   }
 
   const editedFiles = [...ctx.editedFiles.keys()];
