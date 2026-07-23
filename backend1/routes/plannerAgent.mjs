@@ -25,7 +25,8 @@ import {
   rememberTargetFile,
 } from "../services/memory.service.mjs";
 import { parseIncomingPayload }        from "../utils/request.util.mjs";
-import { loadAttachmentsFromPaths }    from "../services/attachments.service.mjs";
+import { isImageMime, inferMimeTypeFromPath } from "../utils/path.util.mjs";
+import { loadAttachmentsFromPaths, buildAttachmentContext } from "../services/attachments.service.mjs";
 import { detectLanguage }              from "../services/intent.service.mjs";
 import { streamPlanSummary }           from "../services/response.service.mjs";
 import { PLANS_DIR, OPENAI_API_KEY, OPENAI_BASE_URL, WHISPER_MODEL, openai } from "../config/openai.mjs";
@@ -228,10 +229,14 @@ function syncSessionMemory(sessionId, userId, {
   targetFile = "",
 } = {}) {
   if (!sessionId || !userId) return;
-  if (userMessage.trim())           rememberUserMessage(sessionId, userId, userMessage.trim());
-  if (attachmentPaths.length)       rememberFiles(sessionId, userId, attachmentPaths);
-  if (assistantMessage.trim())      rememberAssistantMessage(sessionId, userId, assistantMessage.trim());
-  if (task || taskType || projectScope) rememberTask(sessionId, userId, { task, taskType, projectScope });
+  // NOTE: these session-memory setters are session-scoped and take
+  // (sessionId, value) — they do NOT take userId. Passing userId as the 2nd arg
+  // (as this used to) stored the userId as the value and silently dropped the
+  // real data, which is why uploaded files / last messages were never remembered.
+  if (userMessage.trim())           rememberUserMessage(sessionId, userMessage.trim());
+  if (attachmentPaths.length)       rememberFiles(sessionId, attachmentPaths);
+  if (assistantMessage.trim())      rememberAssistantMessage(sessionId, assistantMessage.trim());
+  if (task || taskType || projectScope) rememberTask(sessionId, { task, taskType, projectScope });
   if (targetFile.trim())            rememberTargetFile(sessionId, targetFile.trim());
 }
 
@@ -260,10 +265,14 @@ async function startBackgroundRun(ctx) {
   };
 
   // Track whether content streamed + collect diffs for the saved message.
+  // Accumulate ALL streamed text so the SAVED message equals what the user saw
+  // live — otherwise only `finalAnswer` (the last turn's text) is persisted and
+  // the message looks truncated after a reload / session switch.
   let contentEmitted = false;
+  let collectedContent = "";
   const collectedFileDiffs = [];
   const jobEmit = (event) => {
-    if (event.type === "content") contentEmitted = true;
+    if (event.type === "content") { contentEmitted = true; collectedContent += String(event.content || ""); }
     if (event.type === "file_diff") {
       collectedFileDiffs.push({ action: event.action, path: event.path, language: event.language, hunks: event.hunks });
     }
@@ -357,8 +366,11 @@ async function startBackgroundRun(ctx) {
     if (finalAnswer && !contentEmitted) jobEmit({ type: "content", content: finalAnswer });
     jobEmit(doneEvent(finalAnswer, usage ? { usage } : {}));
 
+    // Save the FULL streamed text (what the user actually saw) — falls back to
+    // finalAnswer if, somehow, nothing streamed.
+    const messageToSave = collectedContent.trim() || finalAnswer || "(no output)";
     saveMessage(
-      sessionId, userId, "assistant", finalAnswer || "(no output)", "graph",
+      sessionId, userId, "assistant", messageToSave, "graph",
       requestId, collectedFileDiffs.length > 0 ? collectedFileDiffs : null,
     );
     touchSession(sessionId, userId);
@@ -538,8 +550,10 @@ export default async function plannerAgentRoute(fastify) {
     const workspacePath = authSession.workspace_path || "";
 
     const settings       = await loadSettings(userId);
-    const hasAttachments = attachment_paths.length > 0;
-    const modelRoute     = routeModel(settings, hasAttachments);
+    // Only images require a vision model; text/PDF are extracted to text and
+    // work with any model, so the gate keys off image attachments specifically.
+    const hasImageAttachments = attachment_paths.some((p) => isImageMime(inferMimeTypeFromPath(p), p));
+    const modelRoute     = routeModel(settings, { hasImageAttachments });
 
     if (!modelRoute.ok) {
       const errorMap = {
@@ -583,12 +597,37 @@ export default async function plannerAgentRoute(fastify) {
                          : isRealPath(memFile) ? memFile
                          : "";
 
+    // Load uploaded attachments into readable context: PDFs/text → extracted
+    // text, images → vision analysis. Without this the model never actually
+    // "sees" an attachment and (for a PDF) says "no file attached".
+    //
+    // Include the session's PREVIOUSLY-uploaded files too (from memory), not
+    // just this turn's — so a resume uploaded once stays readable for the rest
+    // of the conversation ("i want to hire him" after "analyze this pdf").
+    const rememberedAttachments = Array.isArray(memory?.last_attachment_paths)
+      ? memory.last_attachment_paths
+      : [];
+    const allAttachmentPaths = uniq([...attachment_paths, ...rememberedAttachments]);
+    let attachmentContext = "";
+    let loadedItems = [];
+    if (allAttachmentPaths.length) {
+      try {
+        loadedItems = await loadAttachmentsFromPaths(allAttachmentPaths);
+        attachmentContext = buildAttachmentContext(loadedItems);
+      } catch (err) {
+        console.warn("[Attachments] failed to load:", err.message);
+      }
+    }
+
     // Always include the "Conversation memory:" label so the cleanMessage split
     // in agentic_explore / plan_changes reliably strips everything below it —
     // including the "Agent memory:" section whose filenames would otherwise
     // pollute the name-match fast-path word list.
+    // Attachment content goes FIRST (right under the user message) so the model
+    // sees it prominently, above the memory sections.
     const plannerContextMessage = [
       effectiveMessage,
+      attachmentContext ? `Attached files (content below):\n${attachmentContext}` : "",
       `Conversation memory:\n${memoryContext || "(none)"}`,
       agentMemoryIndex  ? `Agent memory:\n${agentMemoryIndex}`          : "",
     ].filter(Boolean).join("\n\n");
@@ -600,9 +639,23 @@ export default async function plannerAgentRoute(fastify) {
     // SSE stream is open and can tell the client it's queued.
     const { prevTail: sessionSlotPrevTail, release: releaseSessionSlot, hadToWait: sessionSlotQueued } = registerSessionSlot(sessionId);
 
+    // Attachment chips to persist on THIS turn's user message so they survive
+    // a reload / session switch (name + type + size; sizes come from the loaded
+    // items when available).
+    const userAttachmentsMeta = attachment_paths.length
+      ? attachment_paths.map((p) => {
+          const it = loadedItems.find((x) => x.path === p);
+          return {
+            name: it?.originalName || String(p).split("/").pop() || p,
+            type: it?.mimeType || inferMimeTypeFromPath(p),
+            size: it?.size || 0,
+          };
+        })
+      : null;
+
     const sessionLabel = normalizeSessionLabel(message, []);
     createSession(sessionId, userId, sessionLabel);
-    saveMessage(sessionId, userId, "user", effectiveMessage);
+    saveMessage(sessionId, userId, "user", effectiveMessage, null, null, null, userAttachmentsMeta);
     touchSession(sessionId, userId);
     syncSessionMemory(sessionId, userId, {
       userMessage: effectiveMessage,

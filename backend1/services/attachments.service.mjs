@@ -6,11 +6,35 @@ import {
   inferMimeTypeFromPath,
   isImageMime,
   isInsideProjectRoot,
+  isPdfAttachment,
   isTextLikeAttachment,
   normalizePath,
 } from "../utils/path.util.mjs";
 import { readFileContent, stripToPreview } from "../utils/file.util.mjs";
 import { uniq } from "../utils/text.util.mjs";
+
+const MAX_PDF_TEXT_CHARS = 9_000;
+
+// Extract text from a PDF so it can be handed to ANY model as text — no vision
+// model required. Returns "" on failure (scanned/image-only PDFs yield little
+// or nothing; that's the one case where a vision model would still be needed).
+export async function extractPdfText(relPath) {
+  try {
+    const { PDFParse } = await import("pdf-parse");
+    const absPath = path.resolve(PROJECT_ROOT, relPath);
+    const buffer = await fs.readFile(absPath);
+    const parser = new PDFParse({ data: buffer });
+    try {
+      const result = await parser.getText();
+      return String(result?.text || "").trim().slice(0, MAX_PDF_TEXT_CHARS);
+    } finally {
+      await parser.destroy?.().catch(() => {});
+    }
+  } catch (err) {
+    console.log("⚠️  PDF text extraction failed:", err.message);
+    return "";
+  }
+}
 
 export function buildAttachmentInfoPaths(inputPaths = []) {
   return uniq(
@@ -27,9 +51,10 @@ export function buildAttachmentContext(attachments = []) {
   const blocks = [];
 
   for (const item of attachments) {
-    if (item.kind === "text" && item.preview) {
+    if ((item.kind === "text" || item.kind === "pdf") && item.preview) {
+      const label = item.kind === "pdf" ? "pdf (extracted text)" : "text";
       blocks.push(
-        `FILE: ${item.path}\nORIGINAL: ${item.originalName}\nTYPE: text\nPREVIEW:\n${item.preview}`
+        `FILE: ${item.path}\nORIGINAL: ${item.originalName}\nTYPE: ${label}\nCONTENT:\n${item.preview}`
       );
       continue;
     }
@@ -112,9 +137,11 @@ export async function loadAttachmentsFromPaths(inputPaths = []) {
       size: stat.size,
       kind: isImageMime(mimeType, rel)
         ? "image"
-        : isTextLikeAttachment(rel, mimeType)
-          ? "text"
-          : "binary",
+        : isPdfAttachment(rel, mimeType)
+          ? "pdf"
+          : isTextLikeAttachment(rel, mimeType)
+            ? "text"
+            : "binary",
       preview: "",
       analysis: "",
     };
@@ -122,6 +149,10 @@ export async function loadAttachmentsFromPaths(inputPaths = []) {
     if (item.kind === "text") {
       const content = await readFileContent(rel);
       item.preview = stripToPreview(content, 5000);
+    } else if (item.kind === "pdf") {
+      // Extract the PDF's text so any (non-vision) model can read it.
+      const text = await extractPdfText(rel);
+      item.preview = text || "(No extractable text — this PDF may be a scanned image; attach it to a vision model to read it.)";
     } else if (item.kind === "image") {
       item.analysis = await analyzeImageAttachment(rel, mimeType);
     }

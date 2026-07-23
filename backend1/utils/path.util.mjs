@@ -128,6 +128,14 @@ export function isTextLikeAttachment(filePath, mimeType = "") {
   ].includes(mime);
 }
 
+// PDFs are text-extractable server-side, so they work with ANY model (no vision
+// needed) — the router only gates on images, which genuinely need vision.
+export function isPdfAttachment(filePath, mimeType = "") {
+  const mime = String(mimeType || "").toLowerCase();
+  const ext = path.extname(filePath).toLowerCase();
+  return mime === "application/pdf" || ext === ".pdf";
+}
+
 export function buildResolvedPathCandidates(candidatePath, projectRoot = PROJECT_ROOT) {
   const cleaned = normalizePath(candidatePath).replace(/^\/+/, "");
   const variants = new Set([cleaned]);

@@ -1,10 +1,19 @@
 // services/modelRouter.mjs
 // Smart model router for Kodo Agent.
-// Automatically switches to a vision-capable model when files are attached.
+// Switches to a vision-capable model only when an IMAGE is attached — text and
+// PDF attachments are extracted to text server-side, so they work with any model.
 
 import { getModel, hasVision } from "../config/models.mjs";
 
-export function routeModel(userSettings, hasAttachments = false) {
+// Back-compat: the second arg used to be a boolean `hasAttachments`. It now
+// accepts either that (treated as "images may be present" for old callers) or
+// an options object { hasImageAttachments }. Only images require vision.
+export function routeModel(userSettings, attachmentsOrOpts = false) {
+  const hasImageAttachments =
+    typeof attachmentsOrOpts === "object" && attachmentsOrOpts !== null
+      ? !!attachmentsOrOpts.hasImageAttachments
+      : !!attachmentsOrOpts;
+
   // If no settings configured, return error state
   if (!userSettings || !userSettings.textProvider || !userSettings.textApiKey) {
     return {
@@ -21,8 +30,9 @@ export function routeModel(userSettings, hasAttachments = false) {
     userSettings.visionModel &&
     userSettings.visionApiKey;
 
-  // No attachments → use text model
-  if (!hasAttachments) {
+  // No IMAGE attached → the text model handles it (text/PDF are extracted to
+  // text, so no vision model is needed).
+  if (!hasImageAttachments) {
     const model = getModel(userSettings.textProvider, userSettings.textModel);
     return {
       ok: true,
@@ -35,13 +45,13 @@ export function routeModel(userSettings, hasAttachments = false) {
     };
   }
 
-  // Has attachments → need vision model
+  // An image is attached → need a vision model
   if (!visionConfigured) {
     return {
       ok: false,
       error: "no_vision",
       message:
-        "To upload files, please add a vision-capable model in settings.",
+        "To attach images, add a vision-capable model in settings. (Text and PDF files work with your current model — no vision needed.)",
       uploadEnabled: false,
     };
   }

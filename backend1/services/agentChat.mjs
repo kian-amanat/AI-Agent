@@ -252,75 +252,96 @@ async function openaiChat({ creds, system, messages, tools, maxTokens, temperatu
     ...messages,
   ];
 
+  // A plain (non-streamed) request. Also the fallback when streaming breaks:
+  // some OpenAI-compatible providers return malformed SSE for tool-calling
+  // turns, which the SDK surfaces as a JSON "Extra data" / SyntaxError. Rather
+  // than fail the whole turn, we retry once without streaming.
+  const nonStreamingCall = async () => {
+    const response = await client.chat.completions.create({
+      model: creds.model,
+      messages: fullMessages,
+      ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
+      temperature,
+      max_tokens: maxTokens,
+    }, { signal });
+    return {
+      message: response.choices?.[0]?.message || { role: "assistant", content: null },
+      usage: {
+        inputTokens: response.usage?.prompt_tokens || 0,
+        outputTokens: response.usage?.completion_tokens || 0,
+      },
+    };
+  };
+
+  const looksLikeBadStream = (err) => {
+    const msg = String(err?.message || err || "");
+    return err?.name === "SyntaxError" ||
+      /extra data|unexpected (token|non-whitespace|end of)|is not valid json|json parse|unterminated/i.test(msg);
+  };
+
   // Stream whenever there's a live listener (agent narration) or the model
   // is a slow "thinking" model (streaming keeps gateways from cutting an
   // idle connection). Both paths share the same delta-accumulation logic —
   // the only difference is whether onChunk gets called per text fragment.
   if (isThinkingModel || onChunk) {
-    let contentBuf = "";
-    const toolCallBufs = {}; // index → { id, name, argsBuf }
-    let usage = { inputTokens: 0, outputTokens: 0 };
+    try {
+      let contentBuf = "";
+      const toolCallBufs = {}; // index → { id, name, argsBuf }
+      let usage = { inputTokens: 0, outputTokens: 0 };
 
-    const stream = await client.chat.completions.create({
-      model: creds.model,
-      messages: fullMessages,
-      ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
-      temperature,
-      stream: true,
-      stream_options: { include_usage: true },
-      ...(isThinkingModel ? { extra_body: { enable_thinking: true } } : {}),
-    }, { signal });
+      const stream = await client.chat.completions.create({
+        model: creds.model,
+        messages: fullMessages,
+        ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
+        temperature,
+        stream: true,
+        stream_options: { include_usage: true },
+        ...(isThinkingModel ? { extra_body: { enable_thinking: true } } : {}),
+      }, { signal });
 
-    for await (const chunk of stream) {
-      if (chunk.usage) {
-        usage = {
-          inputTokens: chunk.usage.prompt_tokens || 0,
-          outputTokens: chunk.usage.completion_tokens || 0,
-        };
-      }
-      const delta = chunk.choices?.[0]?.delta || {};
-      if (delta.content) {
-        contentBuf += delta.content;
-        onChunk?.(delta.content);
-      }
-      if (Array.isArray(delta.tool_calls)) {
-        for (const tc of delta.tool_calls) {
-          const idx = tc.index ?? 0;
-          if (!toolCallBufs[idx]) toolCallBufs[idx] = { id: tc.id || "", name: tc.function?.name || "", argsBuf: "" };
-          if (tc.id) toolCallBufs[idx].id = tc.id;
-          if (tc.function?.name) toolCallBufs[idx].name = tc.function.name;
-          if (tc.function?.arguments) toolCallBufs[idx].argsBuf += tc.function.arguments;
+      for await (const chunk of stream) {
+        if (chunk.usage) {
+          usage = {
+            inputTokens: chunk.usage.prompt_tokens || 0,
+            outputTokens: chunk.usage.completion_tokens || 0,
+          };
+        }
+        const delta = chunk.choices?.[0]?.delta || {};
+        if (delta.content) {
+          contentBuf += delta.content;
+          onChunk?.(delta.content);
+        }
+        if (Array.isArray(delta.tool_calls)) {
+          for (const tc of delta.tool_calls) {
+            const idx = tc.index ?? 0;
+            if (!toolCallBufs[idx]) toolCallBufs[idx] = { id: tc.id || "", name: tc.function?.name || "", argsBuf: "" };
+            if (tc.id) toolCallBufs[idx].id = tc.id;
+            if (tc.function?.name) toolCallBufs[idx].name = tc.function.name;
+            if (tc.function?.arguments) toolCallBufs[idx].argsBuf += tc.function.arguments;
+          }
         }
       }
+
+      const toolCalls = Object.values(toolCallBufs).map((tc) => ({
+        id: tc.id,
+        type: "function",
+        function: { name: tc.name, arguments: tc.argsBuf },
+      }));
+
+      return {
+        message: { role: "assistant", content: contentBuf || null, tool_calls: toolCalls.length ? toolCalls : undefined },
+        usage,
+      };
+    } catch (err) {
+      // Don't fall back on a real abort, and only when we haven't streamed a
+      // user-visible answer yet (a partial stream can't be cleanly retried).
+      if (signal?.aborted || !looksLikeBadStream(err)) throw err;
+      console.warn("[AgentChat] streaming returned malformed data — retrying non-streaming:", String(err?.message || err).slice(0, 140));
+      return nonStreamingCall();
     }
-
-    const toolCalls = Object.values(toolCallBufs).map((tc) => ({
-      id: tc.id,
-      type: "function",
-      function: { name: tc.name, arguments: tc.argsBuf },
-    }));
-
-    return {
-      message: { role: "assistant", content: contentBuf || null, tool_calls: toolCalls.length ? toolCalls : undefined },
-      usage,
-    };
   }
 
-  const response = await client.chat.completions.create({
-    model: creds.model,
-    messages: fullMessages,
-    ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
-    temperature,
-    max_tokens: maxTokens,
-  }, { signal });
-
-  return {
-    message: response.choices?.[0]?.message || { role: "assistant", content: null },
-    usage: {
-      inputTokens: response.usage?.prompt_tokens || 0,
-      outputTokens: response.usage?.completion_tokens || 0,
-    },
-  };
+  return nonStreamingCall();
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────
