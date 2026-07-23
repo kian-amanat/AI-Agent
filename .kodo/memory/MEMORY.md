@@ -7,3 +7,5 @@
 - [debugging-history](debugging-history.md) — History of file write errors, timeouts, and incomplete request handling
 - [agent-loop-explanation](agent-loop-explanation.md) — Core agent implementation explanation for agent_loop.mjs
 - [project-chat-sidebar-user-section](project-chat-sidebar-user-section.md) — ChatSidebar user section with clickable username and navigation
+- [candidate-assessment-kian](candidate-assessment-kian.md) — Assessment of candidate Kian for hiring
+- [project-market-position](project-market-position.md) — Competitive landscape: Aider and similar small-team AI agents

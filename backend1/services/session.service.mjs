@@ -30,8 +30,8 @@ export function createSession(id, userId, title = null) {
   return dbCreateSession(id, userId, title);
 }
 
-export function saveMessage(sessionId, userId, role, content, intent = null, requestId = null, fileDiffs = null) {
-  return dbSaveMessage(sessionId, userId, role, content, intent, requestId, fileDiffs);
+export function saveMessage(sessionId, userId, role, content, intent = null, requestId = null, fileDiffs = null, attachments = null) {
+  return dbSaveMessage(sessionId, userId, role, content, intent, requestId, fileDiffs, attachments);
 }
 
 export function getSessionMessages(sessionId, userId, limit = 20) {

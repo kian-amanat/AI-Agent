@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { v4 as uuidv4 } from "uuid";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Bot, Copy, Check, UserIcon } from "lucide-react";
+import { Bot, Copy, Check, UserIcon, FileText, File as FileIcon } from "lucide-react";
 import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import { useAgentPipeline } from "./hooks/useAgentPipeline";
 import { useThinkingSteps } from "./hooks/useThinkingSteps";
@@ -23,6 +23,7 @@ import {
   reconnectJob,
   cancelJob,
   apiMe,
+  fetchCapabilities,
   type Session,
   type Message as ApiMessage,
   type SSEEvent,
@@ -62,6 +63,15 @@ function toUiMessage(message: ApiMessage): Message {
 
   const metadata = message as unknown as Record<string, unknown>;
 
+  // Persisted attachment chips (name/type/size) — thumbUrls aren't persisted,
+  // so reloaded image attachments show a file icon instead of a thumbnail.
+  type Attachment = { name: string; type: string; size: number; thumbUrl?: string };
+  let attachments: Attachment[] | undefined;
+  try {
+    const raw = metadata.attachments;
+    if (raw) attachments = typeof raw === "string" ? JSON.parse(raw) : (raw as Attachment[]);
+  } catch { attachments = undefined; }
+
   return {
     id: message.id != null ? String(message.id) : crypto.randomUUID(),
     role: message.role,
@@ -74,6 +84,7 @@ function toUiMessage(message: ApiMessage): Message {
       intent: message.intent ?? undefined,
       requestId: (metadata.request_id as string | undefined) ?? (metadata.requestId as string | undefined) ?? undefined,
       fileDiffs,
+      attachments,
       undoResult:
         (metadata.undoResult as MessageUndoResult | undefined) ?? undefined,
       planMetadata: metadata.planMetadata ?? undefined,
@@ -133,6 +144,13 @@ export default function MinimalChatComponent() {
     }).catch(() => {});
   }, []);
 
+  // ── Vision capability — whether a vision model is configured. Images can
+  //    only be uploaded when it is; text/PDF work regardless. ──
+  const [canUploadImages, setCanUploadImages] = useState(false);
+  useEffect(() => {
+    fetchCapabilities().then((c) => setCanUploadImages(!!c.uploadEnabled)).catch(() => {});
+  }, []);
+
   // ── Router for profile navigation (uses existing router from line 203) ──
   const navigateToProfile = () => {
     if (userName) {
@@ -169,6 +187,14 @@ export default function MinimalChatComponent() {
   // ── File tree sidebar ─────────────────────────────────────────
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
 
+  // ── Notifications: local on/off preference (separate from browser
+  //    permission) + a help panel shown when the browser has them blocked. ──
+  const [notifEnabled, setNotifEnabled] = useState<boolean>(() => {
+    if (typeof window === "undefined") return true;
+    return localStorage.getItem("kodo_notif_enabled") !== "false";
+  });
+  const [showNotifHelp, setShowNotifHelp] = useState(false);
+
   const pipeline = useAgentPipeline();
   const thinking = useThinkingSteps();
 
@@ -198,11 +224,27 @@ export default function MinimalChatComponent() {
   // reconnectRunningJobs is declared further down (it needs buildStreamHandlers);
   // openSession above it calls through this ref to avoid a forward reference.
   const reconnectRunningJobsRef = useRef<(sessionId: string) => void>(() => {});
+  // openSession is declared below; the service-worker click listener calls it
+  // through this ref to avoid a forward reference / stale closure.
+  const openSessionRef = useRef<(sessionId: string) => void>(() => {});
 
   const router       = useRouter();
   const searchParams = useSearchParams();
 
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+
+  // Clicking a desktop notification (delivered via the service worker) posts a
+  // message back here so we can focus the right session.
+  useEffect(() => {
+    if (typeof navigator === "undefined" || !("serviceWorker" in navigator)) return;
+    const onMessage = (event: MessageEvent) => {
+      if (event.data?.type === "notification-click" && event.data.sessionId) {
+        void openSessionRef.current(event.data.sessionId);
+      }
+    };
+    navigator.serviceWorker.addEventListener("message", onMessage);
+    return () => navigator.serviceWorker.removeEventListener("message", onMessage);
+  }, []);
   useEffect(() => { selectedSessionIdRef.current = selectedSessionId; }, [selectedSessionId]);
 
   function scrollToBottomSoon() {
@@ -454,15 +496,60 @@ export default function MinimalChatComponent() {
     setTimeout(() => textareaRef.current?.focus(), 50);
   }
 
+  // Requesting permission from a user gesture, then firing an immediate
+  // confirmation so the user can see (right then) that notifications actually
+  // reach their desktop — turning a silent "nothing happens" into instant proof
+  // the pipeline works (or surfacing an OS/Focus block if it doesn't).
+  function setNotifPref(on: boolean) {
+    setNotifEnabled(on);
+    try { localStorage.setItem("kodo_notif_enabled", on ? "true" : "false"); } catch {}
+  }
+
+  async function handleEnableNotifications() {
+    const perm = notifications.permission;
+
+    // Blocked at the browser level — no button can override it. Show the
+    // in-app help panel (a visible element, unlike window.alert which the
+    // browser can silently suppress).
+    if (perm === "denied") { setShowNotifHelp(true); return; }
+
+    // Already granted → this button now toggles the local on/off preference.
+    if (perm === "granted") {
+      const next = !notifEnabled;
+      setNotifPref(next);
+      if (next) {
+        notifications.notify("Notifications on ✓", {
+          body: "You'll get a desktop alert when a task finishes — even when Kodo is in the background.",
+          tag: "kodo-notif-test",
+        });
+      }
+      return;
+    }
+
+    // First time (default) → ask the browser, then confirm with a live test.
+    const p = await notifications.request();
+    if (p === "granted") {
+      setNotifPref(true);
+      notifications.notify("Notifications on ✓", {
+        body: "You'll get a desktop alert when a task finishes — even when Kodo is in the background.",
+        tag: "kodo-notif-test",
+      });
+    } else if (p === "denied") {
+      setShowNotifHelp(true);
+    }
+  }
+
   // Fire a browser notification only when it's actually useful: the tab is
   // hidden, or the event belongs to a session the user isn't currently viewing.
   function maybeNotify(title: string, body: string, sessionId: string | null, tag: string) {
+    if (!notifEnabled) return;   // user turned notifications off from the bell
     const away = (typeof document !== "undefined" && document.hidden) ||
                  (!!sessionId && sessionId !== selectedSessionIdRef.current);
     if (!away) return;
     notifications.notify(title, {
       body, tag,
-      onClick: () => { if (sessionId) void openSession(sessionId); },
+      sessionId: sessionId ?? undefined,          // for the service-worker click handler
+      onClick: () => { if (sessionId) void openSession(sessionId); },  // for the fallback path
     });
   }
 
@@ -676,6 +763,7 @@ export default function MinimalChatComponent() {
   // mutated while rendering); openSession only reads it in async event flow.
   useEffect(() => {
     reconnectRunningJobsRef.current = reconnectRunningJobs;
+    openSessionRef.current = openSession;
   });
 
   async function handleSendMessage() {
@@ -686,12 +774,19 @@ export default function MinimalChatComponent() {
     setUndoableRequestId(null);
     pipeline.start();
 
-    const fileNames = selectedFiles.map((f) => f.name).join(", ");
+    const attachmentsMeta = selectedFiles.map((f) => ({
+      name: f.name,
+      type: f.type,
+      size: f.size,
+      // Object URL for a live-session image thumbnail (best-effort; not persisted).
+      thumbUrl: f.type.startsWith("image/") ? URL.createObjectURL(f) : undefined,
+    }));
     const userMessage: Message = {
       id:        uuidv4(),
       role:      "user",
-      content:   text || (selectedFiles.length > 0 ? `Uploaded file${selectedFiles.length > 1 ? "s" : ""}: ${fileNames}` : "attachment"),
+      content:   text || "",
       createdAt: nowIso(),
+      metadata:  attachmentsMeta.length ? { attachments: attachmentsMeta } : undefined,
     };
 
     const assistantMessageId = uuidv4();
@@ -805,7 +900,8 @@ export default function MinimalChatComponent() {
             fileTreeOpen={fileTreeOpen}
             isSending={isSending}
             notificationPermission={notifications.supported ? notifications.permission : undefined}
-            onRequestNotifications={notifications.supported ? () => void notifications.request() : undefined}
+            notificationsOn={notifications.supported && notifications.permission === "granted" && notifEnabled}
+            onRequestNotifications={notifications.supported ? handleEnableNotifications : undefined}
           />
 
           <div className="flex min-h-0 flex-1 overflow-hidden">
@@ -886,7 +982,30 @@ export default function MinimalChatComponent() {
                                           <UserIcon className="h-4 w-4 text-[#ff8a3d]" />
                                           <span>You</span>
                                         </div>
-                                        <div className="whitespace-pre-wrap text-[15px] leading-7 text-white/92">{m.content}</div>
+                                        {/* Uploaded attachments shown in the message */}
+                                        {m.metadata?.attachments && m.metadata.attachments.length > 0 && (
+                                          <div className="mb-2 flex flex-wrap gap-2">
+                                            {m.metadata.attachments.map((att, i) => (
+                                              <div key={`${att.name}_${i}`} className="flex items-center gap-2 rounded-xl border border-white/12 bg-black/20 py-1.5 pl-1.5 pr-2.5">
+                                                <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/10 bg-white/[0.04]">
+                                                  {att.thumbUrl ? (
+                                                    // eslint-disable-next-line @next/next/no-img-element
+                                                    <img src={att.thumbUrl} alt={att.name} className="h-full w-full object-cover" />
+                                                  ) : /pdf/i.test(att.type) || /\.pdf$/i.test(att.name) ? (
+                                                    <FileText className="h-4 w-4 text-[#ffb27d]" />
+                                                  ) : (
+                                                    <FileIcon className="h-4 w-4 text-white/60" />
+                                                  )}
+                                                </div>
+                                                <div className="flex min-w-0 flex-col">
+                                                  <span className="max-w-[160px] truncate text-[12px] leading-tight text-white/85">{att.name}</span>
+                                                  <span className="text-[10px] text-white/40">{att.size < 1024 ? `${att.size} B` : att.size < 1048576 ? `${(att.size/1024).toFixed(0)} KB` : `${(att.size/1048576).toFixed(1)} MB`}</span>
+                                                </div>
+                                              </div>
+                                            ))}
+                                          </div>
+                                        )}
+                                        {m.content && <div className="whitespace-pre-wrap text-[15px] leading-7 text-white/92">{m.content}</div>}
                                       </div>
                                       <div className="mt-2 flex items-center justify-end gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
                                         <motion.button
@@ -995,6 +1114,7 @@ export default function MinimalChatComponent() {
                 setSelectedFiles={setSelectedFiles}
                 onSlashCommand={handleSlashCommand}
                 permissionMode={permissionMode}
+                canUploadImages={canUploadImages}
               />
             </div>
 
@@ -1007,6 +1127,47 @@ export default function MinimalChatComponent() {
           </div>
         </section>
       </div>
+
+      {/* Notification-blocked help — shown when the browser has notifications
+          denied for this site (which no button can override). */}
+      <AnimatePresence>
+        {showNotifHelp && (
+          <motion.div
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[2000] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+            onClick={() => setShowNotifHelp(false)}
+          >
+            <motion.div
+              initial={{ opacity: 0, y: 12, scale: 0.97 }} animate={{ opacity: 1, y: 0, scale: 1 }} exit={{ opacity: 0, y: 12, scale: 0.97 }}
+              transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+              onClick={(e) => e.stopPropagation()}
+              className="w-full max-w-md rounded-2xl border border-white/[0.08] bg-[#161616] p-6 shadow-[0_24px_64px_rgba(0,0,0,0.6)]"
+            >
+              <h2 className="text-base font-semibold text-white">Notifications are blocked</h2>
+              <p className="mt-2 text-[13px] leading-6 text-white/55">
+                Your browser has blocked notifications for this site, so Kodo can&apos;t alert you.
+                No button here can override that — you have to re-enable it in the browser:
+              </p>
+              <ol className="mt-3 space-y-1.5 text-[13px] leading-6 text-white/70">
+                <li>1. Click the <span className="font-medium text-white">site-info icon</span> (lock / tune) at the left of the address bar.</li>
+                <li>2. Find <span className="font-medium text-white">Notifications</span> and set it to <span className="font-medium text-[#ff8a3d]">Allow</span>.</li>
+                <li>3. <span className="font-medium text-white">Reload</span> the page, then click the bell again.</li>
+              </ol>
+              <p className="mt-3 rounded-xl border border-white/[0.06] bg-white/[0.03] p-3 text-[12px] leading-5 text-white/45">
+                On macOS: also enable your browser in <span className="text-white/70">System Settings › Notifications</span>, and turn off <span className="text-white/70">Do Not Disturb / Focus</span> — Focus mode silently hides every notification.
+              </p>
+              <div className="mt-4 flex justify-end">
+                <button
+                  onClick={() => setShowNotifHelp(false)}
+                  className="rounded-xl border border-[#ff8a3d]/25 bg-[#ff8a3d]/10 px-4 py-2 text-[13px] font-medium text-[#ff8a3d] transition-colors hover:bg-[#ff8a3d]/18"
+                >
+                  Got it
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </AuthGuard>
   );
 }

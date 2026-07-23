@@ -3,9 +3,9 @@
 import React from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
-  ArrowUpFromLine, Check, ChevronDown, ExternalLink, FileCode2, FolderOpen,
-  GitBranch, GitCommit, GitPullRequest, Loader2, Mic, Paperclip, Shield,
-  ShieldCheck, StopCircle, X,
+  ArrowUpFromLine, Check, ChevronDown, ExternalLink, File as FileIcon, FileCode2,
+  FileText, FolderOpen, GitBranch, GitCommit, GitPullRequest, ImageOff, Loader2, Mic,
+  Paperclip, Shield, ShieldCheck, StopCircle, Upload, X,
 } from "lucide-react";
 import NorthRoundedIcon from "@mui/icons-material/NorthRounded";
 import StopRoundedIcon from "@mui/icons-material/StopRounded";
@@ -34,6 +34,7 @@ type ChatComposerProps = {
   setSelectedFiles:  React.Dispatch<React.SetStateAction<File[]>>;
   onSlashCommand?:   (id: SlashCommandId) => void;
   permissionMode?:   PermissionMode;
+  canUploadImages?:  boolean;   // false when no vision model is configured
 };
 
 function mergeFiles(existing: File[], incoming: File[]) {
@@ -54,6 +55,55 @@ function extractMentions(text: string): string[] {
   return [...new Set(matches.map((m) => m.slice(1)))];
 }
 
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(0)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function isImageFile(f: File) {
+  return f.type.startsWith("image/") || /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(f.name);
+}
+function isPdfFile(f: File) {
+  return f.type === "application/pdf" || /\.pdf$/i.test(f.name);
+}
+
+// One attachment chip — image thumbnail (owns its object URL) or a file icon,
+// with name, size, and a remove button.
+function AttachmentChip({ file, onRemove, disabled }: { file: File; onRemove: () => void; disabled?: boolean }) {
+  // Create the thumbnail URL once per file, and revoke it on unmount/change.
+  const thumb = React.useMemo(() => (isImageFile(file) ? URL.createObjectURL(file) : null), [file]);
+  React.useEffect(() => () => { if (thumb) URL.revokeObjectURL(thumb); }, [thumb]);
+
+  return (
+    <div className="group flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] py-1.5 pl-1.5 pr-2 text-[12px] text-white/85">
+      <div className="flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/[0.06] bg-white/[0.03]">
+        {thumb ? (
+          // eslint-disable-next-line @next/next/no-img-element
+          <img src={thumb} alt={file.name} className="h-full w-full object-cover" />
+        ) : isPdfFile(file) ? (
+          <FileText className="h-4 w-4 text-[#ff8a3d]/80" />
+        ) : (
+          <FileIcon className="h-4 w-4 text-white/40" />
+        )}
+      </div>
+      <div className="flex min-w-0 flex-col">
+        <span className="max-w-[160px] truncate leading-tight">{file.name}</span>
+        <span className="text-[10px] text-white/35">{formatBytes(file.size)}</span>
+      </div>
+      <button
+        type="button"
+        onClick={onRemove}
+        disabled={disabled}
+        className="ml-1 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-white/40 transition-colors hover:bg-white/10 hover:text-white disabled:opacity-40"
+        title="Remove"
+      >
+        <X className="h-3 w-3" />
+      </button>
+    </div>
+  );
+}
+
 export default function ChatComposer({
   messageInput,
   setMessageInput,
@@ -70,6 +120,7 @@ export default function ChatComposer({
   setSelectedFiles,
   onSlashCommand,
   permissionMode = "auto",
+  canUploadImages = false,
 }: ChatComposerProps) {
   const fileInputRef     = React.useRef<HTMLInputElement>(null);
   const mediaRecorderRef = React.useRef<MediaRecorder | null>(null);
@@ -289,6 +340,30 @@ export default function ChatComposer({
     onSlashCommand?.(id);
   }
 
+  // ── Central add-files gate ──────────────────────────────────────────────
+  // Images require a vision model; when none is configured we drop them and
+  // show a clear message, but still accept the text/PDF files in the same batch.
+  const [attachError, setAttachError] = React.useState<string | null>(null);
+  const addFiles = React.useCallback((incoming: File[]) => {
+    if (incoming.length === 0) return;
+    if (!canUploadImages) {
+      const images = incoming.filter(isImageFile);
+      const rest   = incoming.filter((f) => !isImageFile(f));
+      if (images.length > 0) {
+        setAttachError(
+          `Can't attach ${images.length === 1 ? "that image" : "those images"} — no vision model is configured. Add one in Settings to send images. Text & PDF files work with your current model.`
+        );
+        if (rest.length === 0) return;   // nothing left to attach
+      } else {
+        setAttachError(null);
+      }
+      setSelectedFiles((prev) => mergeFiles(prev, rest));
+      return;
+    }
+    setAttachError(null);
+    setSelectedFiles((prev) => mergeFiles(prev, incoming));
+  }, [canUploadImages, setSelectedFiles]);
+
   const handlePaste = React.useCallback(
     (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
       const items      = Array.from(e.clipboardData?.items ?? []);
@@ -304,9 +379,9 @@ export default function ChatComposer({
           newFiles.push(new File([file], name, { type: file.type }));
         }
       });
-      if (newFiles.length > 0) setSelectedFiles((prev) => mergeFiles(prev, newFiles));
+      if (newFiles.length > 0) addFiles(newFiles);   // gated: images need a vision model
     },
-    [setSelectedFiles]
+    [addFiles]
   );
 
   const canSend = Boolean(messageInput.trim() || selectedFiles.length > 0);
@@ -384,6 +459,40 @@ export default function ChatComposer({
   // whenever there was no git repo and no @mentions).
   const showStatusBar  = true;
 
+  // ── Drag & drop (ChatGPT/Claude-style: drop files onto the composer) ──
+  const [isDragging, setIsDragging] = React.useState(false);
+  const dragDepth = React.useRef(0);   // counts enter/leave so child elements don't flicker the overlay
+  const hasFiles = (e: React.DragEvent) => Array.from(e.dataTransfer?.types ?? []).includes("Files");
+
+  const handleDragEnter = React.useCallback((e: React.DragEvent) => {
+    if (!hasFiles(e) || isSending || isTranscribing) return;
+    e.preventDefault();
+    dragDepth.current += 1;
+    setIsDragging(true);
+  }, [isSending, isTranscribing]);
+
+  const handleDragLeave = React.useCallback((e: React.DragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth.current -= 1;
+    if (dragDepth.current <= 0) { dragDepth.current = 0; setIsDragging(false); }
+  }, []);
+
+  const handleDragOver = React.useCallback((e: React.DragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }, []);
+
+  const handleDrop = React.useCallback((e: React.DragEvent) => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    dragDepth.current = 0;
+    setIsDragging(false);
+    if (isSending || isTranscribing) return;
+    addFiles(Array.from(e.dataTransfer?.files ?? []));
+  }, [isSending, isTranscribing, addFiles]);
+
   return (
     <div className="bg-transparent px-4 pb-5 pt-2 md:px-8">
       <div className="mx-auto w-full max-w-4xl">
@@ -394,8 +503,29 @@ export default function ChatComposer({
               : { boxShadow: "0 0 0 1px rgba(255,255,255,0.06), 0 18px 50px rgba(0,0,0,0.18)" }
           }
           transition={{ duration: 0.22 }}
-          className="overflow-visible rounded-[22px] border border-white/8 bg-white/[0.03] backdrop-blur-sm"
+          onDragEnter={handleDragEnter}
+          onDragOver={handleDragOver}
+          onDragLeave={handleDragLeave}
+          onDrop={handleDrop}
+          className="relative overflow-visible rounded-[22px] border border-white/8 bg-white/[0.03] backdrop-blur-sm"
         >
+          {/* Drag & drop overlay */}
+          <AnimatePresence>
+            {isDragging && (
+              <motion.div
+                initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                transition={{ duration: 0.12 }}
+                className="pointer-events-none absolute inset-0 z-[100] flex flex-col items-center justify-center gap-2 rounded-[22px] border-2 border-dashed border-[#ff8a3d]/50 bg-[#ff8a3d]/[0.08] backdrop-blur-sm"
+              >
+                <Upload className="h-6 w-6 text-[#ff8a3d]" />
+                <span className="text-[13px] font-medium text-[#ffb27d]">Drop files to attach</span>
+                <span className="text-[11px] text-white/40">
+                  {canUploadImages ? "Images, PDFs, and text files" : "PDFs and text files (add a vision model for images)"}
+                </span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* ── Main input row ─────────────────────────────── */}
           <div className="flex items-end gap-2 p-2.5">
             <input
@@ -403,10 +533,11 @@ export default function ChatComposer({
               type="file"
               className="hidden"
               multiple
-              accept="image/*,.pdf,.doc,.docx,.txt,.md,.json,.csv"
+              accept={canUploadImages
+                ? "image/*,.pdf,.txt,.md,.json,.csv,.yaml,.yml,.xml,.html,.js,.jsx,.ts,.tsx,.mjs,.cjs,.css,.scss,.py"
+                : ".pdf,.txt,.md,.json,.csv,.yaml,.yml,.xml,.html,.js,.jsx,.ts,.tsx,.mjs,.cjs,.css,.scss,.py"}
               onChange={(e) => {
-                const files = Array.from(e.target.files ?? []);
-                if (files.length > 0) setSelectedFiles((prev) => mergeFiles(prev, files));
+                addFiles(Array.from(e.target.files ?? []));
                 e.target.value = "";
               }}
             />
@@ -417,7 +548,7 @@ export default function ChatComposer({
               whileTap={{ scale: 0.96 }}
               onClick={() => fileInputRef.current?.click()}
               className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/[0.03] text-white/62 transition-colors hover:border-white/12 hover:bg-white/[0.05] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-              title="Attach file or image"
+              title={canUploadImages ? "Attach a file or image" : "Attach a PDF or text file (add a vision model in Settings to send images)"}
               disabled={isSending || isTranscribing}
             >
               <Paperclip className="h-4 w-4" />
@@ -480,28 +611,43 @@ export default function ChatComposer({
                     className="mb-1 mt-2 flex flex-wrap gap-1.5"
                   >
                     {selectedFiles.map((file) => (
-                      <div
+                      <AttachmentChip
                         key={`${file.name}_${file.size}_${file.lastModified}`}
-                        className="flex max-w-full items-center gap-1.5 rounded-xl border border-[#ff8a3d]/20 bg-[#ff8a3d]/8 px-2.5 py-1 text-[12px] text-white/80"
-                      >
-                        <span className="min-w-0 truncate">📎 {file.name}</span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setSelectedFiles((prev) =>
-                              prev.filter(
-                                (item) =>
-                                  !(item.name === file.name && item.size === file.size && item.lastModified === file.lastModified)
-                              )
+                        file={file}
+                        disabled={isSending || isTranscribing}
+                        onRemove={() =>
+                          setSelectedFiles((prev) =>
+                            prev.filter(
+                              (item) =>
+                                !(item.name === file.name && item.size === file.size && item.lastModified === file.lastModified)
                             )
-                          }
-                          className="ml-auto inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full text-white/50 transition-colors hover:bg-white/10 hover:text-white"
-                          disabled={isSending || isTranscribing}
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </div>
+                          )
+                        }
+                      />
                     ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Clear message when an image was rejected (no vision model) */}
+              <AnimatePresence initial={false}>
+                {attachError && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    className="mt-2 flex items-start gap-2 rounded-xl border border-[#ff8a3d]/25 bg-[#ff8a3d]/[0.08] px-3 py-2"
+                  >
+                    <ImageOff className="mt-[1px] h-3.5 w-3.5 shrink-0 text-[#ff8a3d]/80" />
+                    <span className="flex-1 text-[11.5px] leading-5 text-white/70">{attachError}</span>
+                    <button
+                      type="button"
+                      onClick={() => setAttachError(null)}
+                      className="text-white/40 transition-colors hover:text-white/70"
+                      title="Dismiss"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
                   </motion.div>
                 )}
               </AnimatePresence>

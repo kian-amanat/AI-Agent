@@ -44,6 +44,7 @@ export interface Message {
     stage?: "analyzing" | "planning" | "validating" | "complete";
     undoResult?: any;
     fileDiffs?: FileDiff[];
+    attachments?: { name: string; type: string; size: number; thumbUrl?: string }[];
   };
 }
 

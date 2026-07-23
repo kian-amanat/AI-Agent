@@ -132,6 +132,7 @@ ensureColumn("sessions", "user_id", "INTEGER");
 ensureColumn("messages", "user_id", "INTEGER");
 ensureColumn("messages", "request_id", "TEXT");
 ensureColumn("messages", "file_diffs", "TEXT");
+ensureColumn("messages", "attachments", "TEXT");   // JSON: uploaded file chips for a user message
 ensureColumn("session_memory", "user_id", "INTEGER");
 
 db.exec(`
@@ -288,7 +289,7 @@ export function createSession(id, userId, title = null) {
   ensureMemoryRow(id, userId);
 }
 
-export function saveMessage(sessionId, userId, role, content, intent = null, requestId = null, fileDiffs = null) {
+export function saveMessage(sessionId, userId, role, content, intent = null, requestId = null, fileDiffs = null, attachments = null) {
   const now = nowIso();
 
   ensureSessionOwnership(sessionId, userId);
@@ -300,9 +301,9 @@ export function saveMessage(sessionId, userId, role, content, intent = null, req
   `).run(now, sessionId, userId);
 
   db.prepare(`
-    INSERT INTO messages (session_id, user_id, role, content, intent, created_at, request_id, file_diffs)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(sessionId, userId, role, content, intent, now, requestId ?? null, fileDiffs ? JSON.stringify(fileDiffs) : null);
+    INSERT INTO messages (session_id, user_id, role, content, intent, created_at, request_id, file_diffs, attachments)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(sessionId, userId, role, content, intent, now, requestId ?? null, fileDiffs ? JSON.stringify(fileDiffs) : null, attachments ? JSON.stringify(attachments) : null);
 
   ensureMemoryRow(sessionId, userId);
 
@@ -320,7 +321,7 @@ export function saveMessage(sessionId, userId, role, content, intent = null, req
 export function getSessionMessages(sessionId, userId, limit = 20) {
   return db
     .prepare(`
-      SELECT id, role, content, intent, created_at, request_id, file_diffs
+      SELECT id, role, content, intent, created_at, request_id, file_diffs, attachments
       FROM messages
       WHERE session_id = ? AND user_id = ?
       ORDER BY id DESC
