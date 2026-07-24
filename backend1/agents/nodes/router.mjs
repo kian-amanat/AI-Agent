@@ -14,7 +14,16 @@ const GREETING_RE = /^(hi|hello|hey|سلام|مرحبا|hola|bonjour|ciao|yo|sup
 const NO_ACTION_RE = /\b(just\s+(tell|explain|describe|show)\s+me|without\s+(any\s+)?(action|edit|editing|change|changing|modif\w+)|don'?t\s+(edit|change|modify|touch|write|create)|no\s+(changes?|action|edits?|code\s+changes?))\b/i;
 
 // Unmistakable change requests — no LLM call needed.
-const OBVIOUS_AGENT_RE = /\b(fix|add|create|make|build|implement|refactor|rewrite|update|change|remove|delete|rename|move|improve|redesign|restyle|animate|install|run\s+tests?|typecheck|debug)\b.*\b(page|file|component|section|button|navbar|footer|header|hero|landing|route|api|function|bug|error|test|package|animation|style|css|layout)\b/is;
+const AGENT_NOUNS = "page|file|component|section|button|navbar|footer|header|hero|landing|route|api|function|bug|error|test|package|animation|style|css|layout|form|feedback|option|feature|modal|dialog|toast|input|field|menu|sidebar|card|table|list|route|endpoint|feature";
+const OBVIOUS_AGENT_RE = new RegExp(`\\b(fix|add|create|make|build|implement|refactor|rewrite|update|change|remove|delete|rename|move|improve|redesign|restyle|animate|install|apply|run\\s+tests?|typecheck|debug)\\b.*\\b(${AGENT_NOUNS})\\b`, "is");
+// "i want / need / would like … <a feature to build>" — a request to build, even
+// without an explicit build verb ("i want /profile to have a feedback form").
+const WANT_FEATURE_RE = new RegExp(`\\b(want|need|wanna|would\\s+like|let'?s|can\\s+you|could\\s+you|please)\\b[^]*\\b(${AGENT_NOUNS}|added?|working|to\\s+have|so\\s+that)\\b`, "is");
+
+// A bare go-ahead after the assistant proposed a change — "apply them yourself",
+// "do it", "go ahead", "yes proceed". No build noun/verb needed; this is a
+// continuation of an existing build conversation, not a new topic.
+const CONFIRM_ACTION_RE = /\b(apply\s+(it|that|them|this|the\s+\w+)\b|do\s+it(\s+yourself)?\b|go\s+ahead\b|please\s+(do|proceed|implement|apply)\b|just\s+do\s+it\b|make\s+the\s+change|implement\s+it\b|^(yes|yep|yeah|sure|ok|okay)[,.]?\s*(proceed|go\s+ahead|do\s+it)\b|^proceed\b)/i;
 
 // Unmistakable questions with no edit signal.
 const OBVIOUS_QUESTION_RE = /^(what|how|why|when|where|who|which|can you explain|could you explain|explain|describe|tell me about|walk me through|summarize|summarise)\b[^]*\?\s*$/i;
@@ -59,6 +68,13 @@ export async function routerNode(state) {
     intent = "agent";
   } else if (OBVIOUS_QUESTION_RE.test(cleanMsg)) {
     intent = "answer";
+  } else if (WANT_FEATURE_RE.test(cleanMsg)) {
+    // "i want /profile to have a feedback form" — a build request phrased as a wish.
+    intent = "agent";
+  } else if (CONFIRM_ACTION_RE.test(cleanMsg)) {
+    // "apply them yourself" / "do it" / "go ahead" — a go-ahead on a change the
+    // assistant just proposed. Never treat this as small talk to answer.
+    intent = "agent";
   } else if (rememberedTargetFile && /\b(that\s+(page|file|component)|on\s+it|to\s+it|in\s+it|it\s+again)\b/i.test(cleanMsg)) {
     intent = "agent";
   } else {

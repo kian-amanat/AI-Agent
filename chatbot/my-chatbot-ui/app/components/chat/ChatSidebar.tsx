@@ -312,7 +312,7 @@ export default function ChatSidebar({
 
   return (
     <motion.aside
-      animate={{ width: isSidebarCollapsed ? 72 : 310 }}
+      animate={{ width: isSidebarCollapsed ? 72 : 295 }}
       transition={{ type: "spring", stiffness: 280, damping: 28 }}
       onMouseEnter={() => setIsSidebarHovered(true)}
       onMouseLeave={() => setIsSidebarHovered(false)}

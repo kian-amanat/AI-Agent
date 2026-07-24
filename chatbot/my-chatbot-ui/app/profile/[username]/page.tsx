@@ -23,6 +23,10 @@ import {
   Sparkles,
   Flame,
   Target,
+  MessageSquare,
+  Star,
+  X,
+  CheckCircle2,
 } from "lucide-react";
 
 /* ── Reduced-motion hook (shared with landing2) ── */
@@ -194,10 +198,144 @@ function ActivityChart() {
   );
 }
 
+/* ── Feedback modal ── */
+function FeedbackModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+  const [rating, setRating] = useState(0);
+  const [hoverRating, setHoverRating] = useState(0);
+  const [comment, setComment] = useState("");
+  const [status, setStatus] = useState<"idle" | "submitting" | "success">("idle");
+
+  const handleClose = () => {
+    onClose();
+    // Let the exit animation play before resetting the form.
+    setTimeout(() => {
+      setRating(0);
+      setHoverRating(0);
+      setComment("");
+      setStatus("idle");
+    }, 200);
+  };
+
+  const handleSubmit = async () => {
+    if (rating === 0 || status === "submitting") return;
+    setStatus("submitting");
+    await new Promise((resolve) => setTimeout(resolve, 700));
+    setStatus("success");
+  };
+
+  return (
+    <AnimatePresence>
+      {open && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+          onClick={handleClose}
+        >
+          <motion.div
+            initial={{ opacity: 0, y: 16, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 12, scale: 0.97 }}
+            transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+            onClick={(e) => e.stopPropagation()}
+            className="relative w-full max-w-md overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0c0c0f] p-6 shadow-[0_30px_80px_rgba(0,0,0,0.5)]"
+          >
+            <button
+              onClick={handleClose}
+              aria-label="Close feedback dialog"
+              className="absolute right-4 top-4 rounded-lg p-1.5 text-white/30 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+            >
+              <X className="h-4 w-4" />
+            </button>
+
+            {status === "success" ? (
+              <motion.div
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex flex-col items-center py-6 text-center"
+              >
+                <motion.div
+                  initial={{ scale: 0.6, opacity: 0 }}
+                  animate={{ scale: 1, opacity: 1 }}
+                  transition={{ type: "spring", stiffness: 260, damping: 18, delay: 0.05 }}
+                  className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-[#22c55e]/10 text-[#22c55e]"
+                >
+                  <CheckCircle2 className="h-7 w-7" />
+                </motion.div>
+                <h3 className="text-lg font-semibold text-white">Thanks for your feedback!</h3>
+                <p className="mt-1.5 max-w-xs text-[13px] leading-relaxed text-white/40">
+                  We really appreciate you taking the time — it helps us make Kodo better.
+                </p>
+                <button
+                  onClick={handleClose}
+                  className="mt-6 rounded-xl border border-white/[0.08] bg-white/[0.04] px-5 py-2.5 text-[13px] font-medium text-white/70 transition-colors hover:border-white/[0.14] hover:text-white"
+                >
+                  Close
+                </button>
+              </motion.div>
+            ) : (
+              <div>
+                <h3 className="text-lg font-semibold text-white">Share your feedback</h3>
+                <p className="mt-1 text-[13px] text-white/40">How&apos;s your experience with Kodo been so far?</p>
+
+                <div className="mt-5 flex justify-center gap-1.5">
+                  {[1, 2, 3, 4, 5].map((star) => (
+                    <button
+                      key={star}
+                      type="button"
+                      aria-label={`Rate ${star} star${star > 1 ? "s" : ""}`}
+                      onClick={() => setRating(star)}
+                      onMouseEnter={() => setHoverRating(star)}
+                      onMouseLeave={() => setHoverRating(0)}
+                      className="p-1 transition-transform hover:scale-110"
+                    >
+                      <Star
+                        className={`h-7 w-7 transition-colors ${
+                          star <= (hoverRating || rating)
+                            ? "fill-[#ff8a3d] text-[#ff8a3d]"
+                            : "text-white/15"
+                        }`}
+                      />
+                    </button>
+                  ))}
+                </div>
+
+                <textarea
+                  value={comment}
+                  onChange={(e) => setComment(e.target.value)}
+                  rows={3}
+                  placeholder="Anything you'd like us to know? (optional)"
+                  className="mt-5 w-full resize-none rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-[13px] text-white/80 placeholder-white/25 outline-none transition-colors focus:border-[#ff8a3d]/40"
+                />
+
+                <motion.button
+                  whileHover={rating ? { y: -1 } : {}}
+                  whileTap={rating ? { scale: 0.98 } : {}}
+                  onClick={handleSubmit}
+                  disabled={rating === 0 || status === "submitting"}
+                  className={`mt-4 w-full rounded-xl px-4 py-3 text-[13px] font-semibold transition-all ${
+                    rating === 0 || status === "submitting"
+                      ? "cursor-not-allowed bg-white/[0.04] text-white/25"
+                      : "bg-gradient-to-r from-[#ff5e4d] to-[#ff8a3d] text-white shadow-[0_10px_30px_rgba(255,138,61,0.25)] hover:shadow-[0_10px_36px_rgba(255,138,61,0.35)]"
+                  }`}
+                >
+                  {status === "submitting" ? "Sending..." : "Send feedback"}
+                </motion.button>
+              </div>
+            )}
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
 /* ── Profile page ── */
 export default function UserProfilePage({ params }: { params: Promise<{ username: string }> }) {
   const [resolved, setResolved] = useState<{ username: string } | null>(null);
   const [hoveredBack, setHoveredBack] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const prefersReduced = usePrefersReducedMotion();
 
   useEffect(() => {
@@ -236,6 +374,19 @@ export default function UserProfilePage({ params }: { params: Promise<{ username
               Back to Chat
             </motion.button>
           </Link>
+        </motion.div>
+
+        {/* ── Feedback trigger ── */}
+        <motion.div variants={item} initial="hidden" animate="visible" className="fixed top-6 right-6 z-50">
+          <motion.button
+            whileHover={{ scale: 1.04 }}
+            whileTap={{ scale: 0.96 }}
+            onClick={() => setFeedbackOpen(true)}
+            className="flex items-center gap-2 rounded-xl border border-white/[0.08] bg-white/[0.04] px-4 py-2.5 text-[13px] text-white/60 backdrop-blur-xl transition-all duration-200 hover:border-white/[0.12] hover:text-white/80"
+          >
+            <MessageSquare className="h-4 w-4" />
+            Feedback
+          </motion.button>
         </motion.div>
 
         {/* ── Hero section ── */}
@@ -378,6 +529,8 @@ export default function UserProfilePage({ params }: { params: Promise<{ username
           </div>
         </section>
       </div>
+
+      <FeedbackModal open={feedbackOpen} onClose={() => setFeedbackOpen(false)} />
     </div>
   );
 }
