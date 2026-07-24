@@ -24,7 +24,6 @@ import {
   Flame,
   Target,
   MessageSquare,
-  Star,
   X,
   CheckCircle2,
 } from "lucide-react";
@@ -199,29 +198,63 @@ function ActivityChart() {
 }
 
 /* ── Feedback modal ── */
+// The dashboard is built around a numeric 1–5 rating (stars, distribution,
+// filters), so the sentiment selector maps onto that scale when submitted.
+const SENTIMENT_TO_RATING: Record<"positive" | "neutral" | "negative", number> = {
+  positive: 5,
+  neutral: 3,
+  negative: 1,
+};
+
 function FeedbackModal({ open, onClose }: { open: boolean; onClose: () => void }) {
-  const [rating, setRating] = useState(0);
-  const [hoverRating, setHoverRating] = useState(0);
+  const [sentiment, setSentiment] = useState<"" | "positive" | "neutral" | "negative">("");
   const [comment, setComment] = useState("");
   const [status, setStatus] = useState<"idle" | "submitting" | "success">("idle");
+  const [error, setError] = useState("");
 
   const handleClose = () => {
     onClose();
-    // Let the exit animation play before resetting the form.
     setTimeout(() => {
-      setRating(0);
-      setHoverRating(0);
+      setSentiment("");
       setComment("");
       setStatus("idle");
-    }, 200);
+      setError("");
+    }, 300);
   };
 
   const handleSubmit = async () => {
-    if (rating === 0 || status === "submitting") return;
+    if (!sentiment || status === "submitting") return;
+    setError("");
     setStatus("submitting");
-    await new Promise((resolve) => setTimeout(resolve, 700));
-    setStatus("success");
+    try {
+      const res = await fetch("http://localhost:9000/api/feedback", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          rating: SENTIMENT_TO_RATING[sentiment],
+          comment: comment.trim() || null,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.ok) {
+        throw new Error(data?.error || "Failed to send feedback. Please try again.");
+      }
+      setStatus("success");
+    } catch (err) {
+      setStatus("idle");
+      setError(
+        err instanceof Error && err.message !== "Failed to fetch"
+          ? err.message
+          : "Couldn't reach the server. Please try again."
+      );
+    }
   };
+
+  const sentimentOptions = [
+    { key: "positive" as const, label: "Great", sublabel: "Loving it" },
+    { key: "neutral" as const, label: "Okay", sublabel: "It's fine" },
+    { key: "negative" as const, label: "Not great", sublabel: "Needs work" },
+  ];
 
   return (
     <AnimatePresence>
@@ -230,94 +263,147 @@ function FeedbackModal({ open, onClose }: { open: boolean; onClose: () => void }
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
-          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/60 backdrop-blur-sm px-4"
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-black/70 backdrop-blur-md px-4"
           onClick={handleClose}
         >
           <motion.div
-            initial={{ opacity: 0, y: 16, scale: 0.97 }}
+            initial={{ opacity: 0, y: 24, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 12, scale: 0.97 }}
-            transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+            exit={{ opacity: 0, y: 16, scale: 0.96 }}
+            transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
             onClick={(e) => e.stopPropagation()}
-            className="relative w-full max-w-md overflow-hidden rounded-2xl border border-white/[0.08] bg-[#0c0c0f] p-6 shadow-[0_30px_80px_rgba(0,0,0,0.5)]"
+            className="relative w-full max-w-sm overflow-hidden rounded-3xl border border-white/[0.06] bg-[#0c0c0f] shadow-[0_40px_100px_rgba(0,0,0,0.6)]"
           >
             <button
               onClick={handleClose}
               aria-label="Close feedback dialog"
-              className="absolute right-4 top-4 rounded-lg p-1.5 text-white/30 transition-colors hover:bg-white/[0.06] hover:text-white/70"
+              className="absolute right-4 top-4 z-10 flex h-7 w-7 items-center justify-center rounded-full bg-white/[0.06] text-white/40 transition-colors hover:bg-white/[0.1] hover:text-white/70"
             >
-              <X className="h-4 w-4" />
+              <X className="h-3.5 w-3.5" />
             </button>
 
             {status === "success" ? (
+              /* ── Apple-style thank you ── */
               <motion.div
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex flex-col items-center py-6 text-center"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.4, delay: 0.05 }}
+                className="flex flex-col items-center px-8 pb-9 pt-10 text-center"
               >
+                {/* Animated checkmark ring */}
                 <motion.div
-                  initial={{ scale: 0.6, opacity: 0 }}
+                  initial={{ scale: 0.5, opacity: 0 }}
                   animate={{ scale: 1, opacity: 1 }}
-                  transition={{ type: "spring", stiffness: 260, damping: 18, delay: 0.05 }}
-                  className="mb-4 flex h-14 w-14 items-center justify-center rounded-full bg-[#22c55e]/10 text-[#22c55e]"
+                  transition={{ type: "spring", stiffness: 300, damping: 25, delay: 0.1 }}
+                  className="mb-6 flex h-16 w-16 items-center justify-center rounded-full"
+                  style={{
+                    background: "radial-gradient(circle, rgba(255,255,255,0.08) 0%, transparent 70%)",
+                  }}
                 >
-                  <CheckCircle2 className="h-7 w-7" />
+                  <motion.div
+                    initial={{ pathLength: 0, opacity: 0 }}
+                    animate={{ pathLength: 1, opacity: 1 }}
+                    transition={{ duration: 0.6, ease: [0.22, 1, 0.36, 1], delay: 0.25 }}
+                  >
+                    <CheckCircle2 className="h-8 w-8 text-white/80" />
+                  </motion.div>
                 </motion.div>
-                <h3 className="text-lg font-semibold text-white">Thanks for your feedback!</h3>
-                <p className="mt-1.5 max-w-xs text-[13px] leading-relaxed text-white/40">
-                  We really appreciate you taking the time — it helps us make Kodo better.
-                </p>
-                <button
-                  onClick={handleClose}
-                  className="mt-6 rounded-xl border border-white/[0.08] bg-white/[0.04] px-5 py-2.5 text-[13px] font-medium text-white/70 transition-colors hover:border-white/[0.14] hover:text-white"
+
+                <motion.h3
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.35, delay: 0.2 }}
+                  className="text-[17px] font-semibold tracking-tight text-white"
                 >
-                  Close
-                </button>
+                  Thank you
+                </motion.h3>
+
+                <motion.p
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.35, delay: 0.3 }}
+                  className="mt-1.5 max-w-[240px] text-[13px] leading-relaxed text-white/35"
+                >
+                  Your feedback helps us improve. We&apos;ve received your thoughts.
+                </motion.p>
+
+                <motion.button
+                  initial={{ opacity: 0, y: 6 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ duration: 0.35, delay: 0.4 }}
+                  onClick={handleClose}
+                  className="mt-7 w-full rounded-xl bg-white/10 py-2.5 text-[13px] font-medium text-white/80 transition-all hover:bg-white/[0.14] hover:text-white active:scale-[0.98]"
+                >
+                  Done
+                </motion.button>
               </motion.div>
             ) : (
-              <div>
-                <h3 className="text-lg font-semibold text-white">Share your feedback</h3>
-                <p className="mt-1 text-[13px] text-white/40">How&apos;s your experience with Kodo been so far?</p>
+              /* ── Feedback form ── */
+              <div className="px-7 pb-7 pt-8">
+                <h3 className="text-[17px] font-semibold tracking-tight text-white">
+                  How was your experience?
+                </h3>
+                <p className="mt-1 text-[13px] text-white/35">
+                  Tap an option below — it only takes a second.
+                </p>
 
-                <div className="mt-5 flex justify-center gap-1.5">
-                  {[1, 2, 3, 4, 5].map((star) => (
-                    <button
-                      key={star}
+                {/* Minimal sentiment selector — no stars */}
+                <div className="mt-5 grid grid-cols-3 gap-2">
+                  {sentimentOptions.map((opt) => (
+                    <motion.button
+                      key={opt.key}
                       type="button"
-                      aria-label={`Rate ${star} star${star > 1 ? "s" : ""}`}
-                      onClick={() => setRating(star)}
-                      onMouseEnter={() => setHoverRating(star)}
-                      onMouseLeave={() => setHoverRating(0)}
-                      className="p-1 transition-transform hover:scale-110"
+                      whileHover={{ y: -1 }}
+                      whileTap={{ scale: 0.97 }}
+                      onClick={() => setSentiment(opt.key)}
+                      className={`flex flex-col items-center justify-center rounded-2xl border py-3.5 transition-all ${
+                        sentiment === opt.key
+                          ? "border-white/[0.15] bg-white/[0.07]"
+                          : "border-white/[0.06] bg-white/[0.02] hover:border-white/[0.1] hover:bg-white/[0.04]"
+                      }`}
                     >
-                      <Star
-                        className={`h-7 w-7 transition-colors ${
-                          star <= (hoverRating || rating)
-                            ? "fill-[#ff8a3d] text-[#ff8a3d]"
-                            : "text-white/15"
+                      <span
+                        className={`text-[13px] font-medium transition-colors ${
+                          sentiment === opt.key
+                            ? "text-white"
+                            : "text-white/50"
                         }`}
-                      />
-                    </button>
+                      >
+                        {opt.label}
+                      </span>
+                      <span className="mt-0.5 text-[11px] text-white/25">
+                        {opt.sublabel}
+                      </span>
+                    </motion.button>
                   ))}
                 </div>
 
+                {/* Optional comment */}
                 <textarea
                   value={comment}
                   onChange={(e) => setComment(e.target.value)}
                   rows={3}
-                  placeholder="Anything you'd like us to know? (optional)"
-                  className="mt-5 w-full resize-none rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-[13px] text-white/80 placeholder-white/25 outline-none transition-colors focus:border-[#ff8a3d]/40"
+                  placeholder="Anything else you'd like to share? (optional)"
+                  className="mt-4 w-full resize-none rounded-xl border border-white/[0.06] bg-white/[0.02] px-4 py-3 text-[13px] text-white/75 placeholder-white/20 outline-none transition-colors focus:border-white/[0.12]"
                 />
 
+                {/* Error */}
+                {error && (
+                  <p className="mt-3 text-center text-[12px] text-red-400/80">
+                    {error}
+                  </p>
+                )}
+
+                {/* Submit */}
                 <motion.button
-                  whileHover={rating ? { y: -1 } : {}}
-                  whileTap={rating ? { scale: 0.98 } : {}}
+                  whileHover={sentiment ? { y: -1 } : {}}
+                  whileTap={sentiment ? { scale: 0.98 } : {}}
                   onClick={handleSubmit}
-                  disabled={rating === 0 || status === "submitting"}
-                  className={`mt-4 w-full rounded-xl px-4 py-3 text-[13px] font-semibold transition-all ${
-                    rating === 0 || status === "submitting"
-                      ? "cursor-not-allowed bg-white/[0.04] text-white/25"
-                      : "bg-gradient-to-r from-[#ff5e4d] to-[#ff8a3d] text-white shadow-[0_10px_30px_rgba(255,138,61,0.25)] hover:shadow-[0_10px_36px_rgba(255,138,61,0.35)]"
+                  disabled={!sentiment || status === "submitting"}
+                  className={`mt-4 w-full rounded-xl py-3 text-[13px] font-semibold transition-all ${
+                    !sentiment || status === "submitting"
+                      ? "cursor-not-allowed bg-white/[0.04] text-white/20"
+                      : "bg-white/10 text-white/85 transition-all hover:bg-white/[0.14] hover:text-white active:scale-[0.98]"
                   }`}
                 >
                   {status === "submitting" ? "Sending..." : "Send feedback"}

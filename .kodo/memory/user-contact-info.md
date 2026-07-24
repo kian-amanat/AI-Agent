@@ -1,10 +1,11 @@
 ---
 name: user-contact-info
-description: User's email address for notifications
+description: User's email address for notifications and admin auth
 metadata:
   type: user
-updated: 2026-07-24T10:12:24.952Z
+updated: 2026-07-24T17:31:56.596Z
 ---
 
-- **Email**: kian.amanat.9@gmail.com
-- **Note**: User previously shared a password in plain text, which was flagged as a security risk. Future interactions should remind the user to use environment variables for secrets.
+- **Email**: `kian.amanat.9@gmail.com`
+- **Role**: Admin user for the Kodo application.
+- **Usage**: Used for admin authentication in the feedback dashboard and potentially for notifications.

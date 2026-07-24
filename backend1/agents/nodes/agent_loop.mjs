@@ -805,10 +805,60 @@ export const WEB_TOOLS = AGENT_TOOLS.filter((t) => t.function.name === "web_sear
 
 const AGENT_TOOL_NAMES = new Set(AGENT_TOOLS.map((t) => t.function.name));
 
-// Weak models sometimes emit malformed tool calls — no name, empty args, or an
-// unknown tool. If those enter the conversation, the provider rejects the NEXT
-// request (e.g. gapgpt "400 Extra data"). Drop the junk before it's stored, and
-// ensure every kept call has an id so the assistant/tool pairing stays valid.
+// Parse and return the FIRST complete JSON object/array at the front of a
+// string, ignoring any trailing "extra data". String-aware brace matching so
+// braces inside string literals don't throw off the depth count. Returns
+// undefined if there's no complete value to salvage.
+function firstJSONValue(s) {
+  const start = s.search(/[{[]/);
+  if (start === -1) return undefined;
+  const open = s[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0, inStr = false, esc = false;
+  for (let i = start; i < s.length; i++) {
+    const c = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === "\\") esc = true;
+      else if (c === '"') inStr = false;
+    } else if (c === '"') inStr = true;
+    else if (c === open) depth++;
+    else if (c === close && --depth === 0) {
+      try { return JSON.parse(s.slice(start, i + 1)); } catch { return undefined; }
+    }
+  }
+  return undefined;
+}
+
+// Canonicalize a tool call's `arguments` into a clean JSON string. Weak/streamed
+// providers sometimes emit valid JSON followed by trailing junk (`{"a":1}{}` or
+// `{...}\n\n`) or non-JSON entirely. JSON.parse tolerates that at execution
+// (we catch and default to {}), but the RAW string stays on the assistant
+// message — and re-sending it makes strict gateways reject the whole NEXT
+// request ("400 Extra data: line 1 column N"), which kills the loop and forces
+// a no-tools code-dump fallback. Normalizing here keeps the poison out of the
+// conversation so the loop keeps editing files.
+export function normalizeArgumentsJSON(raw) {
+  if (raw == null) return "{}";
+  if (typeof raw !== "string") {
+    try { return JSON.stringify(raw); } catch { return "{}"; }
+  }
+  const trimmed = raw.trim();
+  if (!trimmed) return "{}";
+  try {
+    return JSON.stringify(JSON.parse(trimmed));   // already clean → re-canonicalize
+  } catch {
+    const salvaged = firstJSONValue(trimmed);     // drop trailing "extra data"
+    return salvaged !== undefined ? JSON.stringify(salvaged) : "{}";
+  }
+}
+
+// Weak models sometimes emit malformed tool calls — no name, an unknown tool, or
+// an `arguments` string that is valid JSON plus trailing junk. If those enter
+// the conversation, the provider rejects the NEXT request (e.g. gapgpt "400
+// Extra data"), killing the loop before any file is edited. Drop calls with a
+// bad name, canonicalize every kept call's arguments to clean JSON, and ensure
+// each has an id so the assistant/tool pairing stays valid.
 function sanitizeToolCalls(message) {
   if (!Array.isArray(message?.tool_calls)) return message;
   const cleaned = message.tool_calls
@@ -821,7 +871,7 @@ function sanitizeToolCalls(message) {
       type: "function",
       function: {
         name: tc.function.name,
-        arguments: typeof tc.function.arguments === "string" ? tc.function.arguments : JSON.stringify(tc.function.arguments ?? {}),
+        arguments: normalizeArgumentsJSON(tc.function.arguments),
       },
     }));
   if (cleaned.length) message.tool_calls = cleaned;
