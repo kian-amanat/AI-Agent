@@ -1,7 +1,7 @@
 import React from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { RotateCcw, Loader2, Check, Copy } from "lucide-react";
+import { RotateCcw, Loader2, Check } from "lucide-react";
 import CodeBlock from "./CodeBlock";
 import FileDiffView from "./FileDiffView";
 import type { FileDiff } from "../../lib/api";
@@ -43,7 +43,7 @@ const markdownComponents: Components = {
   h6: ({ children }) => <h6 className="mb-1 mt-2 text-sm font-semibold text-white/80 first:mt-0">{children}</h6>,
 
   p: ({ children }) => (
-    <p className="whitespace-pre-wrap text-[15px] leading-7 text-white/84 [&:not(:first-child)]:mt-3">
+    <p className="whitespace-pre-wrap text-[14px] leading-6 text-white/84 [&:not(:first-child)]:mt-3">
       {children}
     </p>
   ),
@@ -74,7 +74,7 @@ const markdownComponents: Components = {
     <ol className="my-2 list-decimal space-y-1.5 pl-5 marker:text-white/42 marker:font-medium">{children}</ol>
   ),
   li: ({ children }) => (
-    <li className="text-[15px] leading-7 text-white/84 [&_p]:m-0 [&_p]:inline">{children}</li>
+    <li className="text-[14px] leading-6 text-white/84 [&_p]:m-0 [&_p]:inline">{children}</li>
   ),
 
   hr: () => <div className="my-4 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent" />,
@@ -141,7 +141,7 @@ type AssistantMessageProps = {
   timestamp?: string;
 };
 
-export default function AssistantMessage({
+function AssistantMessage({
   content,
   metadata,
   onUndoClick,
@@ -233,36 +233,12 @@ export default function AssistantMessage({
         </div>
       )}
 
-      {/* Copy button */}
-      <button
-        type="button"
-        onClick={() => {
-          navigator.clipboard.writeText(content).then(() => {
-            setCopied(true);
-            setTimeout(() => setCopied(false), 2000);
-          });
-        }}
-        className={[
-          "inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-medium transition-all duration-300 ease-out",
-          copied
-            ? "border border-emerald-400/80 bg-emerald-400/10 text-emerald-50 shadow-[0_0_18px_rgba(16,185,129,0.25)]"
-            : "border border-white/14 bg-white/[0.02] text-white/80 hover:border-white/26 hover:bg-white/[0.06]",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-      >
-        {copied ? (
-          <>
-            <Check className="h-3.5 w-3.5" />
-            <span>Copied</span>
-          </>
-        ) : (
-          <>
-            <Copy className="h-3.5 w-3.5" />
-            <span>Copy message</span>
-          </>
-        )}
-      </button>
     </div>
   );
 }
+
+// Memoized: without this, every AssistantMessage re-parses its markdown on every
+// parent render (i.e. on every streamed chunk of the ACTIVE message), which is
+// what makes a long chat lag. With memo, only the message whose props actually
+// changed re-renders.
+export default React.memo(AssistantMessage);

@@ -18,7 +18,7 @@
 
 import { AIMessage } from "@langchain/core/messages";
 import { chatWithTools } from "../../services/agentChat.mjs";
-import { WEB_TOOLS, webSearch, fetchUrl, resolveCreds, looksTimeSensitive, WEB_SEARCH_DIRECTIVE } from "./agent_loop.mjs";
+import { WEB_TOOLS, webSearch, fetchUrl, resolveCreds, looksTimeSensitive, webSearchDirective, currentDateLine } from "./agent_loop.mjs";
 import {
   loadRelevantTopics,
   deleteMemoryTopic,
@@ -184,7 +184,7 @@ export async function answerNode(state) {
     // Weak models answer stale facts from memory instead of searching — a
     // forceful per-request directive gets far better compliance than the
     // system prompt alone.
-    looksTimeSensitive(cleanUserMessage) ? WEB_SEARCH_DIRECTIVE : "",
+    looksTimeSensitive(cleanUserMessage) ? webSearchDirective() : "",
   ]
     .filter(Boolean)
     .join("\n\n");
@@ -236,7 +236,7 @@ export async function answerNode(state) {
 
       const { message } = await chatWithTools({
         creds,
-        system: SYSTEM_PROMPT,
+        system: `${SYSTEM_PROMPT}\n\n${currentDateLine()} Use it whenever "today / now / latest / recent" matters — your training data is older than this.`,
         messages: conversation,
         tools: WEB_TOOLS,
         maxTokens: 1400,

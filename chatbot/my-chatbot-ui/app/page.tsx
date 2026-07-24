@@ -4,7 +4,7 @@ import React, { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { v4 as uuidv4 } from "uuid";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Bot, Copy, Check, UserIcon, FileText, File as FileIcon } from "lucide-react";
+import { Copy, Check, FileText, File as FileIcon } from "lucide-react";
 import KeyboardArrowDownRoundedIcon from "@mui/icons-material/KeyboardArrowDownRounded";
 import { useAgentPipeline } from "./hooks/useAgentPipeline";
 import { useThinkingSteps } from "./hooks/useThinkingSteps";
@@ -946,7 +946,6 @@ export default function MinimalChatComponent() {
                       </motion.div>
                     ) : (
                       <motion.div
-                        layout
                         initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}
                         transition={{ duration: 0.3, ease: "easeOut" }}
                         className="space-y-5 pb-8"
@@ -967,21 +966,15 @@ export default function MinimalChatComponent() {
                             return (
                               <motion.div
                                 key={m.id}
-                                layout
-                                initial={{ opacity: 0, y: 14, scale: 0.985 }}
-                                animate={{ opacity: 1, y: 0,  scale: 1 }}
-                                exit={{ opacity: 0,   y: -8,  scale: 0.99 }}
-                                transition={{ type: "spring", stiffness: 240, damping: 24 }}
+                                initial={{ opacity: 0, y: 10 }}
+                                animate={{ opacity: 1, y: 0 }}
+                                transition={{ duration: 0.22, ease: "easeOut" }}
                                 className={`flex w-full ${m.role === "user" ? "justify-end" : "justify-start"}`}
                               >
-                                <div className="group max-w-[min(92%,48rem)]">
+                                <div className={`group ${m.role === "user" ? "max-w-[85%] md:max-w-[34rem]" : "w-full"}`}>
                                   {m.role === "user" ? (
                                     <>
-                                      <div className="rounded-[24px] border border-[#ff8a3d]/18 bg-gradient-to-br from-[#ff8a3d]/10 via-[#ff5e4d]/8 to-[#ff2d2d]/6 px-4 py-2 shadow-sm md:px-5 md:py-2.5 text-white">
-                                        <div className="mb-2 flex items-center gap-2 text-xs text-white/32">
-                                          <UserIcon className="h-4 w-4 text-[#ff8a3d]" />
-                                          <span>You</span>
-                                        </div>
+                                      <div className="rounded-[20px] border border-white/8 bg-[#1e1e1e] px-3 py-1.5 shadow-sm md:px-4 md:py-2 text-white">
                                         {/* Uploaded attachments shown in the message */}
                                         {m.metadata?.attachments && m.metadata.attachments.length > 0 && (
                                           <div className="mb-2 flex flex-wrap gap-2">
@@ -1005,7 +998,7 @@ export default function MinimalChatComponent() {
                                             ))}
                                           </div>
                                         )}
-                                        {m.content && <div className="whitespace-pre-wrap text-[15px] leading-7 text-white/92">{m.content}</div>}
+                                        {m.content && <div className="whitespace-pre-wrap text-[14px] leading-6 text-white/92">{m.content}</div>}
                                       </div>
                                       <div className="mt-2 flex items-center justify-end gap-2 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
                                         <motion.button
@@ -1019,11 +1012,6 @@ export default function MinimalChatComponent() {
                                     </>
                                   ) : (
                                     <div className="px-0 py-0 text-white">
-                                      <div className="mb-2 flex items-center gap-2 text-xs text-white/30">
-                                        <Bot className="h-4 w-4 text-[#ff8a3d]" />
-                                        <span>Assistant</span>
-                                      </div>
-
                                       {showTrace && (
                                         <div className="mb-4">
                                           <ThinkingTrace steps={trace.steps} log={trace.log} isActive={trace.isActive} startedAt={trace.startedAt} />
