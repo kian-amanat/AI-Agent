@@ -12,5 +12,7 @@
 - [feedback-copy-button-ui](feedback-copy-button-ui.md) — UI preference: remove static copy button entirely
 - [feedback-scroll-to-bottom-ui](feedback-scroll-to-bottom-ui.md) — UI preference: scroll-to-bottom button centered above composer
 - [project-feedback-feature](project-feedback-feature.md) — Feedback feature implementation status and backend API
-- [user-contact-info](user-contact-info.md) — User's email address for notifications
+- [user-contact-info](user-contact-info.md) — User's email address for notifications and admin auth
 - [feedback-chat-sidebar-width](feedback-chat-sidebar-width.md) — UI preference: ChatSidebar expanded width set to 260px
+- [feedback-modal-design-preference](feedback-modal-design-preference.md) — UI preference: Professional Apple-style feedback modal
+- [project-feedback-admin-auth](project-feedback-admin-auth.md) — Admin-only feedback route with hardcoded email auth

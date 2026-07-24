@@ -11,7 +11,7 @@ import path from "path";
 import fs from "fs/promises";
 import os from "os";
 
-import { executeTool, validateBashCommand, globToRegex, walkWorkspace } from "../agents/nodes/agent_loop.mjs";
+import { executeTool, validateBashCommand, globToRegex, walkWorkspace, normalizeArgumentsJSON } from "../agents/nodes/agent_loop.mjs";
 
 let passed = 0;
 let failed = 0;
@@ -209,6 +209,46 @@ await test("stores normalized todos", async () => {
   assert.strictEqual(r.success, true);
   assert.strictEqual(ctx.todosRef.current.length, 3);
   assert.strictEqual(ctx.todosRef.current[2].status, "pending");
+});
+
+// ── tool-call argument normalization ──────────────────────────────────────────
+// Regression: a weak model emitting valid-JSON-plus-trailing-junk in a tool
+// call's `arguments` string used to poison the NEXT request, making strict
+// gateways return "400 Extra data" — which killed the loop and forced a
+// no-tools code dump instead of actually editing files.
+
+console.log("\n📦 normalizeArgumentsJSON");
+
+await test("passes clean JSON through (re-canonicalized)", () => {
+  assert.strictEqual(normalizeArgumentsJSON('{"topic":"x"}'), '{"topic":"x"}');
+  assert.strictEqual(normalizeArgumentsJSON('{ "topic": "x" }'), '{"topic":"x"}');
+});
+
+await test("empty / missing args become {}", () => {
+  assert.strictEqual(normalizeArgumentsJSON(""), "{}");
+  assert.strictEqual(normalizeArgumentsJSON("   "), "{}");
+  assert.strictEqual(normalizeArgumentsJSON(null), "{}");
+  assert.strictEqual(normalizeArgumentsJSON(undefined), "{}");
+});
+
+await test("salvages valid JSON + trailing junk (the 400 Extra data bug)", () => {
+  assert.strictEqual(normalizeArgumentsJSON('{}garbage'), "{}");
+  assert.strictEqual(normalizeArgumentsJSON('{"topic":"x"}{}'), '{"topic":"x"}');
+  assert.strictEqual(normalizeArgumentsJSON('{"topic":"x"}\n\n'), '{"topic":"x"}');
+  assert.strictEqual(normalizeArgumentsJSON('{"a":1}{"b":2}'), '{"a":1}');
+});
+
+await test("brace-matching ignores braces inside strings", () => {
+  assert.strictEqual(normalizeArgumentsJSON('{"code":"if (x) {}"}extra'), '{"code":"if (x) {}"}');
+});
+
+await test("unparseable garbage falls back to {}", () => {
+  assert.strictEqual(normalizeArgumentsJSON("not json at all"), "{}");
+  assert.strictEqual(normalizeArgumentsJSON("{"), "{}");
+});
+
+await test("accepts an object (non-string) argument", () => {
+  assert.strictEqual(normalizeArgumentsJSON({ topic: "x" }), '{"topic":"x"}');
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────
