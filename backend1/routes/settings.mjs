@@ -1,13 +1,8 @@
-import fs from "fs/promises";
-import path from "path";
 import { listProviders, getModel } from "../config/models.mjs";
 import { getCapabilities } from "../services/modelRouter.mjs";
 import { chatWithTools } from "../services/agentChat.mjs";
-import db, { getUserSettings, saveUserSettings, userHasSettings } from "../db.mjs";
-
-// Legacy single-file store. Still read ONCE per user to seed their per-user
-// row (so existing installs don't lose their config on upgrade), never written.
-const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
+import db, { saveUserSettings } from "../db.mjs";
+import { loadUserSettings } from "../services/userSettings.service.mjs";
 
 // Resolve the authenticated user from the Bearer token (same scheme the agent
 // route uses). Settings are now per-user, so every settings request needs one.
@@ -29,33 +24,7 @@ let gapgptCacheTime = 0;
 const CACHE_TTL = 30 * 60 * 1000; // 30 minutes
 
 // ── Settings helpers ────────────────────────────────────────────────────────
-// Read the legacy global file (used only to seed a user's first per-user row).
-async function loadGlobalSettingsFile() {
-  try {
-    const raw = await fs.readFile(SETTINGS_PATH, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
-
-// Per-user settings load. On a user's very first read, if they have no row yet
-// but the legacy global file exists, migrate it into their row once so existing
-// single-user installs keep working after the multi-user upgrade.
-async function loadSettings(userId) {
-  if (!userId) return null;
-  const existing = getUserSettings(userId);
-  if (existing) return existing;
-
-  if (!userHasSettings(userId)) {
-    const legacy = await loadGlobalSettingsFile();
-    if (legacy) {
-      saveUserSettings(userId, legacy);
-      return legacy;
-    }
-  }
-  return null;
-}
+const loadSettings = loadUserSettings;
 
 async function saveSettingsFile(userId, settings) {
   saveUserSettings(userId, settings);

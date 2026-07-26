@@ -364,8 +364,8 @@ export function sendMessage(
       });
 
       if (!res.ok) {
-        const data = await readJson<{ error?: string; details?: string }>(res);
-        throw new Error(data.details || data.error || `Request failed (${res.status})`);
+        const data = await readJson<{ error?: string; message?: string; details?: string }>(res);
+        throw new Error(data.message || data.details || data.error || `Request failed (${res.status})`);
       }
 
       await parseSSE(res, onEvent, onDone, onError, sessionId);
@@ -575,42 +575,92 @@ export async function testConnection(model: string, apiKey: string, baseUrl?: st
 
 export interface User { id: number; email: string; name: string; plan: string; created_at: string; }
 
-async function notifyExtension(token: string, sessionId: string): Promise<void> {
+// The workspace the extension handed off (see /connection?workspace=...),
+// staged in localStorage so it survives navigation to /login or /signup and
+// can be bound to the new session at creation time. Cleared once consumed so
+// it never leaks into a later, unrelated login on the same browser.
+const PENDING_WORKSPACE_PATH_KEY = "kodo_pending_workspace_path";
+const PENDING_WORKSPACE_NAME_KEY = "kodo_pending_workspace_name";
+const BOUND_WORKSPACE_PATH_KEY = "kodo_workspace_path";
+
+export function stagePendingWorkspace(workspacePath: string, workspaceName?: string): void {
+  if (typeof window === "undefined" || !workspacePath) return;
+  localStorage.setItem(PENDING_WORKSPACE_PATH_KEY, workspacePath);
+  localStorage.setItem(PENDING_WORKSPACE_NAME_KEY, workspaceName || workspacePath.split("/").filter(Boolean).pop() || workspacePath);
+}
+
+export function getPendingWorkspace(): { path: string; name: string } | null {
+  if (typeof window === "undefined") return null;
+  const path = localStorage.getItem(PENDING_WORKSPACE_PATH_KEY);
+  if (!path) return null;
+  return { path, name: localStorage.getItem(PENDING_WORKSPACE_NAME_KEY) || path };
+}
+
+function consumePendingWorkspace(): { path: string; name: string } | null {
+  const pending = getPendingWorkspace();
+  if (typeof window !== "undefined") {
+    localStorage.removeItem(PENDING_WORKSPACE_PATH_KEY);
+    localStorage.removeItem(PENDING_WORKSPACE_NAME_KEY);
+  }
+  return pending;
+}
+
+// Scoped handshake — see backend routes/auth.mjs. workspacePath is required:
+// without it the backend refuses (a handshake with no project scope is
+// exactly the bug that let a different file/project inherit someone else's
+// login).
+async function notifyExtension(token: string, sessionId: string, workspacePath?: string): Promise<void> {
+  if (!workspacePath) return;
   try {
     await fetch(`${AUTH_URL}/handshake`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ token, sessionId }),
+      body: JSON.stringify({ token, sessionId, workspacePath }),
     });
   } catch {}
 }
 
 export async function apiSignup(email: string, password: string, name: string) {
-  const res  = await fetch(`${AUTH_URL}/signup`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password, name }) });
+  const pending = consumePendingWorkspace();
+  const res  = await fetch(`${AUTH_URL}/signup`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, name, workspacePath: pending?.path, workspaceName: pending?.name }),
+  });
   const data = await readJson<{ ok: boolean; token?: string; sessionId?: string; user?: User; error?: string }>(res);
   if (!res.ok || !data.ok) throw new Error(data.error || "Signup failed");
   localStorage.setItem("kodo_token", data.token!);
   localStorage.setItem("kodo_session_id", data.sessionId!);
-  await notifyExtension(data.token!, data.sessionId!);
+  if (pending?.path) localStorage.setItem(BOUND_WORKSPACE_PATH_KEY, pending.path);
+  await notifyExtension(data.token!, data.sessionId!, pending?.path);
   return data;
 }
 
 export async function apiLogin(email: string, password: string) {
-  const res  = await fetch(`${AUTH_URL}/login`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ email, password }) });
+  const pending = consumePendingWorkspace();
+  const res  = await fetch(`${AUTH_URL}/login`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ email, password, workspacePath: pending?.path, workspaceName: pending?.name }),
+  });
   const data = await readJson<{ ok: boolean; token?: string; sessionId?: string; user?: User; error?: string }>(res);
   if (!res.ok || !data.ok) throw new Error(data.error || "Login failed");
   localStorage.setItem("kodo_token", data.token!);
   localStorage.setItem("kodo_session_id", data.sessionId!);
-  await notifyExtension(data.token!, data.sessionId!);
+  if (pending?.path) localStorage.setItem(BOUND_WORKSPACE_PATH_KEY, pending.path);
+  await notifyExtension(data.token!, data.sessionId!, pending?.path);
   return data;
 }
 
 export async function apiLogout(): Promise<void> {
   try {
+    const workspacePath = typeof window !== "undefined" ? localStorage.getItem(BOUND_WORKSPACE_PATH_KEY) : null;
     await fetch(`${AUTH_URL}/logout`, { method: "POST", headers: authHeaders() });
-    await fetch(`${AUTH_URL}/handshake`, { method: "DELETE" });
+    await fetch(`${AUTH_URL}/handshake`, {
+      method: "DELETE", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ workspacePath }),
+    });
   } catch {}
   localStorage.removeItem("kodo_token");
   localStorage.removeItem("kodo_session_id");
+  localStorage.removeItem(BOUND_WORKSPACE_PATH_KEY);
 }
 
 export async function apiMe(): Promise<User | null> {

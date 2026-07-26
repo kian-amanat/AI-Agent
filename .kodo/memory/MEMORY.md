@@ -16,3 +16,4 @@
 - [feedback-chat-sidebar-width](feedback-chat-sidebar-width.md) — UI preference: ChatSidebar expanded width set to 260px
 - [feedback-modal-design-preference](feedback-modal-design-preference.md) — UI preference: Professional Apple-style feedback modal
 - [project-feedback-admin-auth](project-feedback-admin-auth.md) — Admin-only feedback route with hardcoded email auth
+- [project-chat-composer-redesign](project-chat-composer-redesign.md) — Redesign ChatComposer to match Claude Code desktop app style

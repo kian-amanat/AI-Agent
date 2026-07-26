@@ -5,6 +5,7 @@ import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useEffect, useState } from 'react';
 import { ArrowRight, Folder, Zap } from 'lucide-react';
+import { apiMe, stagePendingWorkspace } from '../lib/api';
 
 export default function ConnectPage() {
   const router = useRouter();
@@ -14,13 +15,37 @@ export default function ConnectPage() {
 
   useEffect(() => {
     const workspace = searchParams.get('workspace');
-    if (workspace) {
-      const parts = workspace.split('/').filter(Boolean);
-      setProjectName(parts[parts.length - 1] || workspace);
-    } else {
-      const stored = localStorage.getItem('kodo_workspace_name');
-      if (stored) setProjectName(stored);
-    }
+
+    (async () => {
+      if (workspace) {
+        const parts = workspace.split('/').filter(Boolean);
+        const name = parts[parts.length - 1] || workspace;
+        setProjectName(name);
+        // Stage the REAL path (not just the display name) so login/signup can
+        // bind the new session to this exact project instead of falling back
+        // to whatever the server considers "the" workspace.
+        stagePendingWorkspace(workspace, name);
+
+        // A token already sitting in this browser might belong to a DIFFERENT
+        // project (e.g. the extension opened a new file while a previous
+        // project's session was still active). Opening a different project
+        // must never silently reuse someone else's — or a different
+        // project's — identity, so if the bound workspace doesn't match what
+        // was just opened, force a fresh login.
+        const existing = await apiMe().catch(() => null);
+        if (existing) {
+          const boundPath = typeof window !== 'undefined' ? localStorage.getItem('kodo_workspace_path') : null;
+          if (boundPath && boundPath !== workspace) {
+            localStorage.removeItem('kodo_token');
+            localStorage.removeItem('kodo_session_id');
+            localStorage.removeItem('kodo_workspace_path');
+          }
+        }
+      } else {
+        const storedName = localStorage.getItem('kodo_pending_workspace_name') || localStorage.getItem('kodo_workspace_name');
+        if (storedName) setProjectName(storedName);
+      }
+    })();
 
     const timer = setTimeout(() => setPhase('connected'), 1800);
     return () => clearTimeout(timer);

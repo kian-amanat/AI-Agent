@@ -6,6 +6,13 @@ import db from "../db.mjs";
 
 const execAsync = promisify(exec);
 
+// Returns null when the session has no workspace bound yet — callers MUST
+// handle that explicitly (see NO_WORKSPACE below), never fall back to
+// PROJECT_ROOT here. Multiple accounts share one running backend (that's the
+// whole point of multi-user); defaulting an unbound session to the server's
+// own repo would hand every unconfigured user (a fresh signup, a family
+// member testing the app) a live view into whichever project the server
+// happens to be running from.
 function getWorkspacePath(request) {
   try {
     const auth = request.headers["authorization"];
@@ -19,6 +26,12 @@ function getWorkspacePath(request) {
     return null;
   }
 }
+
+const NO_WORKSPACE = {
+  ok: false,
+  error: "no_workspace",
+  message: "No project connected yet. Open Kodo from your project (via the extension) or pick one from the folder switcher.",
+};
 
 const IGNORE = new Set([
   ".git", "node_modules", ".next", "dist", "build", ".cache",
@@ -75,7 +88,8 @@ async function buildPullRequestUrl(root, branch) {
 export default async function workspaceRoute(fastify) {
   // GET /api/workspace/git — current branch + dirty/ahead status
   fastify.get("/git", async (request) => {
-    const root = getWorkspacePath(request) || process.cwd();
+    const root = getWorkspacePath(request);
+    if (!root) return NO_WORKSPACE;
 
     const [branch, statusOut, hasUpstream, hasCommits] = await Promise.all([
       execAsync("git rev-parse --abbrev-ref HEAD", { cwd: root, timeout: 3000 })
@@ -122,7 +136,8 @@ export default async function workspaceRoute(fastify) {
 
   // POST /api/workspace/git/commit — stage everything and commit
   fastify.post("/git/commit", async (request) => {
-    const root = getWorkspacePath(request) || process.cwd();
+    const root = getWorkspacePath(request);
+    if (!root) return NO_WORKSPACE;
     const message = String(request.body?.message || "").trim();
     if (!message) return { ok: false, error: "Commit message is required" };
 
@@ -152,7 +167,8 @@ export default async function workspaceRoute(fastify) {
   // POST /api/workspace/git/push — push the current branch, setting upstream
   // on first push if none is configured yet
   fastify.post("/git/push", async (request) => {
-    const root = getWorkspacePath(request) || process.cwd();
+    const root = getWorkspacePath(request);
+    if (!root) return NO_WORKSPACE;
 
     try {
       const branch = (await execAsync("git rev-parse --abbrev-ref HEAD", { cwd: root, timeout: 3000 })).stdout.trim();
@@ -175,7 +191,8 @@ export default async function workspaceRoute(fastify) {
 
   // GET /api/workspace/git/branches — list all branches
   fastify.get("/git/branches", async (request) => {
-    const root = getWorkspacePath(request) || process.cwd();
+    const root = getWorkspacePath(request);
+    if (!root) return { ...NO_WORKSPACE, branches: [] };
 
     const { stdout } = await execAsync("git branch --format='%(refname:short) %(HEAD)'", {
       cwd: root,
@@ -205,7 +222,8 @@ export default async function workspaceRoute(fastify) {
 
   // POST /api/workspace/git/checkout — switch branch
   fastify.post("/git/checkout", async (request) => {
-    const root = getWorkspacePath(request) || process.cwd();
+    const root = getWorkspacePath(request);
+    if (!root) return NO_WORKSPACE;
     const body = request.body;
     const branch = body?.branch;
 
@@ -226,7 +244,8 @@ export default async function workspaceRoute(fastify) {
 
   // GET /api/workspace/files — workspace file tree
   fastify.get("/files", async (request) => {
-    const root = getWorkspacePath(request) || process.cwd();
+    const root = getWorkspacePath(request);
+    if (!root) return { ...NO_WORKSPACE, files: [] };
     const MAX_DEPTH = 6;
     const MAX_FILES = 800;
     const files = [];
@@ -274,7 +293,11 @@ export default async function workspaceRoute(fastify) {
   // shape as GET /git/branches. No hierarchy, no separate browse step —
   // click a name, it switches, same as picking a branch.
   fastify.get("/roots", async (request) => {
-    const root       = getWorkspacePath(request) || process.cwd();
+    const root = getWorkspacePath(request);
+    // No bound workspace yet — don't default to browsing the server machine's
+    // own directory tree (that's a cross-user leak when several accounts
+    // share one running backend). Report "nothing connected" instead.
+    if (!root) return { ok: true, current: null, options: [] };
     const siblingDir = path.dirname(root);
 
     let entries = [];
