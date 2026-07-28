@@ -509,14 +509,30 @@ export default function ChatComposer({
     addFiles(Array.from(e.dataTransfer?.files ?? []));
   }, [isSending, isTranscribing, addFiles]);
 
+  // Fully transparent — the composer must not read as a separate panel. The
+  // smooth fade of messages scrolling out of view is handled by a mask on the
+  // scroll container in page.tsx, not by any background here.
   return (
-    <div className="bg-transparent px-4 pb-5 pt-2 md:px-8">
-      <div className="mx-auto w-full max-w-4xl">
+    <div className="bg-transparent px-4 pb-4 pt-2 md:px-8">
+      <div className="mx-auto w-full max-w-3xl">
         <motion.div
           animate={
             isInputFocused
-              ? { boxShadow: "0 0 0 1px rgba(255,138,61,0.22), 0 20px 60px rgba(0,0,0,0.22)" }
-              : { boxShadow: "0 0 0 1px rgba(255,255,255,0.06), 0 18px 50px rgba(0,0,0,0.18)" }
+              ? {
+                  // Neon, dialed down: a thin red-orange hairline with a small
+                  // soft halo — enough to read as emitted light, not a flare.
+                  borderColor: "rgba(255,86,42,0.45)",
+                  boxShadow: [
+                    "0 0 0 0.5px rgba(255,86,42,0.4)",
+                    "0 0 4px rgba(255,104,48,0.22)",
+                    "0 0 12px rgba(255,77,45,0.12)",
+                    "0 20px 60px rgba(0,0,0,0.28)",
+                  ].join(", "),
+                }
+              : {
+                  borderColor: "rgba(255,255,255,0.08)",
+                  boxShadow: "0 0 0 1px rgba(255,255,255,0.06), 0 18px 50px rgba(0,0,0,0.18)",
+                }
           }
           transition={{ duration: 0.22 }}
           onDragEnter={handleDragEnter}
@@ -552,7 +568,7 @@ export default function ChatComposer({
                 transition={{ duration: 0.18, ease: "easeOut" }}
                 className="overflow-visible"
               >
-                <div className="flex items-center gap-2 border-b border-white/[0.045] px-3.5 py-2">
+                <div className="flex items-center gap-2 border-b border-white/[0.045] px-3 py-1.5">
 
                   {/* Branch pill with dropdown */}
                   {gitStatus && (
@@ -930,7 +946,7 @@ export default function ChatComposer({
           </AnimatePresence>
 
           {/* ── Main input row ─────────────────────────────── */}
-          <div className="flex items-end gap-2 p-2.5">
+          <div className="flex items-end gap-2 p-2">
             <input
               ref={fileInputRef}
               type="file"
@@ -950,7 +966,7 @@ export default function ChatComposer({
               whileHover={{ scale: 1.03 }}
               whileTap={{ scale: 0.96 }}
               onClick={() => fileInputRef.current?.click()}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/[0.03] text-white/62 transition-colors hover:border-white/12 hover:bg-white/[0.05] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/[0.03] text-white/62 transition-colors hover:border-white/12 hover:bg-white/[0.05] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
               title={canUploadImages ? "Attach a file or image" : "Attach a PDF or text file (add a vision model in Settings to send images)"}
               disabled={isSending || isTranscribing}
             >
@@ -1000,7 +1016,7 @@ export default function ChatComposer({
                 onPaste={handlePaste}
                 placeholder="Message Kodo  ·  type / for commands  ·  @file to target"
                 rows={1}
-                className="min-h-[44px] w-full resize-none bg-transparent px-1 py-2.5 text-[14px] leading-6 text-white outline-none placeholder:text-white/20"
+                className="min-h-[36px] w-full resize-none bg-transparent px-1 py-2 text-[14px] leading-6 text-white outline-none placeholder:text-white/20"
                 disabled={isSending || isTranscribing}
               />
 
@@ -1062,7 +1078,7 @@ export default function ChatComposer({
               whileHover={{ scale: 1.03 }}
               whileTap={{ scale: 0.96 }}
               onClick={() => setIsRecording((p) => !p)}
-              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-colors duration-200 ${
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border transition-colors duration-200 ${
                 isTranscribing
                   ? "border-[#ff8a3d]/20 bg-[#ff8a3d]/10 text-white"
                   : isRecording
@@ -1101,7 +1117,7 @@ export default function ChatComposer({
               transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
               onClick={isSending ? () => onStop?.() : onSendMessage}
               disabled={isTranscribing || (!isSending && !canSend)}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#ff8a3d]/20 bg-gradient-to-br from-[#ff6a3d] via-[#ff4d3d] to-[#ff2d2d] text-white shadow-[0_12px_26px_rgba(255,77,61,0.22)] transition-all duration-200 hover:shadow-[0_16px_32px_rgba(255,77,61,0.28)] disabled:cursor-not-allowed disabled:opacity-45"
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#ff8a3d]/20 bg-gradient-to-br from-[#ff6a3d] via-[#ff4d3d] to-[#ff2d2d] text-white shadow-[0_12px_26px_rgba(255,77,61,0.22)] transition-all duration-200 hover:shadow-[0_16px_32px_rgba(255,77,61,0.28)] disabled:cursor-not-allowed disabled:opacity-45"
               title={isSending ? "Stop" : "Send"}
             >
               <AnimatePresence mode="wait" initial={false}>

@@ -57,10 +57,11 @@ RULES
 - Do not mention inability to edit files here; if the user actually wants files changed, the agent pipeline handles it in a separate mode.
 
 ESCALATION (important)
-- You can only talk — you cannot edit files, create files, run commands, or install anything.
-- If actually fulfilling the user's request would require any of those workspace actions, do NOT try to answer or describe the change. Reply with EXACTLY this token and nothing else: __ESCALATE__
-- The system will then hand the request to the agent that can do the work — so escalate instead of explaining what you "would" change.
-- Only escalate for real work. Explanations, advice, questions, and read-only discussion about their code are yours to answer — never escalate those.`;
+- You can only talk — you cannot edit files, create files, run commands, or install anything, and you have NO live view of the project's actual files, package.json, config, or running processes. web_search/fetch_url only reach the public internet, never the user's own workspace.
+- If actually fulfilling the user's request would require any workspace action (editing, running, installing), do NOT try to answer or describe the change. Reply with EXACTLY this token and nothing else: __ESCALATE__
+- Also escalate — even though it's phrased as a question — when answering ACCURATELY depends on this project's real, current state rather than general knowledge: "how do I run/start/build MY app", "what port does my server use", "why is my build failing", "what's in my package.json", "is X already installed here". Guessing with a generic, framework-agnostic answer to a question that's really about THIS specific project is worse than admitting you need to look — escalate instead.
+- The system will then hand the request to the agent that can actually inspect the project and do the work — so escalate instead of explaining what you "would" do or listing every possible framework's command.
+- Skip escalation only for genuinely general questions that don't depend on this specific project: language/framework concepts, general best practices, debugging strategy in the abstract, or read-only discussion that doesn't need live file access.`;
 
 // Sentinel the answer LLM emits when a request actually needs workspace tools.
 // The node suppresses it from the stream and routes to agent_loop instead.
@@ -243,6 +244,10 @@ export async function answerNode(state) {
         temperature: 0.35,
         signal: abortSignal || undefined,
         onChunk,
+        // This node's entire purpose is the cheap/fast conversational path
+        // (vs. the full agent loop) — forcing an expensive reasoning trace
+        // on it defeats that.
+        thinking: false,
       });
 
       // Flush a short buffered head that never opened the gate.

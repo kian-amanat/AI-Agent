@@ -50,6 +50,12 @@ export const KodoStateAnnotation = {
   userMessage:     { default: () => "" },
   attachmentPaths: { default: () => [] },
   modelRoute:      { default: () => ({}) },
+  // Independent of modelRoute — resolved via routeModel(settings,
+  // {hasImageAttachments:true}) regardless of whether THIS turn has an
+  // image, so verify_ui can escalate a UI-check failure to vision mid-run.
+  // {ok:false} (routeModel's shape when no vision model is configured) means
+  // vision escalation just stays off — see resolveVisionCreds in agent_loop.mjs.
+  visionRoute:     { default: () => ({}) },
   sessionId:       { default: () => "" },
   requestId:       { default: () => "" },
   userId:          { default: () => "" },

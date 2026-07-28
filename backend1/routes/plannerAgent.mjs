@@ -237,7 +237,7 @@ function syncSessionMemory(sessionId, userId, {
 // per-session queue slot — all independent of whether any client is listening.
 async function startBackgroundRun(ctx) {
   const {
-    requestId, sessionId, userId, workspacePath, modelRoute, modelMeta,
+    requestId, sessionId, userId, workspacePath, modelRoute, visionRoute, modelMeta,
     plannerContextMessage, rememberedFile, attachmentPaths, effectiveMessage,
     permissionMode, controller, releaseSlot, startEvent,
   } = ctx;
@@ -298,14 +298,19 @@ async function startBackgroundRun(ctx) {
     createAgentJob({ requestId, sessionId, userId, title });
     jobEmit(startEvent);
 
-    const GRAPH_TIMEOUT_MS = 15 * 60 * 1000;
+    // Raised alongside agent_loop's MAX_ITERATIONS (25→40) and the new
+    // parallel-read execution — a real multi-file build can legitimately need
+    // more wall-clock time than a single-file fix, and this (now that it
+    // actually aborts the run on expiry, see below) is the real outer bound
+    // on how long any run is allowed to take.
+    const GRAPH_TIMEOUT_MS = 25 * 60 * 1000;
     const timeoutPromise = new Promise((resolve) =>
       setTimeout(() => resolve({ ok: false, timedOut: true }), GRAPH_TIMEOUT_MS)
     );
     const graphPromise = runKodoGraph({
       userMessage:          plannerContextMessage,
       rememberedTargetFile: rememberedFile,
-      sessionId, requestId, userId, workspacePath, modelRoute,
+      sessionId, requestId, userId, workspacePath, modelRoute, visionRoute,
       attachmentPaths,
       emit: jobEmit,
       abortSignal: controller.signal,
@@ -319,6 +324,13 @@ async function startBackgroundRun(ctx) {
     pendingApprovals.delete(requestId);
 
     if (raceResult.timedOut) {
+      // Promise.race doesn't cancel the loser — without this, agentLoopNode
+      // keeps running unattended after the user's already been told to try
+      // again, still writing files with nothing watching it, and can then
+      // collide with a fresh retry mutating the same files concurrently.
+      // agent_loop.mjs already checks abortSignal at each loop iteration, so
+      // this makes it actually stop instead of running out the clock unseen.
+      controller.abort();
       jobEmit({ type: "content", content: "The task is taking longer than expected. Please try again." });
       jobEmit(doneEvent(""));
       saveMessage(sessionId, userId, "assistant", "(timed out)", "graph", requestId, null);
@@ -559,6 +571,11 @@ export default async function plannerAgentRoute(fastify) {
     // work with any model, so the gate keys off image attachments specifically.
     const hasImageAttachments = attachment_paths.some((p) => isImageMime(inferMimeTypeFromPath(p), p));
     const modelRoute     = routeModel(settings, { hasImageAttachments });
+    // Independent of this turn's attachments — verify_ui may want to
+    // escalate a UI-check failure to vision mid-run regardless of whether
+    // THIS message happened to include an image. {ok:false} just means no
+    // vision model is configured; that's fine, escalation silently no-ops.
+    const visionRoute    = routeModel(settings, { hasImageAttachments: true });
 
     if (!modelRoute.ok) {
       const errorMap = {
@@ -737,7 +754,7 @@ export default async function plannerAgentRoute(fastify) {
     // explicit POST /cancel/:requestId — never by the connection closing.
     const jobController = new AbortController();
     void startBackgroundRun({
-      requestId, sessionId, userId, workspacePath, modelRoute, modelMeta,
+      requestId, sessionId, userId, workspacePath, modelRoute, visionRoute, modelMeta,
       plannerContextMessage, rememberedFile,
       attachmentPaths: attachment_paths,
       effectiveMessage, permissionMode,
@@ -977,6 +994,7 @@ export default async function plannerAgentRoute(fastify) {
           modelRoute,
           maxTokens: 1200,
           temperature: 0.2,
+          thinking: false, // factual summarization, not reasoning
         });
         const llmSummary = String(result?.content || "").trim();
         if (!llmSummary) throw new Error("empty summary");

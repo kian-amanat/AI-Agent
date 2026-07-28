@@ -358,6 +358,7 @@ async function _doWrite({ workspacePath, userMessage, assistantAnswer, editedFil
       modelRoute,
       maxTokens: 2000,
       temperature: 0.1,
+      thinking: false, // structured extraction/merge, runs after every turn — no reasoning benefit
     });
 
     const parsed = extractJSON(result?.content || "");

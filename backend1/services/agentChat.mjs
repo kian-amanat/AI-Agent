@@ -15,8 +15,27 @@
  */
 
 import OpenAI from "openai";
+import { Agent as UndiciAgent } from "undici";
 
 const ANTHROPIC_VERSION = "2023-06-01";
+
+// Node's built-in fetch (undici) enforces its OWN headersTimeout/bodyTimeout
+// — 300s by default — completely independent of any timeout an HTTP client
+// on top of it configures (e.g. the openai SDK's own `timeout` option below).
+// A "thinking"/reasoning model can legitimately stay silent for several
+// minutes generating a large tool call before emitting anything, since
+// streaming only produces visible bytes for narrative text, not tool-call
+// argument tokens. When that silence exceeds undici's default, IT tears the
+// connection down first — surfacing as a raw, cryptic "BodyStreamBuffer was
+// aborted" that looks like a hang or crash but is actually a timeout nobody
+// configured on purpose. This dispatcher raises undici's own timeouts well
+// above the longest timeout we intentionally configure elsewhere (the SDK's
+// 600s "thinking model" ceiling), so THAT'S the one that ends up governing,
+// predictably, instead of an invisible stricter one underneath it.
+const LLM_DISPATCHER = new UndiciAgent({
+  headersTimeout: 900_000,
+  bodyTimeout: 900_000,
+});
 
 export function isAnthropicRoute(creds) {
   return /anthropic\.com/i.test(String(creds?.baseURL || "")) ||
@@ -25,12 +44,28 @@ export function isAnthropicRoute(creds) {
 
 // ── Anthropic conversion ──────────────────────────────────────────────────────
 
+// Prompt caching: Anthropic caches everything up to and including the last
+// block marked cache_control, in the order tools → system → messages. The
+// tool schemas and system prompt are IDENTICAL across every iteration of a
+// single agent run (built once before the loop starts) — without a cache
+// breakpoint, that's the same ~7-10k tokens of fixed overhead re-billed as
+// fresh input on every one of up to 40 iterations. Marking the end of tools
+// and the end of system caches both in one shot (cache order covers tools
+// first), at zero behavior change — same request, same answer, just cheaper
+// and faster on every cache hit within the 5-minute TTL.
 function toAnthropicTools(tools = []) {
-  return tools.map((t) => ({
+  const converted = tools.map((t) => ({
     name: t.function.name,
     description: t.function.description || "",
     input_schema: t.function.parameters || { type: "object", properties: {} },
   }));
+  if (converted.length) converted[converted.length - 1].cache_control = { type: "ephemeral" };
+  return converted;
+}
+
+function toAnthropicSystem(system) {
+  if (!system) return undefined;
+  return [{ type: "text", text: String(system), cache_control: { type: "ephemeral" } }];
 }
 
 function toAnthropicMessages(messages = []) {
@@ -91,6 +126,7 @@ async function anthropicChatNonStreaming({ creds, system, messages, tools, maxTo
   const res = await fetch(`${base}/messages`, {
     method: "POST",
     signal,
+    dispatcher: LLM_DISPATCHER,
     headers: {
       "content-type": "application/json",
       "x-api-key": creds.apiKey,
@@ -100,7 +136,7 @@ async function anthropicChatNonStreaming({ creds, system, messages, tools, maxTo
       model: creds.model,
       max_tokens: maxTokens,
       ...(temperature !== undefined ? { temperature } : {}),
-      ...(system ? { system } : {}),
+      ...(system ? { system: toAnthropicSystem(system) } : {}),
       ...(tools?.length ? { tools: toAnthropicTools(tools) } : {}),
       messages: toAnthropicMessages(messages),
     }),
@@ -131,6 +167,7 @@ async function anthropicChatStreaming({ creds, system, messages, tools, maxToken
   const res = await fetch(`${base}/messages`, {
     method: "POST",
     signal,
+    dispatcher: LLM_DISPATCHER,
     headers: {
       "content-type": "application/json",
       "x-api-key": creds.apiKey,
@@ -141,7 +178,7 @@ async function anthropicChatStreaming({ creds, system, messages, tools, maxToken
       max_tokens: maxTokens,
       stream: true,
       ...(temperature !== undefined ? { temperature } : {}),
-      ...(system ? { system } : {}),
+      ...(system ? { system: toAnthropicSystem(system) } : {}),
       ...(tools?.length ? { tools: toAnthropicTools(tools) } : {}),
       messages: toAnthropicMessages(messages),
     }),
@@ -238,13 +275,31 @@ async function anthropicChat(args) {
 
 // ── OpenAI-compatible path ────────────────────────────────────────────────────
 
-async function openaiChat({ creds, system, messages, tools, maxTokens, temperature, signal, onChunk }) {
-  const isThinkingModel = /thinking|r1\b|reasoner/i.test(creds.model);
+async function openaiChat({ creds, system, messages, tools, maxTokens, temperature, signal, onChunk, thinking }) {
+  const nameLooksLikeThinking = /thinking|r1\b|reasoner/i.test(creds.model);
+  // `thinking` (explicit true/false from the call site) always wins over the
+  // name-based guess. The guess exists for models that literally can't turn
+  // reasoning off (o1, deepseek-reasoner) and need the longer timeout no
+  // matter what; it CANNOT detect Qwen3-family models, which are hybrid —
+  // capable of thinking regardless of what's in the name — and default
+  // enable_thinking to true SERVER-SIDE if the request never mentions it.
+  // Left unset (undefined), that default silently applies to every call,
+  // billed at whatever premium the provider charges for reasoning output
+  // tokens, for call sites (classification, tool execution, summarization)
+  // that get zero benefit from it. Callers that know their call is purely
+  // mechanical should pass `thinking:false` explicitly instead of relying on
+  // the name guess.
+  const wantsThinking = thinking !== undefined ? thinking : nameLooksLikeThinking;
+  const extraBody = thinking !== undefined
+    ? { enable_thinking: thinking }
+    : (nameLooksLikeThinking ? { enable_thinking: true } : undefined);
+
   const client = new OpenAI({
     apiKey: creds.apiKey,
     baseURL: creds.baseURL,
-    timeout: isThinkingModel ? 600_000 : 90_000,
+    timeout: wantsThinking ? 600_000 : 90_000,
     maxRetries: 0,
+    fetchOptions: { dispatcher: LLM_DISPATCHER },
   });
 
   const fullMessages = [
@@ -263,6 +318,7 @@ async function openaiChat({ creds, system, messages, tools, maxTokens, temperatu
       ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
       temperature,
       max_tokens: maxTokens,
+      ...(extraBody ? { extra_body: extraBody } : {}),
     }, { signal });
     return {
       message: response.choices?.[0]?.message || { role: "assistant", content: null },
@@ -283,7 +339,7 @@ async function openaiChat({ creds, system, messages, tools, maxTokens, temperatu
   // is a slow "thinking" model (streaming keeps gateways from cutting an
   // idle connection). Both paths share the same delta-accumulation logic —
   // the only difference is whether onChunk gets called per text fragment.
-  if (isThinkingModel || onChunk) {
+  if (wantsThinking || onChunk) {
     try {
       let contentBuf = "";
       const toolCallBufs = {}; // index → { id, name, argsBuf }
@@ -296,7 +352,7 @@ async function openaiChat({ creds, system, messages, tools, maxTokens, temperatu
         temperature,
         stream: true,
         stream_options: { include_usage: true },
-        ...(isThinkingModel ? { extra_body: { enable_thinking: true } } : {}),
+        ...(extraBody ? { extra_body: extraBody } : {}),
       }, { signal });
 
       for await (const chunk of stream) {
@@ -351,9 +407,12 @@ async function openaiChat({ creds, system, messages, tools, maxTokens, temperatu
  * creds: { apiKey, baseURL, model }
  * messages: OpenAI-format conversation (WITHOUT the system message)
  */
-export async function chatWithTools({ creds, system, messages, tools = [], maxTokens = 4000, temperature = 0, signal, onChunk }) {
+export async function chatWithTools({ creds, system, messages, tools = [], maxTokens = 4000, temperature = 0, signal, onChunk, thinking }) {
   if (isAnthropicRoute(creds)) {
+    // Anthropic has no enable_thinking request param in this code path (that
+    // would be a separate `thinking: {type:"enabled", budget_tokens}` request
+    // field, not implemented here) — `thinking` is simply unused for this route.
     return anthropicChat({ creds, system, messages, tools, maxTokens, temperature, signal, onChunk });
   }
-  return openaiChat({ creds, system, messages, tools, maxTokens, temperature, signal, onChunk });
+  return openaiChat({ creds, system, messages, tools, maxTokens, temperature, signal, onChunk, thinking });
 }
