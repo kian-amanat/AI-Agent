@@ -28,6 +28,17 @@ const CONFIRM_ACTION_RE = /\b(apply\s+(it|that|them|this|the\s+\w+)\b|do\s+it(\s
 // Unmistakable questions with no edit signal.
 const OBVIOUS_QUESTION_RE = /^(what|how|why|when|where|who|which|can you explain|could you explain|explain|describe|tell me about|walk me through|summarize|summarise)\b[^]*\?\s*$/i;
 
+// A "how/what/…?" question can still require real workspace state to answer
+// well — "how do I run my server on port 5432" needs package.json, not a
+// generic multi-framework cheat sheet. Force-routing every question to
+// "answer" (which has no file/bash tools at all) is what produces that
+// generic-answer failure. If the question also contains action language, let
+// it fall through past this fast-path instead of committing to "answer" here
+// — WANT_FEATURE_RE / CONFIRM_ACTION_RE / the LLM fallback below can still
+// route it correctly (the LLM classifier's own instructions already treat
+// "something run or installed" as "agent").
+const ACTION_QUESTION_RE = /\b(run|start|serve|launch|host|deploy|install|build|execute|open|kill|stop|restart|configure|set\s*up)\b/i;
+
 const FILE_REF_RE = /\.(tsx?|jsx?|mjs|cjs|css|scss|json|md|ya?ml|html|py)\b|\b(src|app|components?|pages?|routes?|lib|hooks?|backend1?|chatbot)\//i;
 
 async function classifyWithLLM(message, modelRoute) {
@@ -43,6 +54,10 @@ Respond with ONLY the word "answer" or "agent".`,
       modelRoute,
       maxTokens: 5,
       temperature: 0,
+      // A one-word classification gains nothing from reasoning — explicit,
+      // since some providers (Qwen3) default extended thinking ON server-side
+      // when a request doesn't say otherwise, taxing every single message.
+      thinking: false,
     });
     const raw = String(result?.content || "").trim().toLowerCase();
     if (raw.includes("agent")) return "agent";
@@ -55,30 +70,34 @@ Respond with ONLY the word "answer" or "agent".`,
   return "agent";
 }
 
+// Local, network-free classification from the regex chain alone.
+// Returns "agent" | "answer" | null (null = ambiguous — caller falls back to
+// the remembered-target-file check, then the LLM classifier). Exported so
+// this can be unit tested directly without a live LLM call.
+export function classifyFastPath(cleanMsg) {
+  if (!cleanMsg || GREETING_RE.test(cleanMsg)) return "answer";
+  if (NO_ACTION_RE.test(cleanMsg)) return "answer";
+  if (OBVIOUS_AGENT_RE.test(cleanMsg) || (FILE_REF_RE.test(cleanMsg) && !OBVIOUS_QUESTION_RE.test(cleanMsg))) return "agent";
+  if (OBVIOUS_QUESTION_RE.test(cleanMsg) && !ACTION_QUESTION_RE.test(cleanMsg)) return "answer";
+  // "i want /profile to have a feedback form" — a build request phrased as a wish.
+  if (WANT_FEATURE_RE.test(cleanMsg)) return "agent";
+  // "apply them yourself" / "do it" / "go ahead" — a go-ahead on a change the
+  // assistant just proposed. Never treat this as small talk to answer.
+  if (CONFIRM_ACTION_RE.test(cleanMsg)) return "agent";
+  return null;
+}
+
 export async function routerNode(state) {
   const { userMessage, modelRoute, emit, rememberedTargetFile } = state;
   const cleanMsg = String(userMessage || "").split(/conversation memory:/i)[0].trim();
 
-  let intent;
-  if (!cleanMsg || GREETING_RE.test(cleanMsg)) {
-    intent = "answer";
-  } else if (NO_ACTION_RE.test(cleanMsg)) {
-    intent = "answer";
-  } else if (OBVIOUS_AGENT_RE.test(cleanMsg) || (FILE_REF_RE.test(cleanMsg) && !OBVIOUS_QUESTION_RE.test(cleanMsg))) {
-    intent = "agent";
-  } else if (OBVIOUS_QUESTION_RE.test(cleanMsg)) {
-    intent = "answer";
-  } else if (WANT_FEATURE_RE.test(cleanMsg)) {
-    // "i want /profile to have a feedback form" — a build request phrased as a wish.
-    intent = "agent";
-  } else if (CONFIRM_ACTION_RE.test(cleanMsg)) {
-    // "apply them yourself" / "do it" / "go ahead" — a go-ahead on a change the
-    // assistant just proposed. Never treat this as small talk to answer.
-    intent = "agent";
-  } else if (rememberedTargetFile && /\b(that\s+(page|file|component)|on\s+it|to\s+it|in\s+it|it\s+again)\b/i.test(cleanMsg)) {
-    intent = "agent";
-  } else {
-    intent = await classifyWithLLM(cleanMsg, modelRoute);
+  let intent = classifyFastPath(cleanMsg);
+  if (intent === null) {
+    if (rememberedTargetFile && /\b(that\s+(page|file|component)|on\s+it|to\s+it|in\s+it|it\s+again)\b/i.test(cleanMsg)) {
+      intent = "agent";
+    } else {
+      intent = await classifyWithLLM(cleanMsg, modelRoute);
+    }
   }
 
   console.log(`[Router] intent="${intent}" for: "${cleanMsg.slice(0, 80)}"`);

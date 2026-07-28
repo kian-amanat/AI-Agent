@@ -14,6 +14,35 @@ export function isInsideProjectRoot(absPath, projectRoot = PROJECT_ROOT) {
   return target === root || target.startsWith(root + path.sep);
 }
 
+// Secret / credential files the agent must never read into the model context or
+// write/exfiltrate via bash — the same class Claude Code denies by default and
+// Cursor's "dotfile protection" covers. Matched on the workspace-relative path,
+// so `.env`, `backend1/.env`, `~/.ssh/id_rsa` (already blocked as an escape),
+// `certs/server.pem`, `.npmrc` (npm auth token), `data/settings.json` (holds the
+// user's API key) all qualify. Template files (.example/.sample/…) are exempt.
+export const SENSITIVE_FILE_RE = new RegExp(
+  [
+    "(?:^|/)\\.env(?:\\.[\\w-]+)?$",
+    "(?:^|/)\\.git-credentials$",
+    "(?:^|/)\\.netrc$",
+    "(?:^|/)\\.npmrc$",
+    "(?:^|/)\\.pypirc$",
+    "(?:^|/)id_(?:rsa|dsa|ecdsa|ed25519)$",
+    "(?:^|/)credentials(?:\\.json)?$",
+    "(?:^|/)secrets?\\.(?:json|ya?ml|env|txt)$",
+    "(?:^|/)data/settings\\.json$",
+    "\\.(?:pem|key|p12|pfx|keystore|jks)$",
+  ].join("|"),
+  "i",
+);
+
+export function isSensitiveFilePath(p) {
+  const norm = String(p || "").replace(/\\/g, "/").replace(/^\.\//, "").trim();
+  if (!norm) return false;
+  if (/\.(example|sample|template|dist)$/i.test(norm)) return false; // templates aren't secrets
+  return SENSITIVE_FILE_RE.test(norm);
+}
+
 export function sanitizeFilename(name) {
   return (
     String(name || "upload.bin")

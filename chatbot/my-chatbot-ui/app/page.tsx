@@ -47,6 +47,7 @@ import ChatComposer from "./components/chat/ChatComposer";
 import PlanPreviewPanel from "./components/chat/PlanPreviewPanel";
 import QuestionPanel from "./components/chat/QuestionPanel";
 import FileTreeSidebar from "./components/chat/FileTreeSidebar";
+import SettingsSidebar from "./components/chat/SettingsSidebar";
 import type { SlashCommandId } from "./components/chat/SlashCommandPalette";
 
 const nowIso = () => new Date().toISOString();
@@ -184,8 +185,20 @@ export default function MinimalChatComponent() {
     isAnswering:    boolean;
   } | null>(null);
 
-  // ── File tree sidebar ─────────────────────────────────────────
+  // ── Right-hand rails ──────────────────────────────────────────
+  // Only one can be open at a time — together they'd eat most of the chat
+  // column, so opening either closes the other.
   const [fileTreeOpen, setFileTreeOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
+  function toggleFileTree() {
+    setFileTreeOpen(!fileTreeOpen);
+    if (!fileTreeOpen) setSettingsOpen(false);
+  }
+  function toggleSettings() {
+    setSettingsOpen(!settingsOpen);
+    if (!settingsOpen) setFileTreeOpen(false);
+  }
 
   // ── Notifications: local on/off preference (separate from browser
   //    permission) + a help panel shown when the browser has them blocked. ──
@@ -896,8 +909,10 @@ export default function MinimalChatComponent() {
             permissionMode={permissionMode}
             onTogglePermissionMode={handleTogglePermissionMode}
             onCompact={handleCompact}
-            onToggleFileTree={() => setFileTreeOpen((p) => !p)}
+            onToggleFileTree={toggleFileTree}
             fileTreeOpen={fileTreeOpen}
+            onToggleSettings={toggleSettings}
+            settingsOpen={settingsOpen}
             isSending={isSending}
             notificationPermission={notifications.supported ? notifications.permission : undefined}
             notificationsOn={notifications.supported && notifications.permission === "granted" && notifEnabled}
@@ -906,23 +921,16 @@ export default function MinimalChatComponent() {
 
           <div className="flex min-h-0 flex-1 overflow-hidden">
             {/* Main chat area */}
-            <div className="flex min-w-0 flex-1 flex-col">
+            <div className="relative flex min-w-0 flex-1 flex-col">
+              {/* The mask fades content out at both edges as it scrolls past,
+                  so messages dissolve toward the composer instead of ending on
+                  a hard cut. Kept on the scroll viewport (not the content) so
+                  the fade stays fixed while the content moves under it. */}
               <div
                 ref={scrollRef}
-                className="relative min-h-0 flex-1 overflow-y-auto px-4 py-6 md:px-8 md:py-8"
+                className="relative min-h-0 flex-1 overflow-y-auto px-4 pt-6 pb-10 md:px-8 md:pt-8 md:pb-12 [mask-image:linear-gradient(to_bottom,transparent_0px,#000_28px,#000_calc(100%_-_72px),transparent_100%)] [-webkit-mask-image:linear-gradient(to_bottom,transparent_0px,#000_28px,#000_calc(100%_-_72px),transparent_100%)]"
               >
-                {showScrollButton && (
-                  <button
-                    type="button"
-                    onClick={() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" })}
-                    className="absolute bottom-4 right-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[#ff8a3d] text-white shadow-lg transition-transform hover:scale-105 hover:bg-[#e67a35]"
-                    aria-label="Scroll to bottom"
-                  >
-                    <KeyboardArrowDownRoundedIcon fontSize="small" />
-                  </button>
-                )}
-
-                <div className="mx-auto flex w-full max-w-4xl flex-col">
+                <div className="mx-auto flex w-full max-w-3xl flex-col">
                   <AnimatePresence mode="wait">
                     {isEmpty ? (
                       <motion.div
@@ -1086,6 +1094,19 @@ export default function MinimalChatComponent() {
                 </div>
               </div>
 
+              {/* Outside the scroll viewport on purpose — inside it, the mask
+                  would fade the button along with the messages. */}
+              {showScrollButton && (
+                <button
+                  type="button"
+                  onClick={() => scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" })}
+                  className="absolute bottom-32 right-4 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-[#ff8a3d] text-white shadow-lg transition-transform hover:scale-105 hover:bg-[#e67a35]"
+                  aria-label="Scroll to bottom"
+                >
+                  <KeyboardArrowDownRoundedIcon fontSize="small" />
+                </button>
+              )}
+
               <ChatComposer
                 messageInput={messageInput}
                 setMessageInput={setMessageInput}
@@ -1111,6 +1132,13 @@ export default function MinimalChatComponent() {
               open={fileTreeOpen}
               onClose={() => setFileTreeOpen(false)}
               onFileSelect={handleFileTreeSelect}
+            />
+
+            {/* Settings right sidebar — same rail, replaces the /settings route */}
+            <SettingsSidebar
+              open={settingsOpen}
+              onClose={() => setSettingsOpen(false)}
+              onSaved={(caps) => setCanUploadImages(!!caps.uploadEnabled)}
             />
           </div>
         </section>

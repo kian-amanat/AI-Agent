@@ -4,6 +4,8 @@ node_modules
 
 # Runtime artifacts — never commit
 .agent-history/
+.kodo/scratch/
+.kodo/tasks/
 .claude/settings.local.json
 database.sqlite
 backend1/memory.db*

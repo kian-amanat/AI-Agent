@@ -1,6 +1,5 @@
 "use client";
 
-import { useRouter } from "next/navigation";
 import { motion } from "framer-motion";
 import {
   Archive, Bell, BellOff, BellRing, FolderTree, PanelLeftClose,
@@ -16,6 +15,8 @@ export default function ChatHeader({
   onCompact,
   onToggleFileTree,
   fileTreeOpen,
+  onToggleSettings,
+  settingsOpen,
   isSending,
   notificationPermission,
   notificationsOn,
@@ -27,12 +28,13 @@ export default function ChatHeader({
   onCompact:              () => void;
   onToggleFileTree:       () => void;
   fileTreeOpen:           boolean;
+  onToggleSettings:       () => void;
+  settingsOpen:           boolean;
   isSending:              boolean;
   notificationPermission?: NotificationPermission;
   notificationsOn?:        boolean;   // granted AND locally enabled → alerts will actually fire
   onRequestNotifications?: () => void;
 }) {
-  const router = useRouter();
   const isAsk = permissionMode === "ask";
 
   return (
@@ -118,13 +120,18 @@ export default function ChatHeader({
           }
         </motion.button>
 
-        {/* Settings */}
+        {/* Settings — opens the right-hand panel, same as the file tree */}
         <motion.button
           whileTap={{ scale: 0.95 }}
-          onClick={() => router.push("/settings")}
+          onClick={onToggleSettings}
           title="Settings"
           aria-label="Settings"
-          className="flex h-[34px] w-[34px] items-center justify-center rounded-xl border border-white/[0.07] bg-white/[0.03] text-white/45 transition-colors hover:bg-white/[0.06] hover:text-[#ff4d4d] hover:border-[#ff3333]/30"
+          aria-expanded={settingsOpen}
+          className={`flex h-[34px] w-[34px] items-center justify-center rounded-xl border transition-colors ${
+            settingsOpen
+              ? "border-[#ff8a3d]/25 bg-[#ff8a3d]/8 text-[#ff8a3d]"
+              : "border-white/[0.07] bg-white/[0.03] text-white/45 hover:border-white/[0.12] hover:bg-white/[0.06] hover:text-white/70"
+          }`}
         >
           <Settings className="h-4 w-4" />
         </motion.button>

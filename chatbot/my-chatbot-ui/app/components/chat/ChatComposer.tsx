@@ -307,13 +307,29 @@ export default function ChatComposer({
         setRootCurrent(result.current);
         setRootOptions(result.options);
         setShowRootDropdown(false);
+
+        // Everything git-related belongs to the OLD project — the branch
+        // pill, the branch list, and any in-progress commit/push state. None
+        // of that is scoped to the switch itself, so without clearing it here
+        // the UI kept showing the previous project's branch (and even let you
+        // "commit"/"push" into the wrong repo) until the next 30s poll tick.
+        setBranches([]);
+        setBranchError(null);
+        setShowBranchDropdown(false);
+        setCommitMessage("");
+        setCommitError(null);
+        setPushError(null);
+        setPushSuccess(false);
+        setShowGitPanel(false);
+        setGitStatus(null);
+        await refreshGitStatus();
       } catch (err) {
         setRootError(err instanceof Error ? err.message : "Failed to switch folder");
       } finally {
         setRootLoading(false);
       }
     },
-    []
+    [refreshGitStatus]
   );
 
   const toggleRootDropdown = React.useCallback(() => {
@@ -493,14 +509,30 @@ export default function ChatComposer({
     addFiles(Array.from(e.dataTransfer?.files ?? []));
   }, [isSending, isTranscribing, addFiles]);
 
+  // Fully transparent — the composer must not read as a separate panel. The
+  // smooth fade of messages scrolling out of view is handled by a mask on the
+  // scroll container in page.tsx, not by any background here.
   return (
-    <div className="bg-transparent px-4 pb-5 pt-2 md:px-8">
-      <div className="mx-auto w-full max-w-4xl">
+    <div className="bg-transparent px-4 pb-4 pt-2 md:px-8">
+      <div className="mx-auto w-full max-w-3xl">
         <motion.div
           animate={
             isInputFocused
-              ? { boxShadow: "0 0 0 1px rgba(255,138,61,0.22), 0 20px 60px rgba(0,0,0,0.22)" }
-              : { boxShadow: "0 0 0 1px rgba(255,255,255,0.06), 0 18px 50px rgba(0,0,0,0.18)" }
+              ? {
+                  // Neon, dialed down: a thin red-orange hairline with a small
+                  // soft halo — enough to read as emitted light, not a flare.
+                  borderColor: "rgba(255,86,42,0.45)",
+                  boxShadow: [
+                    "0 0 0 0.5px rgba(255,86,42,0.4)",
+                    "0 0 4px rgba(255,104,48,0.22)",
+                    "0 0 12px rgba(255,77,45,0.12)",
+                    "0 20px 60px rgba(0,0,0,0.28)",
+                  ].join(", "),
+                }
+              : {
+                  borderColor: "rgba(255,255,255,0.08)",
+                  boxShadow: "0 0 0 1px rgba(255,255,255,0.06), 0 18px 50px rgba(0,0,0,0.18)",
+                }
           }
           transition={{ duration: 0.22 }}
           onDragEnter={handleDragEnter}
@@ -526,196 +558,7 @@ export default function ChatComposer({
             )}
           </AnimatePresence>
 
-          {/* ── Main input row ─────────────────────────────── */}
-          <div className="flex items-end gap-2 p-2.5">
-            <input
-              ref={fileInputRef}
-              type="file"
-              className="hidden"
-              multiple
-              accept={canUploadImages
-                ? "image/*,.pdf,.txt,.md,.json,.csv,.yaml,.yml,.xml,.html,.js,.jsx,.ts,.tsx,.mjs,.cjs,.css,.scss,.py"
-                : ".pdf,.txt,.md,.json,.csv,.yaml,.yml,.xml,.html,.js,.jsx,.ts,.tsx,.mjs,.cjs,.css,.scss,.py"}
-              onChange={(e) => {
-                addFiles(Array.from(e.target.files ?? []));
-                e.target.value = "";
-              }}
-            />
-
-            <motion.button
-              type="button"
-              whileHover={{ scale: 1.03 }}
-              whileTap={{ scale: 0.96 }}
-              onClick={() => fileInputRef.current?.click()}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/[0.03] text-white/62 transition-colors hover:border-white/12 hover:bg-white/[0.05] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-              title={canUploadImages ? "Attach a file or image" : "Attach a PDF or text file (add a vision model in Settings to send images)"}
-              disabled={isSending || isTranscribing}
-            >
-              <Paperclip className="h-4 w-4" />
-            </motion.button>
-
-            {/* Textarea + slash palette */}
-            <div className="relative min-w-0 flex-1">
-              <SlashCommandPalette
-                query={slashQuery}
-                visible={showPalette}
-                onSelect={handleSlashSelect}
-              />
-              <textarea
-                ref={textareaRef}
-                value={messageInput}
-                onFocus={() => setIsInputFocused(true)}
-                onBlur={() => {
-                  setIsInputFocused(false);
-                  setTimeout(() => setShowPalette(false), 120);
-                }}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setMessageInput(val);
-                  e.target.style.height = "auto";
-                  e.target.style.height = `${Math.min(e.target.scrollHeight, 180)}px`;
-                  if (val.startsWith("/") && !val.includes(" ")) {
-                    setSlashQuery(val);
-                    setShowPalette(true);
-                  } else {
-                    setShowPalette(false);
-                    setSlashQuery("");
-                  }
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Escape" && showPalette) {
-                    e.preventDefault();
-                    setShowPalette(false);
-                    return;
-                  }
-                  if (showPalette && (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab")) {
-                    e.preventDefault();
-                    return;
-                  }
-                  onMessageKeyDown(e);
-                }}
-                onPaste={handlePaste}
-                placeholder="Message Kodo  ·  type / for commands  ·  @file to target"
-                rows={1}
-                className="min-h-[44px] w-full resize-none bg-transparent px-1 py-2.5 text-[14px] leading-6 text-white outline-none placeholder:text-white/20"
-                disabled={isSending || isTranscribing}
-              />
-
-              {/* Attached file chips */}
-              <AnimatePresence initial={false}>
-                {selectedFiles.length > 0 && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 4 }}
-                    className="mb-1 mt-2 flex flex-wrap gap-1.5"
-                  >
-                    {selectedFiles.map((file) => (
-                      <AttachmentChip
-                        key={`${file.name}_${file.size}_${file.lastModified}`}
-                        file={file}
-                        disabled={isSending || isTranscribing}
-                        onRemove={() =>
-                          setSelectedFiles((prev) =>
-                            prev.filter(
-                              (item) =>
-                                !(item.name === file.name && item.size === file.size && item.lastModified === file.lastModified)
-                            )
-                          )
-                        }
-                      />
-                    ))}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-
-              {/* Clear message when an image was rejected (no vision model) */}
-              <AnimatePresence initial={false}>
-                {attachError && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: 4 }}
-                    className="mt-2 flex items-start gap-2 rounded-xl border border-[#ff8a3d]/25 bg-[#ff8a3d]/[0.08] px-3 py-2"
-                  >
-                    <ImageOff className="mt-[1px] h-3.5 w-3.5 shrink-0 text-[#ff8a3d]/80" />
-                    <span className="flex-1 text-[11.5px] leading-5 text-white/70">{attachError}</span>
-                    <button
-                      type="button"
-                      onClick={() => setAttachError(null)}
-                      className="text-white/40 transition-colors hover:text-white/70"
-                      title="Dismiss"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-
-            {/* Mic */}
-            <motion.button
-              type="button"
-              whileHover={{ scale: 1.03 }}
-              whileTap={{ scale: 0.96 }}
-              onClick={() => setIsRecording((p) => !p)}
-              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition-colors duration-200 ${
-                isTranscribing
-                  ? "border-[#ff8a3d]/20 bg-[#ff8a3d]/10 text-white"
-                  : isRecording
-                  ? "border-[#ff5e4d]/30 bg-[#ff5e4d]/12 text-white"
-                  : "border-white/8 bg-white/[0.03] text-white/62 hover:border-white/12 hover:bg-white/[0.05] hover:text-white"
-              }`}
-              title={isRecording ? "Stop recording" : "Voice input"}
-              disabled={isSending || isTranscribing}
-            >
-              {isTranscribing ? (
-                <Loader2 className="h-4 w-4 animate-spin" />
-              ) : isRecording ? (
-                <StopCircle className="h-4 w-4" />
-              ) : (
-                <Mic className="h-4 w-4" />
-              )}
-            </motion.button>
-
-            {/* Send / Stop */}
-            <motion.button
-              type="button"
-              whileHover={{ scale: isSending ? 1 : 1.03 }}
-              whileTap={{ scale: isSending ? 1 : 0.96 }}
-              animate={
-                canSend && !isSending
-                  ? {
-                      scale: [1, 1.02, 1],
-                      boxShadow: [
-                        "0 12px 26px rgba(255,77,61,0.22)",
-                        "0 14px 30px rgba(255,77,61,0.35)",
-                        "0 12px 26px rgba(255,77,61,0.22)",
-                      ],
-                    }
-                  : undefined
-              }
-              transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
-              onClick={isSending ? () => onStop?.() : onSendMessage}
-              disabled={isTranscribing || (!isSending && !canSend)}
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-[#ff8a3d]/20 bg-gradient-to-br from-[#ff6a3d] via-[#ff4d3d] to-[#ff2d2d] text-white shadow-[0_12px_26px_rgba(255,77,61,0.22)] transition-all duration-200 hover:shadow-[0_16px_32px_rgba(255,77,61,0.28)] disabled:cursor-not-allowed disabled:opacity-45"
-              title={isSending ? "Stop" : "Send"}
-            >
-              <AnimatePresence mode="wait" initial={false}>
-                {isSending ? (
-                  <motion.span key="stop" initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }}>
-                    <StopRoundedIcon className="h-4 w-4 text-white" />
-                  </motion.span>
-                ) : (
-                  <motion.span key="send" initial={{ opacity: 0, scale: 0.9, y: 1 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }}>
-                    <NorthRoundedIcon className="h-4 w-4" />
-                  </motion.span>
-                )}
-              </AnimatePresence>
-            </motion.button>
-          </div>
-
-          {/* ── Status bar ────────────────────────────────── */}
+          {/* ── Top bar: git features (branch, root, commit/push) ─────────── */}
           <AnimatePresence initial={false}>
             {showStatusBar && (
               <motion.div
@@ -725,7 +568,7 @@ export default function ChatComposer({
                 transition={{ duration: 0.18, ease: "easeOut" }}
                 className="overflow-visible"
               >
-                <div className="flex items-center gap-2 border-t border-white/[0.045] px-3.5 py-2">
+                <div className="flex items-center gap-2 border-b border-white/[0.045] px-3 py-1.5">
 
                   {/* Branch pill with dropdown */}
                   {gitStatus && (
@@ -1047,14 +890,9 @@ export default function ChatComposer({
                     </AnimatePresence>
                   </div>
 
-                  {/* Divider between root/branch and files */}
+                  {/* @file mention chips — right side of top bar */}
                   {atMentions.length > 0 && (
-                    <span className="text-[10px] text-white/15 shrink-0">·</span>
-                  )}
-
-                  {/* @file mention chips */}
-                  {atMentions.length > 0 && (
-                    <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1">
+                    <div className="ml-auto flex min-w-0 flex-1 flex-wrap items-center gap-1">
                       {atMentions.map((mention) => {
                         const parts    = mention.split(/[/\\]/);
                         const filename = parts[parts.length - 1];
@@ -1106,6 +944,195 @@ export default function ChatComposer({
               </motion.div>
             )}
           </AnimatePresence>
+
+          {/* ── Main input row ─────────────────────────────── */}
+          <div className="flex items-end gap-2 p-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              multiple
+              accept={canUploadImages
+                ? "image/*,.pdf,.txt,.md,.json,.csv,.yaml,.yml,.xml,.html,.js,.jsx,.ts,.tsx,.mjs,.cjs,.css,.scss,.py"
+                : ".pdf,.txt,.md,.json,.csv,.yaml,.yml,.xml,.html,.js,.jsx,.ts,.tsx,.mjs,.cjs,.css,.scss,.py"}
+              onChange={(e) => {
+                addFiles(Array.from(e.target.files ?? []));
+                e.target.value = "";
+              }}
+            />
+
+            <motion.button
+              type="button"
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={() => fileInputRef.current?.click()}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-white/8 bg-white/[0.03] text-white/62 transition-colors hover:border-white/12 hover:bg-white/[0.05] hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+              title={canUploadImages ? "Attach a file or image" : "Attach a PDF or text file (add a vision model in Settings to send images)"}
+              disabled={isSending || isTranscribing}
+            >
+              <Paperclip className="h-4 w-4" />
+            </motion.button>
+
+            {/* Textarea + slash palette */}
+            <div className="relative min-w-0 flex-1">
+              <SlashCommandPalette
+                query={slashQuery}
+                visible={showPalette}
+                onSelect={handleSlashSelect}
+              />
+              <textarea
+                ref={textareaRef}
+                value={messageInput}
+                onFocus={() => setIsInputFocused(true)}
+                onBlur={() => {
+                  setIsInputFocused(false);
+                  setTimeout(() => setShowPalette(false), 120);
+                }}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setMessageInput(val);
+                  e.target.style.height = "auto";
+                  e.target.style.height = `${Math.min(e.target.scrollHeight, 180)}px`;
+                  if (val.startsWith("/") && !val.includes(" ")) {
+                    setSlashQuery(val);
+                    setShowPalette(true);
+                  } else {
+                    setShowPalette(false);
+                    setSlashQuery("");
+                  }
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Escape" && showPalette) {
+                    e.preventDefault();
+                    setShowPalette(false);
+                    return;
+                  }
+                  if (showPalette && (e.key === "ArrowDown" || e.key === "ArrowUp" || e.key === "Tab")) {
+                    e.preventDefault();
+                    return;
+                  }
+                  onMessageKeyDown(e);
+                }}
+                onPaste={handlePaste}
+                placeholder="Message Kodo  ·  type / for commands  ·  @file to target"
+                rows={1}
+                className="min-h-[36px] w-full resize-none bg-transparent px-1 py-2 text-[14px] leading-6 text-white outline-none placeholder:text-white/20"
+                disabled={isSending || isTranscribing}
+              />
+
+              {/* Attached file chips */}
+              <AnimatePresence initial={false}>
+                {selectedFiles.length > 0 && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    className="mb-1 mt-2 flex flex-wrap gap-1.5"
+                  >
+                    {selectedFiles.map((file) => (
+                      <AttachmentChip
+                        key={`${file.name}_${file.size}_${file.lastModified}`}
+                        file={file}
+                        disabled={isSending || isTranscribing}
+                        onRemove={() =>
+                          setSelectedFiles((prev) =>
+                            prev.filter(
+                              (item) =>
+                                !(item.name === file.name && item.size === file.size && item.lastModified === file.lastModified)
+                            )
+                          )
+                        }
+                      />
+                    ))}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Clear message when an image was rejected (no vision model) */}
+              <AnimatePresence initial={false}>
+                {attachError && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 4 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 4 }}
+                    className="mt-2 flex items-start gap-2 rounded-xl border border-[#ff8a3d]/25 bg-[#ff8a3d]/[0.08] px-3 py-2"
+                  >
+                    <ImageOff className="mt-[1px] h-3.5 w-3.5 shrink-0 text-[#ff8a3d]/80" />
+                    <span className="flex-1 text-[11.5px] leading-5 text-white/70">{attachError}</span>
+                    <button
+                      type="button"
+                      onClick={() => setAttachError(null)}
+                      className="text-white/40 transition-colors hover:text-white/70"
+                      title="Dismiss"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+
+            {/* Mic */}
+            <motion.button
+              type="button"
+              whileHover={{ scale: 1.03 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={() => setIsRecording((p) => !p)}
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border transition-colors duration-200 ${
+                isTranscribing
+                  ? "border-[#ff8a3d]/20 bg-[#ff8a3d]/10 text-white"
+                  : isRecording
+                  ? "border-[#ff5e4d]/30 bg-[#ff5e4d]/12 text-white"
+                  : "border-white/8 bg-white/[0.03] text-white/62 hover:border-white/12 hover:bg-white/[0.05] hover:text-white"
+              }`}
+              title={isRecording ? "Stop recording" : "Voice input"}
+              disabled={isSending || isTranscribing}
+            >
+              {isTranscribing ? (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              ) : isRecording ? (
+                <StopCircle className="h-4 w-4" />
+              ) : (
+                <Mic className="h-4 w-4" />
+              )}
+            </motion.button>
+
+            {/* Send / Stop */}
+            <motion.button
+              type="button"
+              whileHover={{ scale: isSending ? 1 : 1.03 }}
+              whileTap={{ scale: isSending ? 1 : 0.96 }}
+              animate={
+                canSend && !isSending
+                  ? {
+                      scale: [1, 1.02, 1],
+                      boxShadow: [
+                        "0 12px 26px rgba(255,77,61,0.22)",
+                        "0 14px 30px rgba(255,77,61,0.35)",
+                        "0 12px 26px rgba(255,77,61,0.22)",
+                      ],
+                    }
+                  : undefined
+              }
+              transition={{ repeat: Infinity, duration: 2, ease: "easeInOut" }}
+              onClick={isSending ? () => onStop?.() : onSendMessage}
+              disabled={isTranscribing || (!isSending && !canSend)}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-[#ff8a3d]/20 bg-gradient-to-br from-[#ff6a3d] via-[#ff4d3d] to-[#ff2d2d] text-white shadow-[0_12px_26px_rgba(255,77,61,0.22)] transition-all duration-200 hover:shadow-[0_16px_32px_rgba(255,77,61,0.28)] disabled:cursor-not-allowed disabled:opacity-45"
+              title={isSending ? "Stop" : "Send"}
+            >
+              <AnimatePresence mode="wait" initial={false}>
+                {isSending ? (
+                  <motion.span key="stop" initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }} exit={{ opacity: 0, scale: 0.9 }}>
+                    <StopRoundedIcon className="h-4 w-4 text-white" />
+                  </motion.span>
+                ) : (
+                  <motion.span key="send" initial={{ opacity: 0, scale: 0.9, y: 1 }} animate={{ opacity: 1, scale: 1, y: 0 }} exit={{ opacity: 0, scale: 0.9 }}>
+                    <NorthRoundedIcon className="h-4 w-4" />
+                  </motion.span>
+                )}
+              </AnimatePresence>
+            </motion.button>
+          </div>
         </motion.div>
 
         {/* Hint line */}

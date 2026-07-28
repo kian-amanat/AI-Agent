@@ -5,7 +5,14 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-export const PROJECT_ROOT = process.env.WORKSPACE_PATH || process.cwd();
+// The repo root — NOT process.cwd(). The backend is normally launched via
+// `npm --prefix backend1 run dev`, which sets cwd to backend1/ itself; falling
+// back to cwd() silently scoped every path-confined tool (file reads, attachment
+// resolution, the workspace file tree/root-picker) to backend1/ only, hiding
+// chatbot/my-chatbot-ui/ from the agent entirely. Compute the real root the same
+// way agent_loop.mjs and undo.service.mjs already do (2 levels up from
+// backend1/config), and only let WORKSPACE_PATH override it explicitly.
+export const PROJECT_ROOT = process.env.WORKSPACE_PATH || path.resolve(__dirname, "..", "..");
 export const BACKEND_ROOT = path.join(PROJECT_ROOT, "backend");
 export const FRONTEND_ROOT = path.join(PROJECT_ROOT, "frontend");
 export const PLANS_DIR = PROJECT_ROOT;

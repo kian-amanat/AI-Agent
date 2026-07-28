@@ -11,6 +11,7 @@ import { PROJECT_ROOT } from "../config/openai.mjs";
 import {
   buildResolvedPathCandidates,
   normalizePath,
+  isSensitiveFilePath,
 } from "./path.util.mjs";
 import { extractCandidateFilePaths, uniq } from "./text.util.mjs";
 
@@ -43,8 +44,12 @@ async function walkFiles(rootAbs, maxDepth = 8, depth = 0, relBase = "") {
 export async function readFileContent(relPath, maxBytes = 200000) {
   try {
     const normalized = normalizePath(relPath);
+    if (isSensitiveFilePath(normalized)) return ""; // never surface secret files as context
     const abs = path.resolve(PROJECT_ROOT, normalized);
-    if (!abs.startsWith(path.resolve(PROJECT_ROOT))) return "";
+    // Confine to PROJECT_ROOT. Compare with a trailing separator so a sibling
+    // dir sharing the prefix (e.g. /root vs /root-evil) is NOT treated as inside.
+    const rootResolved = path.resolve(PROJECT_ROOT);
+    if (abs !== rootResolved && !abs.startsWith(rootResolved + path.sep)) return "";
     if (!fsSync.existsSync(abs)) return "";
     const stat = await fs.stat(abs);
     if (!stat.isFile()) return "";

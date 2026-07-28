@@ -33,8 +33,8 @@ import { PLANS_DIR, OPENAI_API_KEY, OPENAI_BASE_URL, WHISPER_MODEL, openai } fro
 import { uniq }                        from "../utils/text.util.mjs";
 import { undoRequestChanges }          from "../services/undo.service.mjs";
 import { routeModel, getCapabilities } from "../services/modelRouter.mjs";
+import { loadUserSettings } from "../services/userSettings.service.mjs";
 import db, {
-  getUserSettings,
   createAgentJob,
   updateAgentJobStatus,
   getAgentJob,
@@ -52,7 +52,6 @@ import {
   createJob, emitToJob, subscribe, finishJob, cancelJob, getRunningJobs,
 } from "../services/jobs.mjs";
 
-const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
 const ALLOWED_ORIGIN = process.env.KODO_ALLOWED_ORIGIN || "http://localhost:3000";
 
 // Per-session queue — two concurrent requests for the same session would
@@ -130,20 +129,10 @@ function makeAskUser(requestId, jobEmit, abortSignal) {
 // ── Helpers ───────────────────────────────────────────────────
 
 // Per-user settings (multi-user): each user's model/API key is isolated in the
-// DB. Falls back to the legacy global data/settings.json only if a user has no
-// row yet (keeps single-user installs working through the upgrade).
-async function loadSettings(userId) {
-  if (userId) {
-    const perUser = getUserSettings(userId);
-    if (perUser) return perUser;
-  }
-  try {
-    const raw = await fs.readFile(SETTINGS_PATH, "utf-8");
-    return JSON.parse(raw);
-  } catch {
-    return null;
-  }
-}
+// DB — see services/userSettings.service.mjs. The legacy global data/settings.json
+// is migrated (once) only into the very first account on this install, never
+// into a later signup, so a new user never silently spends someone else's key.
+const loadSettings = loadUserSettings;
 
 function getAuthSessionFromRequest(request) {
   try {
@@ -248,7 +237,7 @@ function syncSessionMemory(sessionId, userId, {
 // per-session queue slot — all independent of whether any client is listening.
 async function startBackgroundRun(ctx) {
   const {
-    requestId, sessionId, userId, workspacePath, modelRoute, modelMeta,
+    requestId, sessionId, userId, workspacePath, modelRoute, visionRoute, modelMeta,
     plannerContextMessage, rememberedFile, attachmentPaths, effectiveMessage,
     permissionMode, controller, releaseSlot, startEvent,
   } = ctx;
@@ -309,14 +298,19 @@ async function startBackgroundRun(ctx) {
     createAgentJob({ requestId, sessionId, userId, title });
     jobEmit(startEvent);
 
-    const GRAPH_TIMEOUT_MS = 15 * 60 * 1000;
+    // Raised alongside agent_loop's MAX_ITERATIONS (25→40) and the new
+    // parallel-read execution — a real multi-file build can legitimately need
+    // more wall-clock time than a single-file fix, and this (now that it
+    // actually aborts the run on expiry, see below) is the real outer bound
+    // on how long any run is allowed to take.
+    const GRAPH_TIMEOUT_MS = 25 * 60 * 1000;
     const timeoutPromise = new Promise((resolve) =>
       setTimeout(() => resolve({ ok: false, timedOut: true }), GRAPH_TIMEOUT_MS)
     );
     const graphPromise = runKodoGraph({
       userMessage:          plannerContextMessage,
       rememberedTargetFile: rememberedFile,
-      sessionId, requestId, userId, workspacePath, modelRoute,
+      sessionId, requestId, userId, workspacePath, modelRoute, visionRoute,
       attachmentPaths,
       emit: jobEmit,
       abortSignal: controller.signal,
@@ -330,6 +324,13 @@ async function startBackgroundRun(ctx) {
     pendingApprovals.delete(requestId);
 
     if (raceResult.timedOut) {
+      // Promise.race doesn't cancel the loser — without this, agentLoopNode
+      // keeps running unattended after the user's already been told to try
+      // again, still writing files with nothing watching it, and can then
+      // collide with a fresh retry mutating the same files concurrently.
+      // agent_loop.mjs already checks abortSignal at each loop iteration, so
+      // this makes it actually stop instead of running out the clock unseen.
+      controller.abort();
       jobEmit({ type: "content", content: "The task is taking longer than expected. Please try again." });
       jobEmit(doneEvent(""));
       saveMessage(sessionId, userId, "assistant", "(timed out)", "graph", requestId, null);
@@ -385,9 +386,11 @@ async function startBackgroundRun(ctx) {
       writeAgentMemory({ workspacePath, userMessage: effectiveMessage, assistantAnswer: finalAnswer, editedFiles, modelRoute })
         .catch((err) => console.warn("[AgentMemory] background write failed:", err.message));
     }
-    syncSessionMemory(sessionId, userId, {
-      assistantMessage: finalAnswer, task: effectiveMessage, taskType: "graph", targetFile: editedFiles[0] || "",
-    });
+    if (!wasCancelled) {
+      syncSessionMemory(sessionId, userId, {
+        assistantMessage: finalAnswer, task: effectiveMessage, taskType: "graph", targetFile: editedFiles[0] || "",
+      });
+    }
 
     markFinished(wasCancelled ? "cancelled" : "done");
   } catch (err) {
@@ -549,11 +552,30 @@ export default async function plannerAgentRoute(fastify) {
 
     const workspacePath = authSession.workspace_path || "";
 
+    // No bound workspace = refuse, don't silently fall back to the server's
+    // own repo (agent_loop.mjs's PROJECT_ROOT fallback). Multiple accounts can
+    // share one running backend, and a fallback here isn't just a read-only
+    // view leak like the file tree — the agent WRITES files, so an unconfigured
+    // user would otherwise be editing whichever project the server happens to
+    // be running from.
+    if (!workspacePath) {
+      return reply.code(400).send({
+        ok: false,
+        error: "no_workspace",
+        message: "No project connected yet. Open Kodo from your project (via the extension) or pick one from the folder switcher before chatting.",
+      });
+    }
+
     const settings       = await loadSettings(userId);
     // Only images require a vision model; text/PDF are extracted to text and
     // work with any model, so the gate keys off image attachments specifically.
     const hasImageAttachments = attachment_paths.some((p) => isImageMime(inferMimeTypeFromPath(p), p));
     const modelRoute     = routeModel(settings, { hasImageAttachments });
+    // Independent of this turn's attachments — verify_ui may want to
+    // escalate a UI-check failure to vision mid-run regardless of whether
+    // THIS message happened to include an image. {ok:false} just means no
+    // vision model is configured; that's fine, escalation silently no-ops.
+    const visionRoute    = routeModel(settings, { hasImageAttachments: true });
 
     if (!modelRoute.ok) {
       const errorMap = {
@@ -732,7 +754,7 @@ export default async function plannerAgentRoute(fastify) {
     // explicit POST /cancel/:requestId — never by the connection closing.
     const jobController = new AbortController();
     void startBackgroundRun({
-      requestId, sessionId, userId, workspacePath, modelRoute, modelMeta,
+      requestId, sessionId, userId, workspacePath, modelRoute, visionRoute, modelMeta,
       plannerContextMessage, rememberedFile,
       attachmentPaths: attachment_paths,
       effectiveMessage, permissionMode,
@@ -961,6 +983,10 @@ export default async function plannerAgentRoute(fastify) {
       try {
         const settings   = await loadSettings(authSession.user_id);
         const modelRoute = routeModel(settings, false);
+        // Don't let an unconfigured user's compaction silently fall through to
+        // llm.mjs's global-file/env-var fallback (another user's key) — treat
+        // "no settings" the same as a failed call and use the tail fallback.
+        if (!modelRoute.ok) throw new Error("No model configured for this user");
         const { callLLM } = await import("../services/llm.mjs");
         const result = await callLLM({
           system: "Summarize this coding-session conversation for context compaction. Keep: what the user is building, decisions made, files created/edited, current state, unresolved issues, and user preferences. Omit pleasantries. Max 40 lines.",
@@ -968,6 +994,7 @@ export default async function plannerAgentRoute(fastify) {
           modelRoute,
           maxTokens: 1200,
           temperature: 0.2,
+          thinking: false, // factual summarization, not reasoning
         });
         const llmSummary = String(result?.content || "").trim();
         if (!llmSummary) throw new Error("empty summary");

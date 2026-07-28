@@ -12,7 +12,7 @@ import os from "os";
 import db from "../db.mjs";
 
 const JWT_SECRET = process.env.JWT_SECRET || "kodo-local-dev-secret";
-const TOKEN_FILE = path.join(os.homedir(), ".kodo", "token.json");
+const SESSIONS_DIR = path.join(os.homedir(), ".kodo", "sessions");
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
@@ -36,15 +36,30 @@ function verifyToken(token) {
   }
 }
 
-function writeTokenFile(token, sessionId) {
-  const dir = path.dirname(TOKEN_FILE);
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(TOKEN_FILE, JSON.stringify({ token, sessionId }), "utf-8");
+// The handshake file used to be a single machine-wide `~/.kodo/token.json` —
+// ANY extension window on the machine read the SAME file regardless of which
+// project/file it had open, so opening a different project silently logged
+// in as whoever last logged in anywhere. Scoping the file by a hash of the
+// workspace path means a different project simply has no file yet, and the
+// extension correctly falls through to its own login prompt — no cross-project
+// identity bleed, and no code change needed in the extension itself as long as
+// it keys its lookup off the same workspace path it already knows.
+function workspaceTokenFile(workspacePath) {
+  const key = crypto.createHash("sha256").update(String(workspacePath || "")).digest("hex").slice(0, 24);
+  return path.join(SESSIONS_DIR, `${key}.json`);
 }
 
-function clearTokenFile() {
+function writeWorkspaceTokenFile(workspacePath, token, sessionId) {
+  if (!workspacePath) return;
+  if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  fs.writeFileSync(workspaceTokenFile(workspacePath), JSON.stringify({ token, sessionId, workspacePath }), "utf-8");
+}
+
+function clearWorkspaceTokenFile(workspacePath) {
+  if (!workspacePath) return;
   try {
-    if (fs.existsSync(TOKEN_FILE)) fs.unlinkSync(TOKEN_FILE);
+    const f = workspaceTokenFile(workspacePath);
+    if (fs.existsSync(f)) fs.unlinkSync(f);
   } catch {}
 }
 
@@ -80,7 +95,7 @@ function getAuthUser(request) {
 export default async function authRoute(fastify) {
   // POST /api/auth/signup
   fastify.post("/signup", async (request, reply) => {
-    const { email, password, name } = request.body ?? {};
+    const { email, password, name, workspacePath, workspaceName } = request.body ?? {};
 
     if (!email || !password || !name) {
       return reply
@@ -111,11 +126,14 @@ export default async function authRoute(fastify) {
     const sessionId = generateId("sess");
     const token = signToken(userId, sessionId);
 
+    // Bind the workspace AT creation time when the caller already knows it
+    // (e.g. the extension handoff, which knows exactly which file/project is
+    // open) — never left to a best-effort follow-up call that might not happen.
     db.prepare(
-      "INSERT INTO auth_sessions (id, user_id, token, created_at, last_active) VALUES (?, ?, ?, ?, ?)"
-    ).run(sessionId, userId, token, nowIso(), nowIso());
+      "INSERT INTO auth_sessions (id, user_id, token, workspace_path, workspace_name, created_at, last_active) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).run(sessionId, userId, token, workspacePath || null, workspaceName || (workspacePath ? path.basename(workspacePath) : null), nowIso(), nowIso());
 
-    writeTokenFile(token, sessionId);
+    if (workspacePath) writeWorkspaceTokenFile(workspacePath, token, sessionId);
 
     const user = db
       .prepare(
@@ -128,7 +146,7 @@ export default async function authRoute(fastify) {
 
   // POST /api/auth/login
   fastify.post("/login", async (request, reply) => {
-    const { email, password } = request.body ?? {};
+    const { email, password, workspacePath, workspaceName } = request.body ?? {};
 
     if (!email || !password) {
       return reply
@@ -154,10 +172,10 @@ export default async function authRoute(fastify) {
     const token = signToken(user.id, sessionId);
 
     db.prepare(
-      "INSERT INTO auth_sessions (id, user_id, token, created_at, last_active) VALUES (?, ?, ?, ?, ?)"
-    ).run(sessionId, user.id, token, nowIso(), nowIso());
+      "INSERT INTO auth_sessions (id, user_id, token, workspace_path, workspace_name, created_at, last_active) VALUES (?, ?, ?, ?, ?, ?, ?)"
+    ).run(sessionId, user.id, token, workspacePath || null, workspaceName || (workspacePath ? path.basename(workspacePath) : null), nowIso(), nowIso());
 
-    writeTokenFile(token, sessionId);
+    if (workspacePath) writeWorkspaceTokenFile(workspacePath, token, sessionId);
 
     return {
       ok: true,
@@ -174,8 +192,8 @@ export default async function authRoute(fastify) {
       db.prepare("DELETE FROM auth_sessions WHERE id = ?").run(
         auth.session.id
       );
+      clearWorkspaceTokenFile(auth.session.workspace_path);
     }
-    clearTokenFile();
     return { ok: true };
   });
 
@@ -211,13 +229,21 @@ export default async function authRoute(fastify) {
   });
 
   // POST /api/auth/handshake
-  // Called by web UI after login so the extension can detect the token via file polling.
+  // Called by the web UI after login so the extension can detect the token via
+  // file polling. workspacePath is REQUIRED — this is what scopes the handshake
+  // file to one project instead of the whole machine (see workspaceTokenFile
+  // above). A caller that can't supply it can't safely hand off a session.
   fastify.post("/handshake", async (request, reply) => {
-    const { token, sessionId } = request.body ?? {};
+    const { token, sessionId, workspacePath, workspaceName } = request.body ?? {};
     if (!token || !sessionId) {
       return reply
         .code(400)
         .send({ ok: false, error: "token and sessionId required" });
+    }
+    if (!workspacePath) {
+      return reply
+        .code(400)
+        .send({ ok: false, error: "workspacePath is required — the handshake must be scoped to the project that's actually open" });
     }
 
     const payload = verifyToken(token);
@@ -225,13 +251,18 @@ export default async function authRoute(fastify) {
       return reply.code(401).send({ ok: false, error: "Invalid token" });
     }
 
-    writeTokenFile(token, sessionId);
+    db.prepare(
+      "UPDATE auth_sessions SET workspace_path = ?, workspace_name = ? WHERE id = ?"
+    ).run(workspacePath, workspaceName || path.basename(workspacePath), payload.sessionId);
+
+    writeWorkspaceTokenFile(workspacePath, token, sessionId);
     return { ok: true };
   });
 
-  // DELETE /api/auth/handshake — clear on logout from browser
+  // DELETE /api/auth/handshake — clear on logout from browser (scoped)
   fastify.delete("/handshake", async (request, reply) => {
-    clearTokenFile();
+    const { workspacePath } = request.body ?? {};
+    clearWorkspaceTokenFile(workspacePath);
     return { ok: true };
   });
 }

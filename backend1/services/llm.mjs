@@ -127,6 +127,7 @@ export async function callLLM({
   retries = 1,
   stream: useStream = false,
   signal,
+  thinking,
 }) {
   const creds = await resolveCredentials(modelRoute);
 
@@ -153,12 +154,26 @@ export async function callLLM({
   // minutes. Non-streaming requests get killed by gateway timeouts (504) before
   // the model finishes. Streaming keeps the connection alive token-by-token so
   // the gateway never sees an idle connection, no matter how long reasoning takes.
-  const isThinkingModel = /thinking|r1\b|reasoner/i.test(creds.model);
+  const nameLooksLikeThinking = /thinking|r1\b|reasoner/i.test(creds.model);
+  // Explicit call-site control (thinking:true/false) wins over the name
+  // guess — Qwen3-family models are hybrid (thinking-capable regardless of
+  // what's in the name) and default enable_thinking to TRUE server-side
+  // whenever a request doesn't mention it at all. Every caller of callLLM in
+  // this codebase today (router classification, memory writes, conversation
+  // compaction) is a mechanical, structured-output task with zero benefit
+  // from reasoning — left as the old name-only guess, that default silently
+  // applied to all of them, billed at whatever premium the provider charges
+  // for reasoning output tokens on every single one.
+  const wantsThinking = thinking !== undefined ? thinking : nameLooksLikeThinking;
+  // Only meaningful when explicitly false here — the wantsThinking:true path
+  // below always sends enable_thinking:true itself, and leaving `thinking`
+  // unset preserves the old no-extra-body-at-all behavior for other models.
+  const extraBody = thinking === false ? { enable_thinking: false } : undefined;
 
   // Give thinking models a longer socket timeout (10 min) so streaming doesn't drop.
-  const client = makeClient(creds, isThinkingModel ? 600_000 : 180_000);
+  const client = makeClient(creds, wantsThinking ? 600_000 : 180_000);
 
-  console.log(`[LLM] callLLM → model=${creds.model} baseURL=${creds.baseURL}${isThinkingModel ? " [streaming + reasoning]" : ""}`);
+  console.log(`[LLM] callLLM → model=${creds.model} baseURL=${creds.baseURL}${wantsThinking ? " [streaming + reasoning]" : thinking === false ? " [thinking explicitly off]" : ""}`);
 
   const fullMessages = [
     ...(system ? [{ role: "system", content: system }] : []),
@@ -166,7 +181,7 @@ export async function callLLM({
   ];
 
   // ── Thinking model path: stream to avoid gateway timeout ──────────────────
-  if (isThinkingModel) {
+  if (wantsThinking) {
     let contentBuf = "";
     let reasoningBuf = "";
     let lastErr = null;
@@ -228,6 +243,7 @@ export async function callLLM({
           max_tokens: maxTokens,
           temperature,
           stream: true,
+          ...(extraBody ? { extra_body: extraBody } : {}),
         });
 
         for await (const chunk of stream) {
@@ -255,7 +271,7 @@ export async function callLLM({
   // ── Normal model path: single request ─────────────────────────────────────
   const response = await chatCompletionWithRetry(
     client,
-    { model: creds.model, messages: fullMessages, max_tokens: maxTokens, temperature },
+    { model: creds.model, messages: fullMessages, max_tokens: maxTokens, temperature, ...(extraBody ? { extra_body: extraBody } : {}) },
     retries,
     signal
   );
