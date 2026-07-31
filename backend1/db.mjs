@@ -126,6 +126,31 @@ db.exec(`
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
   );
+
+  -- The agent's WORKING memory, distinct from the messages table (which is the
+  -- user-facing chat log). One row per entry in the tool-loop conversation, in
+  -- execution order, so a later turn can replay what was actually attempted —
+  -- tool calls, their results, failures and all — instead of re-deriving it
+  -- from a summary. This is what makes the loop continuous across turns and
+  -- recoverable after a restart. Replayed/compacted by
+  -- services/conversationStore.mjs.
+  CREATE TABLE IF NOT EXISTS turn_events (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id   TEXT NOT NULL,
+    user_id      INTEGER,
+    request_id   TEXT,
+    kind         TEXT NOT NULL,           -- user | assistant | tool
+    content      TEXT,                    -- message text, or the tool's result payload
+    tool_calls   TEXT,                    -- assistant rows: JSON array, verbatim from the model
+    tool_call_id TEXT,                    -- tool rows: links back to the assistant's call
+    tool_name    TEXT,
+    tool_args    TEXT,                    -- JSON string, truncated
+    status       TEXT,                    -- tool rows: ok | error
+    duration_ms  INTEGER,
+    pinned       INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+  );
 `);
 
 ensureColumn("sessions", "user_id", "INTEGER");
@@ -142,6 +167,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_memory_session_user ON session_memory(session_id, user_id);
   CREATE INDEX IF NOT EXISTS idx_agent_jobs_user ON agent_jobs(user_id, status);
   CREATE INDEX IF NOT EXISTS idx_agent_jobs_session ON agent_jobs(session_id);
+  CREATE INDEX IF NOT EXISTS idx_turn_events_session ON turn_events(session_id, user_id, id);
 `);
 
 // A server restart wipes the in-memory job registry, so any job still marked
@@ -318,6 +344,16 @@ export function saveMessage(sessionId, userId, role, content, intent = null, req
   `).run(role, content, intent, now, sessionId, userId);
 }
 
+// Does this session already exist for this user? Distinguishes a NEW session
+// from a RESUMED one — createSession is upsert-style, so the answer must be
+// read before it runs.
+export function sessionExists(sessionId, userId) {
+  if (!sessionId) return false;
+  const row = db.prepare(`SELECT id FROM sessions WHERE id = ? AND user_id IS ?`)
+    .get(sessionId, userId ?? null);
+  return !!row;
+}
+
 export function getSessionMessages(sessionId, userId, limit = 20) {
   return db
     .prepare(`
@@ -329,6 +365,74 @@ export function getSessionMessages(sessionId, userId, limit = 20) {
     `)
     .all(sessionId, userId, limit)
     .reverse();
+}
+
+// ── Turn events (the agent's replayable working memory) ──────────────────────
+// Persisted per tool-loop entry so a later turn — or a resumed session after a
+// restart — can rebuild the real execution history. Oversized payloads are
+// capped here rather than at read time: the FACT that a tool ran (and whether
+// it failed) matters more than its full output, and storing megabytes of file
+// dumps would bloat the DB for no replay benefit.
+const TURN_EVENT_CONTENT_MAX = 4_000;
+const TURN_EVENT_ARGS_MAX = 2_000;
+
+function capText(value, max) {
+  if (value == null) return null;
+  const s = typeof value === "string" ? value : JSON.stringify(value);
+  if (s == null) return null;
+  return s.length > max ? `${s.slice(0, max)} …[truncated]` : s;
+}
+
+export function appendTurnEvent({
+  sessionId, userId, requestId = null, kind, content = null,
+  toolCalls = null, toolCallId = null, toolName = null, toolArgs = null,
+  status = null, durationMs = null, pinned = false,
+}) {
+  if (!sessionId || !kind) return;
+  db.prepare(`
+    INSERT INTO turn_events
+      (session_id, user_id, request_id, kind, content, tool_calls, tool_call_id,
+       tool_name, tool_args, status, duration_ms, pinned, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    sessionId, userId ?? null, requestId, kind,
+    capText(content, TURN_EVENT_CONTENT_MAX),
+    toolCalls ? JSON.stringify(toolCalls) : null,
+    toolCallId, toolName,
+    capText(toolArgs, TURN_EVENT_ARGS_MAX),
+    status, durationMs, pinned ? 1 : 0, nowIso(),
+  );
+}
+
+// Newest `limit` events, returned oldest-first so the caller can replay them
+// directly into a conversation array.
+export function getTurnEvents(sessionId, userId, limit = 400) {
+  return db.prepare(`
+    SELECT id, request_id, kind, content, tool_calls, tool_call_id,
+           tool_name, tool_args, status, duration_ms, pinned, created_at
+    FROM turn_events
+    WHERE session_id = ? AND user_id IS ?
+    ORDER BY id DESC
+    LIMIT ?
+  `).all(sessionId, userId ?? null, limit).reverse();
+}
+
+export function clearTurnEvents(sessionId, userId) {
+  return db.prepare(`DELETE FROM turn_events WHERE session_id = ? AND user_id IS ?`)
+    .run(sessionId, userId ?? null);
+}
+
+// Keep a session's working memory bounded over a long-lived session: drop the
+// oldest unpinned rows once the table grows past `keep` for this session.
+export function pruneTurnEvents(sessionId, userId, keep = 600) {
+  return db.prepare(`
+    DELETE FROM turn_events
+    WHERE session_id = ? AND user_id IS ? AND pinned = 0 AND id NOT IN (
+      SELECT id FROM turn_events
+      WHERE session_id = ? AND user_id IS ?
+      ORDER BY id DESC LIMIT ?
+    )
+  `).run(sessionId, userId ?? null, sessionId, userId ?? null, keep);
 }
 
 export function listSessions(userId, limit = 50) {
@@ -355,6 +459,11 @@ export function deleteSession(sessionId, userId) {
     DELETE FROM session_memory
     WHERE session_id = ? AND user_id = ?
   `).run(sessionId, userId);
+
+  db.prepare(`
+    DELETE FROM turn_events
+    WHERE session_id = ? AND user_id IS ?
+  `).run(sessionId, userId ?? null);
 
   db.prepare(`
     DELETE FROM sessions

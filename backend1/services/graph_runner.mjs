@@ -17,6 +17,9 @@ function getGraph() {
 export async function runKodoGraph({
   userMessage,
   rememberedTargetFile = "",
+  priorMessages = [],
+  priorConversation = [],
+  recordEvent = null,
   sessionId,
   requestId,
   userId,
@@ -37,6 +40,9 @@ export async function runKodoGraph({
     intent:          "",
     userMessage,
     rememberedTargetFile,
+    priorMessages,
+    priorConversation,
+    recordEvent,
     workspacePath,
     finalAnswer:     "",
     editedFiles:     [],
@@ -57,6 +63,7 @@ export async function runKodoGraph({
   console.log(`[KodoGraph] 🚀 session=${sessionId} request=${requestId}`);
   console.log(`[KodoGraph]    workspace=${workspacePath || "(none)"}`);
   console.log(`[KodoGraph]    remembered file=${rememberedTargetFile || "(none)"}`);
+  console.log(`[KodoGraph]    prior turns=${priorConversation.length || priorMessages.length}${priorConversation.length ? " (tool timeline)" : ""}`);
   console.log(`[KodoGraph]    message="${String(userMessage).slice(0, 80)}"`);
 
     let finalState;

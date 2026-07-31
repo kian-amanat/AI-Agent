@@ -11,7 +11,7 @@ import path from "path";
 import fs from "fs/promises";
 import os from "os";
 
-import { executeTool, validateBashCommand, bashApprovalNeeded, globToRegex, walkWorkspace, normalizeArgumentsJSON, runStopHook, shrinkOldToolOutputs, executeToolCallsBatch } from "../agents/nodes/agent_loop.mjs";
+import { executeTool, validateBashCommand, bashApprovalNeeded, globToRegex, walkWorkspace, normalizeArgumentsJSON, runStopHook, shrinkOldToolOutputs, executeToolCallsBatch, buildPriorTurns, sanitizeToolCalls } from "../agents/nodes/agent_loop.mjs";
 
 let passed = 0;
 let failed = 0;
@@ -649,6 +649,120 @@ await test("an already-aborted signal produces no results (no undefined holes pu
   controller.abort();
   const results = await executeToolCallsBatch(toolCalls, makeCtx(), 1, 40, controller.signal);
   assert.deepStrictEqual(results, []);
+});
+
+// ── sanitizeToolCalls (dynamic tool validation) ───────────────────────────────
+
+console.log("\n📦 sanitizeToolCalls (must not discard runtime-discovered tools)");
+
+await test("a built-in tool call survives", () => {
+  const msg = { tool_calls: [{ id: "a", function: { name: "read_file", arguments: '{"path":"x"}' } }] };
+  sanitizeToolCalls(msg);
+  assert.strictEqual(msg.tool_calls.length, 1);
+});
+
+await test("a genuinely unknown tool is still dropped", () => {
+  const msg = { tool_calls: [{ id: "a", function: { name: "not_a_real_tool", arguments: "{}" } }] };
+  sanitizeToolCalls(msg);
+  assert.strictEqual(msg.tool_calls, undefined);
+});
+
+await test("REGRESSION: an MCP tool offered this run is NOT discarded as unknown", () => {
+  // Was a real bug found only by the live E2E: MCP tools are discovered per
+  // workspace and appended at runtime, so validating against the static
+  // built-in set silently dropped every mcp__* call. The model re-issued it
+  // every iteration and the run burned its whole budget without ever
+  // reaching the server.
+  const msg = { tool_calls: [{ id: "a", function: { name: "mcp__deploy__get_deploy_token", arguments: "{}" } }] };
+  const offered = new Set(["read_file", "mcp__deploy__get_deploy_token"]);
+  sanitizeToolCalls(msg, offered);
+  assert.ok(msg.tool_calls, "an offered MCP tool must survive sanitising");
+  assert.strictEqual(msg.tool_calls[0].function.name, "mcp__deploy__get_deploy_token");
+});
+
+await test("an mcp__ call NOT offered this run is still rejected", () => {
+  const msg = { tool_calls: [{ id: "a", function: { name: "mcp__ghost__thing", arguments: "{}" } }] };
+  sanitizeToolCalls(msg, new Set(["read_file"]));
+  assert.strictEqual(msg.tool_calls, undefined, "prefix alone must not grant validity");
+});
+
+// ── buildPriorTurns (cross-turn memory) ───────────────────────────────────────
+
+console.log("\n📦 buildPriorTurns (carrying prior turns into the loop)");
+
+await test("no history → empty (a first turn behaves exactly as before)", () => {
+  assert.deepStrictEqual(buildPriorTurns([]), []);
+  assert.deepStrictEqual(buildPriorTurns(null), []);
+  assert.deepStrictEqual(buildPriorTurns(undefined), []);
+});
+
+await test("completed turns are carried through in chronological order", () => {
+  const out = buildPriorTurns([
+    { role: "user", content: "set requires-python to >=3.10" },
+    { role: "assistant", content: "Done — set it to >=3.10." },
+  ]);
+  assert.deepStrictEqual(out, [
+    { role: "user", content: "set requires-python to >=3.10" },
+    { role: "assistant", content: "Done — set it to >=3.10." },
+  ]);
+});
+
+await test("a trailing UNANSWERED user message is dropped (aborted turn must not look resumable)", () => {
+  const out = buildPriorTurns([
+    { role: "user", content: "first" },
+    { role: "assistant", content: "first answer" },
+    { role: "user", content: "aborted mid-flight" },
+  ]);
+  assert.deepStrictEqual(out.map((m) => m.content), ["first", "first answer"]);
+});
+
+await test("history that is ONLY an unanswered user message collapses to empty", () => {
+  assert.deepStrictEqual(buildPriorTurns([{ role: "user", content: "never answered" }]), []);
+});
+
+await test("blank and non-user/assistant rows are skipped", () => {
+  const out = buildPriorTurns([
+    { role: "system", content: "ignored" },
+    { role: "user", content: "   " },
+    { role: "user", content: "real" },
+    { role: "assistant", content: "reply" },
+  ]);
+  assert.deepStrictEqual(out, [{ role: "user", content: "real" }, { role: "assistant", content: "reply" }]);
+});
+
+await test("keeps the NEWEST turns when over the message cap", () => {
+  const many = [];
+  for (let i = 0; i < 10; i++) {
+    many.push({ role: "user", content: `q${i}` }, { role: "assistant", content: `a${i}` });
+  }
+  const out = buildPriorTurns(many, { maxMsgs: 4 });
+  assert.strictEqual(out.length, 4);
+  assert.deepStrictEqual(out.map((m) => m.content), ["q8", "a8", "q9", "a9"]);
+});
+
+await test("an oversized single message is truncated, not dropped", () => {
+  const out = buildPriorTurns(
+    [{ role: "user", content: "x" }, { role: "assistant", content: "y".repeat(5000) }],
+    { perMsgMax: 100 },
+  );
+  const last = out[out.length - 1];
+  assert.ok(last.content.length < 200, `expected truncation, got ${last.content.length} chars`);
+  assert.ok(last.content.endsWith("…[truncated]"));
+});
+
+await test("total char budget is respected (oldest turns fall off first)", () => {
+  const out = buildPriorTurns(
+    [
+      { role: "user", content: "a".repeat(500) },
+      { role: "assistant", content: "b".repeat(500) },
+      { role: "user", content: "c".repeat(500) },
+      { role: "assistant", content: "d".repeat(500) },
+    ],
+    { charBudget: 1100 },
+  );
+  const chars = out.reduce((n, m) => n + m.content.length, 0);
+  assert.ok(chars <= 1100, `budget exceeded: ${chars}`);
+  assert.strictEqual(out[out.length - 1].content[0], "d", "newest turn must be kept");
 });
 
 // ── Summary ───────────────────────────────────────────────────────────────────
