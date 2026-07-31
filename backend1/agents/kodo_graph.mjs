@@ -60,6 +60,16 @@ export const KodoStateAnnotation = {
   requestId:       { default: () => "" },
   userId:          { default: () => "" },
 
+  // Prior conversation turns ({role, content}) from this session, oldest first,
+  // injected by the route. agent_loop seeds its tool-loop conversation with
+  // these so it can see what it already tried instead of re-deriving each turn.
+  priorMessages: { default: () => [] },
+
+  // The replayed tool timeline (user/assistant/tool_call/tool_result) rebuilt
+  // from persisted turn_events — the agent's real working memory. Takes
+  // precedence over priorMessages when present.
+  priorConversation: { default: () => [] },
+
   // The last file the user worked on (carried across turns)
   rememberedTargetFile: {
     default: () => "",
@@ -84,6 +94,9 @@ export const KodoStateAnnotation = {
   // mid-task, the same way approvalPromise gates a mutation — a function
   // ({question, header, options}) => Promise<answer>, injected by graph_runner.
   askUser:         { default: () => null },
+  // Appends a turn_events row so this run's tool calls/results become the next
+  // turn's working memory — injected by graph_runner, never serialised.
+  recordEvent:     { default: () => null },
 };
 
 // ── Error boundary ────────────────────────────────────────────────────────────

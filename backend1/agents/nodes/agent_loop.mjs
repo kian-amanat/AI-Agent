@@ -83,6 +83,14 @@ import { validateSyntax, writeFileAtomic } from "../../utils/syntax.util.mjs";
 import { isSensitiveFilePath } from "../../utils/path.util.mjs";
 import { sanitizedChildEnv } from "../../utils/process.util.mjs";
 import { spawnMcpServer } from "../../services/mcpClient.mjs";
+import {
+  discoverMcpTools, callMcpTool, isMcpToolName,
+  listMcpResources, readMcpResource, isPooledClient,
+} from "../../services/mcpTools.mjs";
+import { normalizeHookConfig, fireHookEvent } from "../../services/hooks.mjs";
+import { repairToolPairing } from "../../services/conversationStore.mjs";
+import { interactions } from "../../services/interactionManager.mjs";
+import { getAnsweredQuestion, recordAnsweredQuestion } from "../../services/sessionAnswers.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -192,6 +200,51 @@ export function shrinkOldToolOutputs(conversation, budget, keepRecent = 14) {
       total -= before - m.content.length;
     }
   }
+}
+
+// ── Prior-turn history ────────────────────────────────────────────────────────
+// Without this the tool loop starts every turn from an empty conversation and
+// only ever sees a 5-line "LAST TASK / LAST ASSISTANT MESSAGE" summary, so it
+// cannot tell what it already tried — which is how a run ends up undoing its
+// own fix from the previous turn. Deliberately small: this exists to carry
+// decisions forward, not to replay the whole session (MAX_CONV_MSGS /
+// CONV_CHAR_BUDGET still govern the live loop). Only final text is persisted,
+// so this restores conversational turns, not the tool calls behind them.
+const PRIOR_TURNS_MAX_MSGS = 8;
+const PRIOR_TURNS_CHAR_BUDGET = 12_000;
+const PRIOR_TURN_CHAR_MAX = 2_000;
+
+export function buildPriorTurns(messages, {
+  maxMsgs = PRIOR_TURNS_MAX_MSGS,
+  charBudget = PRIOR_TURNS_CHAR_BUDGET,
+  perMsgMax = PRIOR_TURN_CHAR_MAX,
+} = {}) {
+  if (!Array.isArray(messages) || messages.length === 0) return [];
+
+  const usable = [];
+  for (const m of messages) {
+    const role = m?.role === "assistant" ? "assistant" : m?.role === "user" ? "user" : null;
+    const content = String(m?.content ?? "").trim();
+    if (role && content) usable.push({ role, content });
+  }
+
+  // A trailing user message means that turn never produced an answer (aborted,
+  // errored, or still running). Replaying it invites the model to resume the
+  // abandoned task instead of doing what was just asked — the same failure the
+  // session-memory abort guard prevents. Always end on an assistant turn.
+  while (usable.length && usable[usable.length - 1].role === "user") usable.pop();
+
+  // Walk newest-first so the most recent turns win the budget, then restore order.
+  const picked = [];
+  let chars = 0;
+  for (let i = usable.length - 1; i >= 0 && picked.length < maxMsgs; i--) {
+    const { role, content } = usable[i];
+    const text = content.length > perMsgMax ? `${content.slice(0, perMsgMax)} …[truncated]` : content;
+    if (chars + text.length > charBudget) break;
+    chars += text.length;
+    picked.push({ role, content: text });
+  }
+  return picked.reverse();
 }
 
 const IGNORE_DIRS = new Set([
@@ -398,6 +451,73 @@ export function bashApprovalNeeded(cmd, permissions) {
     if (ask.some((r) => matchesBashRule(seg, r)) && !allow.some((r) => matchesBashRule(seg, r))) return true;
   }
   return false;
+}
+
+// Permission rules for MCP tools. Same allow/ask/deny lists that gate bash,
+// matched against the namespaced tool name so a project can write rules at
+// either granularity — a whole server ("mcp__github") or one tool
+// ("mcp__github__create_pull_request"). deny always wins; a matching allow
+// cancels an ask, mirroring bashApprovalNeeded's precedence exactly.
+function matchesMcpRule(toolName, rule) {
+  const r = String(rule || "").trim();
+  if (!r) return false;
+  if (r === "*" || r === "mcp__*") return true;
+  const bare = r.endsWith("*") ? r.slice(0, -1) : r;
+  return toolName === bare || toolName.startsWith(bare.endsWith("__") ? bare : `${bare}__`);
+}
+
+export function mcpToolDenied(toolName, permissions) {
+  return (permissions?.deny || []).some((r) => matchesMcpRule(toolName, r));
+}
+
+export function mcpToolNeedsApproval(toolName, permissions) {
+  const { allow = [], ask = [] } = permissions || {};
+  if (!ask.length) return false;
+  return ask.some((r) => matchesMcpRule(toolName, r)) && !allow.some((r) => matchesMcpRule(toolName, r));
+}
+
+// ── Irreversible / production-affecting commands ─────────────────────────────
+// Commands whose effects reach OUTSIDE the workspace and cannot be undone by
+// Kodo's snapshot/undo machinery: a deploy, a force-push, a published package,
+// a dropped table. The agent must never run one on inferred approval — the
+// user has to say yes.
+//
+// This is a SAFETY FLOOR, not a permission rule: it only ever ADDS a
+// confirmation step. It cannot grant anything, a `deny` rule still wins, and a
+// workspace that genuinely wants a command unattended can opt out with an
+// explicit `allow` rule (same escape hatch every other gate uses).
+const IRREVERSIBLE_COMMAND_RE = new RegExp([
+  // force-push, or any push to a protected branch
+  String.raw`\bgit\s+push\b.*(--force|-f\b|\bmain\b|\bmaster\b|\bprod(uction)?\b)`,
+  // deploy tooling
+  String.raw`\b(vercel|netlify|fly|railway|heroku)\b.*\b(deploy|--prod|production)\b`,
+  String.raw`\bserverless\s+deploy\b`,
+  String.raw`\bkubectl\s+(apply|delete|rollout|scale)\b`,
+  String.raw`\bhelm\s+(upgrade|install|uninstall|rollback)\b`,
+  String.raw`\bterraform\s+(apply|destroy)\b`,
+  String.raw`\bdocker\s+push\b`,
+  // publishing a package is public and effectively permanent
+  String.raw`\bnpm\s+publish\b`,
+  String.raw`\b(yarn|pnpm)\s+publish\b`,
+  // destructive data operations
+  String.raw`\b(drop|truncate)\s+(table|database|schema)\b`,
+  String.raw`\baws\s+s3\s+(rm|rb)\b`,
+  String.raw`\bgcloud\s+.*\bdelete\b`,
+  // migrations against a non-local target
+  String.raw`\b(migrate|migration)\b.*\bprod(uction)?\b`,
+].join("|"), "i");
+
+/**
+ * True when a command is irreversible/production-affecting AND the workspace
+ * has not explicitly allow-listed it. Callers must route the result through
+ * the normal approval path so PermissionRequest/PermissionDenied still fire.
+ */
+export function isIrreversibleCommand(command, permissions) {
+  const cmd = String(command || "");
+  if (!IRREVERSIBLE_COMMAND_RE.test(cmd)) return false;
+  // An explicit allow rule is a deliberate, recorded decision — honour it.
+  const { allow = [] } = permissions || {};
+  return !allow.some((r) => splitBashSegments(cmd).some((seg) => matchesBashRule(seg, r)));
 }
 
 // A heredoc marker, or a newline combined with an output redirect, is
@@ -1096,18 +1216,34 @@ function normalizePermissions(p) {
   return { allow: arr(p?.allow), ask: arr(p?.ask), deny: arr(p?.deny) };
 }
 
-function normalizeMcpServers(m) {
+// Accepts Claude Code's two server shapes side by side:
+//   stdio  { "command": "npx", "args": [...], "env": {...} }
+//   remote { "type": "http" | "sse", "url": "https://…", "headers": {...} }
+// A malformed entry is dropped rather than throwing — one bad server must not
+// take down every other tool the project declared.
+export function normalizeMcpServers(m) {
   if (!m || typeof m !== "object") return {};
+  const obj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : {});
   const out = {};
   for (const [name, cfg] of Object.entries(m)) {
-    if (cfg && typeof cfg.command === "string") {
-      out[name] = { command: cfg.command, args: Array.isArray(cfg.args) ? cfg.args.filter((a) => typeof a === "string") : [], env: (cfg.env && typeof cfg.env === "object") ? cfg.env : {} };
+    if (!cfg || typeof cfg !== "object") continue;
+    const type = cfg.type || (typeof cfg.command === "string" ? "stdio" : typeof cfg.url === "string" ? "http" : null);
+
+    if (type === "stdio" && typeof cfg.command === "string") {
+      out[name] = {
+        type: "stdio",
+        command: cfg.command,
+        args: Array.isArray(cfg.args) ? cfg.args.filter((a) => typeof a === "string") : [],
+        env: obj(cfg.env),
+      };
+    } else if ((type === "http" || type === "sse") && typeof cfg.url === "string") {
+      out[name] = { type, url: cfg.url, headers: obj(cfg.headers) };
     }
   }
   return out;
 }
 
-async function loadKodoSettings(root) {
+export async function loadKodoSettings(root) {
   try {
     const raw = JSON.parse(await fs.readFile(path.join(root, ".kodo", "settings.json"), "utf-8"));
     return {
@@ -1125,8 +1261,13 @@ async function loadKodoSettings(root) {
 // got spawned MUST be torn down before the run ends, or a headless Chromium
 // instance is orphaned per run that used it — these are real OS processes,
 // not something GC reclaims.
+// Pooled clients (see services/mcpTools.mjs) are deliberately kept alive
+// between runs so the next turn doesn't pay the spawn + handshake again; the
+// pool's own idle sweep reclaims them. Only clients this run owns outright —
+// e.g. one verify_ui spawned directly — are torn down here.
 function closeMcpClients(ctx) {
   for (const client of ctx.mcpClients?.values() || []) {
+    if (isPooledClient(client)) continue;
     try { client.close(); } catch { /* best-effort */ }
   }
 }
@@ -1478,6 +1619,21 @@ const AGENT_TOOLS = [
   {
     type: "function",
     function: {
+      name: "read_mcp_resource",
+      description: "Read a read-only resource exposed by a connected MCP server, addressed by its URI (see 'MCP resources' in the system prompt for what's available). Use this for context a server publishes — a document, record, schema, or config — rather than guessing at its contents. Only offered when a connected server actually publishes resources.",
+      parameters: {
+        type: "object",
+        properties: {
+          uri: { type: "string", description: "The resource URI exactly as listed (e.g. 'file:///schema.sql', 'db://users/42')" },
+          server: { type: "string", description: "Optional server name, if the same URI could come from more than one" },
+        },
+        required: ["uri"],
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "spawn_agent",
       description: "Delegate a focused, READ-ONLY investigation to a sub-agent that runs in its own separate context window and returns a concise findings report. Use it to explore a large or unfamiliar area of the codebase, research how something works across many files, or gather context — WITHOUT filling your own context with every file it reads. The sub-agent can read, grep, glob, list, run read-only commands, search the web, and read memory; it CANNOT edit files or run commands that change anything — you make the actual edits yourself after reading its report. Give it a self-contained prompt (it doesn't see this conversation). You may spawn several for independent questions.",
       parameters: {
@@ -1573,12 +1729,18 @@ export function normalizeArgumentsJSON(raw) {
 // Extra data"), killing the loop before any file is edited. Drop calls with a
 // bad name, canonicalize every kept call's arguments to clean JSON, and ensure
 // each has an id so the assistant/tool pairing stays valid.
-function sanitizeToolCalls(message) {
+// `validNames` must be the tools ACTUALLY offered for this run, not the static
+// built-in set: MCP tools are discovered per workspace and appended at runtime,
+// so validating against AGENT_TOOL_NAMES alone silently dropped every
+// mcp__server__tool call — the model kept re-issuing it and the loop burned its
+// whole budget without ever reaching the server. Callers that have no dynamic
+// tools can omit it and get the built-in set.
+export function sanitizeToolCalls(message, validNames = AGENT_TOOL_NAMES) {
   if (!Array.isArray(message?.tool_calls)) return message;
   const cleaned = message.tool_calls
     .filter((tc) => {
       const name = tc?.function?.name;
-      return typeof name === "string" && name.trim() && AGENT_TOOL_NAMES.has(name);
+      return typeof name === "string" && name.trim() && validNames.has(name);
     })
     .map((tc, i) => ({
       id: tc.id || `call_${Date.now()}_${i}`,
@@ -1613,11 +1775,132 @@ const PARALLELIZABLE_TOOLS = new Set([
   "list_memory_topics", "read_memory_topic", "load_skill", "bash_output",
 ]);
 
+// Tools that carry the ACTIVE PLAN rather than an observation — pinned so they
+// survive every compaction cycle (the loop must never lose its own todo list or
+// a decision the user made mid-task).
+const PINNED_TOOLS = new Set(["todo_write", "ask_user"]);
+
+/**
+ * Resolve an approval that Kodo's rules say requires the user.
+ *
+ * PRECEDENCE (deliberate and deterministic — deny always wins):
+ *   1. explicit `deny` rules   → hard block; PermissionRequest never fires and
+ *                                cannot be overridden by any hook.
+ *   2. PreToolUse hook         → may block before we ever get here.
+ *   3. PermissionRequest hook  → fires ONLY when user approval would otherwise
+ *                                be required. "deny" → denied. "allow" → skips
+ *                                the prompt. "continue" → fall through to (4).
+ *   4. user approval (askUser) → the human decides.
+ *   5. PermissionDenied hook   → fires on any denial from (3) or (4).
+ *
+ * A hook can therefore auto-approve an "ask"-tier action or veto it, but can
+ * never widen access past an explicit deny rule.
+ */
+async function resolveApproval(ctx, { kind, subject, question, header, payload }) {
+  const pre = await ctx.fireHook?.("PermissionRequest", {
+    kind, tool: subject, ...payload,
+  }, { subject });
+
+  if (pre?.decision === "block") {
+    await ctx.fireHook?.("PermissionDenied", { kind, tool: subject, reason: pre.reason, ...payload }, { subject });
+    return { approved: false, error: `Denied by a PermissionRequest hook: ${pre.reason || "no reason given"}` };
+  }
+  if (pre?.decision === "allow") return { approved: true, viaHook: true };
+
+  if (!ctx.askUser) {
+    return { approved: false, error: `This action requires approval under this workspace's rules, but asking isn't available in this context: "${String(subject).slice(0, 100)}"` };
+  }
+
+  ctx.emit?.({ type: "progress", stage: "planning", message: `❓ approval needed: ${String(subject).slice(0, 100)}` });
+  let answer;
+  try {
+    answer = await ctx.askUser({
+      question, header,
+      options: [
+        { label: "Allow", description: "Run it" },
+        { label: "Deny", description: "Do not run it" },
+      ],
+    });
+  } catch (err) {
+    return { approved: false, error: `Approval cancelled: ${String(err?.message || err)}` };
+  }
+
+  if (!/^allow\b/i.test(String(answer || "").trim())) {
+    await ctx.fireHook?.("PermissionDenied", { kind, tool: subject, reason: "denied by user", ...payload }, { subject });
+    return { approved: false, error: `Not approved by the user (answered: "${String(answer || "").slice(0, 80)}").` };
+  }
+  return { approved: true };
+}
+
+// Claude Code parity: EndConversation-style calls bypass the tool hooks — they
+// terminate the turn rather than acting on the workspace, so a PreToolUse gate
+// on them could strand a session with no way to finish.
+const HOOK_EXEMPT_TOOLS = new Set(["ask_user"]);
+
+// Surface the common scalar args (path, command, url…) as top-level payload
+// keys so a hook can use `{file}`/`{command}` placeholders without parsing the
+// JSON on stdin. Objects/arrays stay inside `args` only.
+function flattenHookArgs(args) {
+  const out = {};
+  if (!args || typeof args !== "object") return out;
+  if (typeof args.path === "string") out.file = args.path;
+  for (const k of ["command", "url", "pattern", "query"]) {
+    if (typeof args[k] === "string") out[k] = args[k];
+  }
+  return out;
+}
+
 async function runAndFormatToolCall(toolCall, args, ctx, iteration, iterationBudget) {
-  console.log(`[AgentLoop] ${iteration}/${iterationBudget} → ${toolCall.function.name}(${JSON.stringify(args).slice(0, 140)})`);
-  const result = await executeTool(toolCall.function.name, args, ctx);
+  const toolName = toolCall.function.name;
+  console.log(`[AgentLoop] ${iteration}/${iterationBudget} → ${toolName}(${JSON.stringify(args).slice(0, 140)})`);
+  const startedAt = Date.now();
+
+  // ── PreToolUse: the real gate. A blocking hook prevents execution entirely
+  // and its reason is fed back as the tool result, so the model can adapt
+  // instead of silently losing the call.
+  if (ctx.fireHook && !HOOK_EXEMPT_TOOLS.has(toolName)) {
+    const pre = await ctx.fireHook("PreToolUse", { tool: toolName, args, ...flattenHookArgs(args) }, { subject: toolName });
+    if (pre.decision === "block") {
+      const denial = { success: false, error: `Blocked by a PreToolUse hook: ${pre.reason || "no reason given"}` };
+      const body = JSON.stringify(denial);
+      ctx.recordEvent?.({
+        kind: "tool", toolCallId: toolCall.id, toolName, toolArgs: args,
+        content: body, status: "error", durationMs: Date.now() - startedAt,
+      });
+      await ctx.fireHook("PermissionDenied", { tool: toolName, args, reason: pre.reason }, { subject: toolName });
+      return { role: "tool", tool_call_id: toolCall.id, content: body };
+    }
+  }
+
+  const result = await executeTool(toolName, args, ctx);
+
+  // ── PostToolUse / PostToolUseFailure: observation only — these run after the
+  // fact and deliberately cannot veto a completed call.
+  if (ctx.fireHook && !HOOK_EXEMPT_TOOLS.has(toolName)) {
+    const failed = result?.success === false;
+    await ctx.fireHook(failed ? "PostToolUseFailure" : "PostToolUse", {
+      tool: toolName, args, ...flattenHookArgs(args),
+      success: !failed,
+      error: failed ? String(result?.error ?? "") : "",
+      durationMs: Date.now() - startedAt,
+    }, { subject: toolName });
+  }
+
   const raw = JSON.stringify(result);
   const capped = raw.length > MAX_TOOL_OUTPUT_CHARS ? raw.slice(0, MAX_TOOL_OUTPUT_CHARS) + '..."[truncated]"}' : raw;
+  // Working memory: record that this tool ran, on what, and whether it worked,
+  // so a later turn can see the attempt instead of repeating it. Never throws
+  // into the loop — a persistence failure must not abort real work.
+  ctx.recordEvent?.({
+    kind: "tool",
+    toolCallId: toolCall.id,
+    toolName: toolCall.function.name,
+    toolArgs: args,
+    content: capped,
+    status: result?.success === false ? "error" : "ok",
+    durationMs: Date.now() - startedAt,
+    pinned: PINNED_TOOLS.has(toolCall.function.name),
+  });
   return { role: "tool", tool_call_id: toolCall.id, content: capped };
 }
 
@@ -1665,7 +1948,53 @@ const SUBAGENT_SYSTEM = `You are a focused sub-agent spawned by Kodo's main codi
 - Be efficient: gather exactly what the task asks for, then STOP.
 - Finish with a plain-text report (no tool calls): concrete findings — file paths with line numbers, the specific answer, and anything the main agent needs to act. Lead with the answer, keep it tight. Don't pad.`;
 
-async function runSubAgent({ creds, root, description, task, workspaceSnapshot, hooks, permissions, emit, abortSignal }) {
+/**
+ * Subagent lifecycle wrapper. Fires around ACTUAL execution (not at tool-call
+ * creation), and guarantees SubagentStop exactly once on every exit path —
+ * success, error, or abort — via finally. Hook failures are swallowed so a
+ * broken hook can never orphan the subagent or mask its findings.
+ *
+ * The subagent's own ctx is built inside the body with its own editedFiles /
+ * readFiles / conversation, so nothing here can mutate parent state.
+ */
+async function runSubAgent(opts) {
+  const { creds, root, description, abortSignal, fireHook, parentSessionId, parentRequestId, task } = opts;
+  const subagentId = `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const label = String(description || "investigating").slice(0, 60);
+  const startedAt = Date.now();
+  const base = {
+    subagent_id: subagentId, subagent_type: "explorer",
+    parent_session_id: parentSessionId ?? null, parent_request_id: parentRequestId ?? null,
+    description: label, model: creds?.model ?? null, cwd: root,
+  };
+
+  let stopFired = false;
+  const fireStop = async (status, extra = {}) => {
+    if (stopFired) return;
+    stopFired = true;
+    try {
+      await fireHook?.("SubagentStop", { ...base, status, durationMs: Date.now() - startedAt, ...extra });
+    } catch (err) { console.warn(`[Hooks] SubagentStop failed: ${err.message}`); }
+  };
+
+  try {
+    await fireHook?.("SubagentStart", { ...base, task: String(task || "").slice(0, 2000), startedAt });
+  } catch (err) { console.warn(`[Hooks] SubagentStart failed: ${err.message}`); }
+
+  let status = "error";
+  try {
+    const result = await runSubAgentBody(opts);
+    // The body reports outcomes as text rather than throwing, so classify it.
+    status = abortSignal?.aborted || /^Sub-agent cancelled/i.test(result) ? "cancelled"
+      : /^Sub-agent failed/i.test(result) ? "error"
+        : "success";
+    return result;
+  } finally {
+    await fireStop(status);
+  }
+}
+
+async function runSubAgentBody({ creds, root, description, task, workspaceSnapshot, hooks, permissions, emit, abortSignal }) {
   const label = String(description || "investigating").slice(0, 60);
   emit?.({ type: "progress", stage: "exploring", message: `🔍 sub-agent: ${label}` });
 
@@ -1746,7 +2075,7 @@ async function runSubAgent({ creds, root, description, task, workspaceSnapshot, 
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-function buildSystemPrompt({ workspaceTree, kodoMd, memoryIndex, skillIndex, permissionMode }) {
+function buildSystemPrompt({ workspaceTree, kodoMd, memoryIndex, skillIndex, permissionMode, mcpServers = [], mcpResources = [] }) {
   const snapshot = workspaceTree
     .filter((f) => (f.isDir ? f.path.split("/").length <= 2 : f.path.split("/").length <= 3))
     .slice(0, 150)
@@ -1763,6 +2092,15 @@ function buildSystemPrompt({ workspaceTree, kodoMd, memoryIndex, skillIndex, per
 
   const kodoSection = kodoMd
     ? `\n## Project instructions (KODO.md)\n${kodoMd.slice(0, 6000)}\n`
+    : "";
+
+  const connected = mcpServers.filter((s) => s.ok && s.toolCount > 0);
+  const mcpSection = connected.length
+    ? `\n## Connected MCP servers\nThis project attaches external systems whose tools appear as \`mcp__<server>__<tool>\`:\n${connected.map((s) => `- ${s.name} (${s.toolCount} tool${s.toolCount === 1 ? "" : "s"})`).join("\n")}\nUse them when the task genuinely concerns that system. For reading/editing files in THIS workspace, always prefer the built-in tools (read_file/edit_file/grep/glob) — they handle undo snapshots, syntax validation and diffs that an external server does not.\n${
+  mcpResources.length
+    ? `\n### MCP resources (read with read_mcp_resource)\n${mcpResources.slice(0, 40).map((r) => `- \`${r.uri}\`${r.name && r.name !== r.uri ? ` — ${r.name}` : ""}${r.description ? `: ${r.description.slice(0, 120)}` : ""}`).join("\n")}\n`
+    : ""
+}`
     : "";
 
   const planModeSection = permissionMode === "plan"
@@ -1804,7 +2142,8 @@ Same rule for RUNNING something — "run the server", "start the frontend", "how
 - Never touch .env, secrets, lockfiles, or files outside the workspace.
 
 # Don't work blind — ask when it matters
-Use ask_user before committing to a consequential guess: an ambiguous requirement with materially different implementations, a destructive/hard-to-reverse choice (deleting data, overwriting config, picking an irreversible approach), or missing information only the user has (which of several plausible targets, a credential/URL you don't have, a design preference with no existing convention to follow). Do NOT ask about anything discoverable by reading the code, grepping, or checking docs — do that instead. Do NOT ask about low-stakes details — just make a reasonable choice and mention it in your final summary. Keep it to at most one or two questions per task, and never combine ask_user with other tool calls in the same turn.
+Use ask_user before committing to a consequential guess: an ambiguous requirement with materially different implementations, a destructive/hard-to-reverse choice (deleting data, overwriting config, picking an irreversible approach), or missing information only the user has (which of several plausible targets, a credential/URL you don't have, a design preference with no existing convention to follow). Do NOT ask about anything discoverable by reading the code, grepping, or checking docs — do that instead. Do NOT ask about low-stakes details — just make a reasonable choice and mention it in your final summary. On your own initiative keep it to at most one or two questions per task, and never combine ask_user with other tool calls in the same turn.
+EXCEPTION — when the user EXPLICITLY asks to be prompted for several specific pieces of information ("ask me for the target environment, branch and region first"), that instruction overrides the limit above: ask for EVERY field they listed, one ask_user call per field, in the order they listed them, waiting for each answer before asking the next. Do not collapse them into a single combined question, do not skip fields, do not guess any of them, and do not answer with a plan instead of asking — the user asked to be prompted, so prompting IS the task. Only after every field is answered do you continue with the work.
 
 # Reading multiple files: batch vs delegate
 Two different tools for two different situations — pick by whether you already know WHICH files matter:
@@ -1814,7 +2153,7 @@ Don't use spawn_agent for a lookup you can already scope to a handful of known f
 
 # Web search — don't answer stale facts from memory
 You have web_search(query) and fetch_url(url). ALWAYS web_search first — never answer from memory — when the question is about anything time-sensitive or that changes over time, even if you think you already know: the "latest/newest/current/last/recent" version, release, price, score, WINNER, standings, ranking, or news; anything with "today/now/this year/as of"; who currently holds a role or title; or any fact tied to a date near or after your training cutoff. Your training data is stale, so a confident answer is often WRONG. Flow: web_search to find sources, then fetch_url the best result to read the real page (snippets can be stale). If the user gives a URL, fetch_url it. Do NOT search for the user's own codebase or stable general knowledge.
-${planModeSection}${kodoSection}${memorySection}${skillSection}
+${planModeSection}${kodoSection}${memorySection}${skillSection}${mcpSection}
 # Workspace layout (partial)
 ${snapshot}
 `;
@@ -1968,27 +2307,23 @@ export async function executeTool(name, args, ctx) {
         // pauses for THIS specific command regardless of permissionMode —
         // independent of (and in addition to) the coarser "ask" permission
         // mode's one-time first-mutation gate elsewhere in the loop.
-        if (bashApprovalNeeded(command, permissions)) {
-          if (!askUser) {
-            return { success: false, error: `This command requires approval under this workspace's permission rules (.kodo/settings.json "ask") but asking isn't available in this context: "${command.slice(0, 100)}"` };
-          }
-          emit?.({ type: "progress", stage: "planning", message: `❓ approval needed: ${command.slice(0, 100)}` });
-          let answer;
-          try {
-            answer = await askUser({
-              question: `This workspace requires approval before running:\n\n${command}`,
-              header: "Run command?",
-              options: [
-                { label: "Allow", description: "Run this command" },
-                { label: "Deny", description: "Do not run it" },
-              ],
-            });
-          } catch (err) {
-            return { success: false, error: `Approval cancelled: ${String(err?.message || err)}` };
-          }
-          if (!/^allow\b/i.test(String(answer || "").trim())) {
-            return { success: false, error: `Command not approved by the user (answered: "${String(answer || "").slice(0, 80)}").` };
-          }
+        // Two independent reasons to pause: a workspace "ask" rule, or the
+        // built-in irreversible/production safety floor. Both route through the
+        // SAME approval path, so PermissionRequest/PermissionDenied fire and
+        // deny rules still win either way.
+        const irreversible = isIrreversibleCommand(command, permissions);
+        if (bashApprovalNeeded(command, permissions) || irreversible) {
+          const verdict = await resolveApproval(ctx, {
+            kind: irreversible ? "irreversible" : "bash",
+            subject: command,
+            question: irreversible
+              ? `⚠️ This command is irreversible or affects production:\n\n${command}\n\nIt cannot be undone by Kodo. Run it?`
+              : `This workspace requires approval before running:\n\n${command}`,
+            header: irreversible ? "Confirm?" : "Run command?",
+            payload: { command, irreversible },
+          });
+          // No approval, no execution — and never an inferred yes.
+          if (!verdict.approved) return { success: false, error: verdict.error };
         }
 
         ctx.bashCommands?.push(command);
@@ -2121,6 +2456,9 @@ export async function executeTool(name, args, ctx) {
           permissions,
           emit,
           abortSignal,
+          fireHook: ctx.fireHook,
+          parentSessionId: sessionId,
+          parentRequestId: requestId,
         });
         return { success: true, report };
       }
@@ -2132,16 +2470,61 @@ export async function executeTool(name, args, ctx) {
         const options = Array.isArray(args.options)
           ? args.options.map((o) => ({ label: String(o?.label || "").slice(0, 80), description: String(o?.description || "").slice(0, 200) })).filter((o) => o.label).slice(0, 4)
           : [];
+        // Already answered in THIS active session? Reuse it instead of asking
+        // again. Answers live in dedicated per-session runtime state — never
+        // inferred from memory text — so recalling a similar past topic can
+        // never fabricate an answer the user didn't give this session.
+        const asked = getAnsweredQuestion(sessionId, question);
+        if (asked) {
+          return { success: true, answer: asked.answer, reused: true, askedAt: asked.at };
+        }
+
         emit?.({ type: "progress", stage: "planning", message: `❓ ${question.slice(0, 140)}` });
         try {
           const answer = await askUser({ question, header: String(args.header || "").slice(0, 20), options });
+          recordAnsweredQuestion(sessionId, question, answer);
           return { success: true, answer };
         } catch (err) {
+          // A cancelled question is NOT an answer — nothing is recorded, so a
+          // later attempt genuinely re-asks rather than reusing a non-answer.
           return { success: false, error: `Question cancelled: ${String(err?.message || err)}` };
         }
       }
 
+      case "read_mcp_resource": {
+        const uri = String(args.uri || "").trim();
+        if (!uri) return { success: false, error: "uri is required" };
+        emit?.({ type: "progress", stage: "exploring", message: `🔌 resource: ${uri.slice(0, 80)}` });
+        return await readMcpResource(uri, {
+          mcpClients: ctx.mcpClients,
+          serverName: args.server ? String(args.server) : null,
+        });
+      }
+
       default:
+        // Tools contributed by an MCP server the project attached. They are
+        // namespaced `mcp__<server>__<tool>` at discovery, so anything with
+        // that prefix routes to the owning server rather than being unknown.
+        if (isMcpToolName(name)) {
+          if (mcpToolDenied(name, permissions)) {
+            return { success: false, error: `"${name}" is blocked by this workspace's permission rules (.kodo/settings.json "deny").` };
+          }
+          if (permissionMode === "plan") {
+            return { success: false, error: "Plan mode — external MCP tools are disabled. Present your plan as text instead." };
+          }
+          if (mcpToolNeedsApproval(name, permissions)) {
+            const verdict = await resolveApproval(ctx, {
+              kind: "mcp_tool",
+              subject: name,
+              question: `This workspace requires approval before running the MCP tool:\n\n${name}\n\nArguments: ${JSON.stringify(args).slice(0, 300)}`,
+              header: "Run MCP tool?",
+              payload: { args },
+            });
+            if (!verdict.approved) return { success: false, error: verdict.error };
+          }
+          emit?.({ type: "progress", stage: "executing", message: `🔌 ${name}` });
+          return await callMcpTool(name, args, { routes: ctx.mcpRoutes, mcpClients: ctx.mcpClients });
+        }
         return { success: false, error: `Unknown tool: ${name}` };
     }
   } catch (err) {
@@ -2252,7 +2635,7 @@ export async function agentLoopNode(state) {
     workspacePath, userMessage, modelRoute, visionRoute, emit,
     rememberedTargetFile = "", sessionId, requestId,
     permissionMode = "auto", approvalPromise = null, abortSignal = null,
-    askUser = null,
+    askUser = null, priorMessages = [], priorConversation = [], recordEvent = null,
   } = state;
 
   const runStartedAt = Date.now();
@@ -2279,14 +2662,6 @@ export async function agentLoopNode(state) {
   ]);
   const { hooks, permissions, mcpServers } = kodoSettings;
 
-  const systemPrompt = buildSystemPrompt({
-    workspaceTree: workspaceSnapshot,
-    kodoMd,
-    memoryIndex,
-    skillIndex,
-    permissionMode,
-  });
-
   // Seed context: files whose FULL relative path appears verbatim in the message
   // are certainly involved — preload them so the model doesn't spend a turn on it.
   const seedBlocks = [];
@@ -2304,8 +2679,73 @@ export async function agentLoopNode(state) {
     visionCreds,    // resolved below; lets verify_ui escalate a failure to a vision model
     isSubAgent: false,
     abortSignal,
-    mcpClients: new Map(), // lazily populated by verify_ui; closed at the end of this run
+    // Persists this run's tool calls/results as replayable working memory.
+    // Injected by graph_runner (like emit/askUser) so this node stays free of
+    // any DB dependency; absent in tests and sub-agents, where it no-ops.
+    recordEvent,
+    mcpClients: new Map(), // populated by MCP discovery + verify_ui; closed at the end of this run
+    mcpRoutes: new Map(),  // "mcp__server__tool" → { serverName, toolName }
   };
+
+  // ── Lifecycle hooks ────────────────────────────────────────────────────────
+  // One dispatcher bound to this run's workspace, model and MCP connections, so
+  // command/http/mcp_tool/prompt handlers all work without the loop knowing how
+  // any of them execute. Absent config makes every call a cheap no-op.
+  const hookConfig = normalizeHookConfig(hooks).hooks;
+  ctx.fireHook = (event, payload, opts = {}) => fireHookEvent(event, payload, {
+    config: hookConfig,
+    cwd: root,
+    signal: abortSignal,
+    emit,
+    deps: {
+      callMcpTool: (tool, toolArgs) => callMcpTool(tool, toolArgs, { routes: ctx.mcpRoutes, mcpClients: ctx.mcpClients }),
+      // A `prompt` hook is a single-turn evaluation with no tools — the
+      // cheapest way to let a project express a judgement call in English.
+      runPrompt: async ({ prompt }) => {
+        const { message } = await chatWithTools({
+          creds, system: "You evaluate a Kodo lifecycle event and reply concisely. If asked for a decision, reply with JSON only.",
+          messages: [{ role: "user", content: prompt }],
+          tools: [], maxTokens: 800, temperature: 0, thinking: false, signal: abortSignal || undefined,
+        });
+        return String(message?.content || "");
+      },
+      // An `agent` hook gets the read-only sub-agent (tools, multi-turn).
+      runAgent: async ({ prompt }) => runSubAgent({
+        task: prompt, root, creds, emit, hooks, permissions, workspaceSnapshot, abortSignal,
+      }),
+    },
+    ...opts,
+  });
+
+  // Attach whatever MCP servers this project declared, and offer their tools
+  // alongside the built-ins. Best-effort: an unavailable server is logged and
+  // skipped, never fatal (see discoverMcpTools).
+  const { tools: mcpTools, routes: mcpRoutes, servers: mcpServerStatus } = await discoverMcpTools({
+    mcpServers, cwd: root, mcpClients: ctx.mcpClients, emit,
+    // Lets a server ask US to run a completion (sampling/createMessage) using
+    // the same model this run is on, capped inside makeSamplingHandler.
+    sampling: { chat: chatWithTools, creds },
+    // Elicitation: a server asking the USER (not the model) for input. Routed
+    // through the interaction manager so nothing is ever auto-answered.
+    elicitation: { interactions, sessionId, fireHook: ctx.fireHook, signal: abortSignal },
+  });
+  ctx.mcpRoutes = mcpRoutes;
+
+  // Resources are advertised, not auto-injected: the model reads one via
+  // read_mcp_resource only if it wants it, so they cost nothing otherwise.
+  const mcpResources = ctx.mcpClients.size ? await listMcpResources(ctx.mcpClients) : [];
+
+  // Built after discovery so the prompt can name the servers that actually
+  // came up (an unreachable one must not be advertised to the model).
+  const systemPrompt = buildSystemPrompt({
+    workspaceTree: workspaceSnapshot,
+    kodoMd,
+    memoryIndex,
+    skillIndex,
+    permissionMode,
+    mcpServers: mcpServerStatus,
+    mcpResources,
+  });
   for (const f of workspaceSnapshot) {
     if (f.isDir || seedBlocks.length >= 3) continue;
     if (isSensitiveFilePath(f.path)) continue; // never auto-preload a secret file
@@ -2342,7 +2782,20 @@ export async function agentLoopNode(state) {
     preloadedSkills,
   ].filter(Boolean).join("\n");
 
-  const conversation = [{ role: "user", content: firstUserMsg }];
+  // The real execution history goes in front of this turn's task, so the model
+  // can see what it already attempted, read, edited and broke — instead of
+  // re-deriving it. `priorConversation` is the replayed tool timeline (built by
+  // services/conversationStore.mjs from persisted turn_events); `priorMessages`
+  // is the text-only fallback used when no event history exists yet (sessions
+  // that predate the timeline, or an unrecorded run).
+  const priorTurns = priorConversation.length ? priorConversation : buildPriorTurns(priorMessages);
+  const conversation = [...priorTurns, { role: "user", content: firstUserMsg }];
+  // Everything up to and including this turn's task must survive compaction.
+  const pinnedPrefix = conversation.length;
+  if (priorTurns.length) {
+    console.log(`[AgentLoop] resumed ${priorTurns.length} prior message(s) (${priorConversation.length ? "tool timeline" : "text fallback"})`);
+  }
+  ctx.recordEvent?.({ kind: "user", content: cleanMessage });
   const usage = { inputTokens: 0, outputTokens: 0, llmCalls: 0 };
   // write_file/edit_file are hard-rejected at the executor in plan mode
   // (see the "case edit_file"/"case write_file" guards below) — their only
@@ -2350,10 +2803,22 @@ export async function agentLoopNode(state) {
   // schemas are pure wasted tokens on every iteration of a plan-mode run.
   // Everything else (bash, read tools, verify_ui, etc.) still behaves
   // normally in plan mode, so stays in the list.
+  // MCP tools act on external systems (issue trackers, databases, browsers),
+  // so plan mode withholds them for the same reason it withholds edits — and
+  // omitting the schemas entirely keeps them from costing tokens every
+  // iteration of a read-only run.
   const PLAN_MODE_BLOCKED_TOOLS = new Set(["write_file", "edit_file"]);
+  // read_mcp_resource is only meaningful when a connected server actually
+  // publishes resources — otherwise its schema is dead weight every iteration.
+  const baseTools = mcpResources.length
+    ? AGENT_TOOLS
+    : AGENT_TOOLS.filter((t) => t.function.name !== "read_mcp_resource");
   const toolsForThisRun = permissionMode === "plan"
-    ? AGENT_TOOLS.filter((t) => !PLAN_MODE_BLOCKED_TOOLS.has(t.function.name))
-    : AGENT_TOOLS;
+    ? baseTools.filter((t) => !PLAN_MODE_BLOCKED_TOOLS.has(t.function.name))
+    : [...baseTools, ...mcpTools];
+  // Exactly the names the model was offered — what tool-call sanitising must
+  // accept, so a discovered MCP tool isn't discarded as "unknown".
+  const validToolNames = new Set(toolsForThisRun.map((t) => t.function.name));
 
   // One tool-calling turn loop, reused for both the main pass and the bounded
   // post-verification fix-up pass — same LLM-call/tool-execution/context-trim
@@ -2479,7 +2944,7 @@ export async function agentLoopNode(state) {
       // the weak model's junk doesn't corrupt the conversation and 400 the next
       // request. If the whole response was junk (no valid tools, no text), nudge
       // the model to answer in plain text instead of looping on nothing.
-      sanitizeToolCalls(message);
+      sanitizeToolCalls(message, validToolNames);
       if (!message.tool_calls?.length && !String(message.content || "").trim()) {
         conversation.push({ role: "assistant", content: "(no output)" });
         conversation.push({ role: "user", content: "That produced no usable output. Answer now in plain text with what you have — no tool calls." });
@@ -2487,6 +2952,11 @@ export async function agentLoopNode(state) {
       }
 
       conversation.push(message);
+      ctx.recordEvent?.({
+        kind: "assistant",
+        content: String(message.content || ""),
+        toolCalls: message.tool_calls?.length ? message.tool_calls : null,
+      });
 
       // Plain text response = the agent is done — UNLESS this was a build/change
       // request and it just DESCRIBED code (a ``` block) without editing any
@@ -2566,6 +3036,17 @@ export async function agentLoopNode(state) {
       }
       conversation.push(...toolResults);
 
+      // PostToolBatch: fires once after a parallel batch settles, so a hook can
+      // react to the group (re-lint everything touched, emit one notification)
+      // rather than once per call.
+      if (toolCallsThisTurn.length > 1) {
+        await ctx.fireHook?.("PostToolBatch", {
+          tools: toolCallsThisTurn.map((tc) => tc.function.name),
+          count: toolCallsThisTurn.length,
+          iteration,
+        });
+      }
+
       // Self-pacing nudge: a build/change request that has burned most of its
       // budget on research (grep/read/web_search/fetch_url) without editing a
       // single file usually means the model is over-researching instead of
@@ -2586,23 +3067,83 @@ export async function agentLoopNode(state) {
       // Shrink old tool outputs to keep the whole conversation under budget.
       shrinkOldToolOutputs(conversation, CONV_CHAR_BUDGET);
 
-      // Context window management: keep the first user message; evict old middle
-      // turns, shrinking evicted tool outputs instead of silently losing shape.
+      // Context window management: keep the pinned prefix (carried-over history
+      // + this turn's task); evict old middle turns, shrinking evicted tool
+      // outputs instead of silently losing shape. The tail is clamped so it can
+      // never overlap the prefix and duplicate messages when history is present.
       if (conversation.length > MAX_CONV_MSGS) {
-        const first = conversation[0];
-        const keepTail = conversation.slice(-(MAX_CONV_MSGS - 8));
-        const evicted = conversation.slice(1, conversation.length - keepTail.length);
-        const digest = evicted
-          .map((m) => {
-            if (m.role === "assistant" && m.tool_calls?.length) return m.tool_calls.map((tc) => `→ ${tc.function.name}`).join(", ");
-            if (m.role === "tool") return null;
-            return String(m.content || "").slice(0, 120);
-          })
-          .filter(Boolean)
-          .join(" | ");
-        conversation.splice(0, conversation.length, first,
-          { role: "user", content: `[Earlier turns compacted: ${digest.slice(0, 1000)}]\nFiles already read this session: ${[...ctx.readFiles].join(", ") || "(none)"}` },
-          ...keepTail);
+        const head = conversation.slice(0, pinnedPrefix);
+        const tailCount = Math.min(MAX_CONV_MSGS - 8, Math.max(0, conversation.length - pinnedPrefix));
+        const keepTail = tailCount ? conversation.slice(-tailCount) : [];
+        const evicted = conversation.slice(pinnedPrefix, conversation.length - tailCount);
+        if (evicted.length) {
+          const beforeMessages = conversation.length;
+          const beforeChars = conversationChars(conversation);
+
+          // PreCompact — fires immediately before the real compaction, once per
+          // compaction. A blocking hook ABORTS this pass: the conversation is
+          // left exactly as-is (nothing is evicted), and the next iteration will
+          // try again. Wrapped so a broken hook can never leave the conversation
+          // half-compacted.
+          let blocked = false;
+          try {
+            const pre = await ctx.fireHook?.("PreCompact", {
+              session_id: sessionId,
+              trigger: "auto",
+              reason: `conversation reached ${beforeMessages} messages (limit ${MAX_CONV_MSGS})`,
+              task: cleanMessage.slice(0, 300),
+              messageCount: beforeMessages,
+              charCount: beforeChars,
+              evictingCount: evicted.length,
+              pinnedCount: pinnedPrefix,
+              filesRead: [...ctx.readFiles],
+            });
+            blocked = pre?.decision === "block";
+            if (blocked) {
+              console.warn(`[Hooks] PreCompact blocked compaction: ${pre.reason || "(no reason)"}`);
+            }
+          } catch (err) {
+            // A thrown hook must not abort the agent turn.
+            console.warn(`[Hooks] PreCompact failed, compacting anyway: ${err.message}`);
+          }
+
+          if (!blocked) {
+            const digest = evicted
+              .map((m) => {
+                if (m.role === "assistant" && m.tool_calls?.length) return m.tool_calls.map((tc) => `→ ${tc.function.name}`).join(", ");
+                if (m.role === "tool") return null;
+                return String(m.content || "").slice(0, 120);
+              })
+              .filter(Boolean)
+              .join(" | ");
+            const summary = `[Earlier turns compacted: ${digest.slice(0, 1000)}]\nFiles already read this session: ${[...ctx.readFiles].join(", ") || "(none)"}`;
+            conversation.splice(0, conversation.length, ...head, { role: "user", content: summary }, ...keepTail);
+
+            // Compaction can sever an assistant tool_call from its result, which
+            // is a hard provider error. Repair before anyone observes the
+            // conversation — including the PostCompact hook.
+            const repaired = repairToolPairing(conversation);
+            if (repaired.length !== conversation.length) conversation.splice(0, conversation.length, ...repaired);
+
+            // PostCompact — only after a compaction that actually happened.
+            // Observational: it cannot alter the result.
+            try {
+              await ctx.fireHook?.("PostCompact", {
+                session_id: sessionId,
+                trigger: "auto",
+                reason: `compacted at ${beforeMessages} messages`,
+                summary,
+                messagesBefore: beforeMessages,
+                messagesAfter: conversation.length,
+                charsBefore: beforeChars,
+                charsAfter: conversationChars(conversation),
+                evictedCount: evicted.length,
+              });
+            } catch (err) {
+              console.warn(`[Hooks] PostCompact failed: ${err.message}`);
+            }
+          }
+        }
       }
     }
 
@@ -2652,6 +3193,7 @@ export async function agentLoopNode(state) {
   // is whatever the model itself already did per the VERIFY step.
   const MAX_FIX_ATTEMPTS = 3;
   let stopHookPassed = false;
+  let stopHookRan = false;
   if (!abortSignal?.aborted && ctx.editedFiles.size > 0) {
     let result = await runStopHook(root, hooks, emit);
     let attempt = 0;
@@ -2676,6 +3218,7 @@ export async function agentLoopNode(state) {
     finalAnswer += note;
     if (note) emit?.({ type: "content", content: note });
     stopHookPassed = result.ran && result.passed;
+    stopHookRan = result.ran;
   }
 
   // Anti-fabrication backstop: the stop-hook note above is the only
@@ -2692,6 +3235,42 @@ export async function agentLoopNode(state) {
       const correction = "\n\n⚠️ Correction: the summary above claims verification, but no test/lint/build/typecheck command was actually run this turn — treat it as unverified.";
       finalAnswer += correction;
       emit?.({ type: "content", content: correction });
+    }
+  }
+
+  // ── Stop / StopFailure ─────────────────────────────────────────────────────
+  // The agent's real stopping lifecycle, fired exactly once per run on every
+  // termination path. Distinct from (and additive to) the legacy `hooks.stop`
+  // verify command above, which stays backward compatible: that one is a
+  // project's verify gate, this one is the lifecycle event.
+  //
+  // StopFailure is NOT "the task failed" — it fires when stopping itself is
+  // unclean: verification still failing, the iteration budget exhausted with no
+  // answer, or an aborted run.
+  {
+    const budgetExhausted = mainResult.iterations >= MAX_ITERATIONS && !mainResult.finalAnswer;
+    const verifyFailing = ctx.editedFiles.size > 0 && stopHookRan && !stopHookPassed;
+    const cancelled = !!abortSignal?.aborted;
+    const stopReason = cancelled ? "cancelled"
+      : verifyFailing ? "verification_failing"
+        : budgetExhausted ? "iteration_budget_exhausted"
+          : "completed";
+    const unclean = stopReason !== "completed";
+
+    const stopPayload = {
+      session_id: sessionId, request_id: requestId,
+      reason: stopReason,
+      iterations: mainResult.iterations,
+      editedFiles: [...ctx.editedFiles.keys()],
+      answerChars: String(finalAnswer || "").length,
+      durationMs: Date.now() - runStartedAt,
+    };
+    try {
+      await ctx.fireHook?.("Stop", stopPayload);
+      if (unclean) await ctx.fireHook?.("StopFailure", stopPayload);
+    } catch (err) {
+      // The run is already over; a failing stop hook must not change its result.
+      console.warn(`[Hooks] Stop lifecycle failed: ${err.message}`);
     }
   }
 

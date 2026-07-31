@@ -3,7 +3,8 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "test": "node tests/agent_loop.test.mjs && node tests/core.test.mjs && node tests/router.test.mjs && node tests/mcpClient.test.mjs && node tests/agentChat.test.mjs",
+    "test": "node tests/agent_loop.test.mjs && node tests/core.test.mjs && node tests/router.test.mjs && node tests/mcpClient.test.mjs && node tests/agentChat.test.mjs && node tests/conversationStore.test.mjs && node tests/promptGating.test.mjs && node tests/hooks.test.mjs && node tests/sessionHooks.test.mjs && node tests/configWatcher.test.mjs && node tests/mcpTools.test.mjs && node tests/mcpElicitation.test.mjs && node tests/mcpHttp.test.mjs && node tests/mcpSse.test.mjs && node tests/mcpOAuth.test.mjs && node tests/mcpPromptCommand.test.mjs && KODO_E2E_OPTIONAL=1 node tests/mcpLiveE2E.test.mjs",
+    "test:e2e": "node tests/mcpLiveE2E.test.mjs",
     "test:verify-ui": "node tests/verifyUi.test.mjs",
     "dev": "node server.mjs"
   },

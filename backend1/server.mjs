@@ -192,6 +192,27 @@ fastify.get("/health", async () => {
   };
 });
 
+// Graceful shutdown: every live session gets its SessionEnd hook with an
+// explicit reason, so cleanup runs even though the process is going away.
+// Bounded inside endAllSessions — a slow hook must not wedge shutdown.
+let shuttingDown = false;
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  process.on(signal, async () => {
+    if (shuttingDown) return; // a second Ctrl-C should not re-enter
+    shuttingDown = true;
+    console.log(`\n[Server] ${signal} — closing sessions...`);
+    try {
+      const { endAllSessions } = await import("./services/sessionHooks.mjs");
+      const ended = await endAllSessions("shutdown");
+      if (ended.length) console.log(`[Server] SessionEnd fired for ${ended.length} session(s)`);
+    } catch (err) {
+      console.warn("[Server] SessionEnd during shutdown failed:", err.message);
+    }
+    try { await fastify.close(); } catch { /* already closing */ }
+    process.exit(0);
+  });
+}
+
 async function start() {
   try {
     await fastify.listen({

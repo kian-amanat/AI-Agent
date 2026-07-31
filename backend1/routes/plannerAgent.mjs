@@ -38,7 +38,17 @@ import db, {
   createAgentJob,
   updateAgentJobStatus,
   getAgentJob,
+  appendTurnEvent,
+  getTurnEvents,
+  pruneTurnEvents,
+  sessionExists,
 } from "../db.mjs";
+import { createHookRunner } from "../services/hooks.mjs";
+import {
+  ensureSetup, ensureSessionStart, endSession, attachRunner,
+} from "../services/sessionHooks.mjs";
+import { acquireConfigWatcher } from "../services/configWatcher.mjs";
+import { buildConversationFromEvents, dedupeObservations } from "../services/conversationStore.mjs";
 
 // ★ LangGraph runner + working-set memory
 import { runKodoGraph } from "../services/graph_runner.mjs";
@@ -238,9 +248,20 @@ function syncSessionMemory(sessionId, userId, {
 async function startBackgroundRun(ctx) {
   const {
     requestId, sessionId, userId, workspacePath, modelRoute, visionRoute, modelMeta,
-    plannerContextMessage, rememberedFile, attachmentPaths, effectiveMessage,
+    plannerContextMessage, rememberedFile, priorMessages = [], priorConversation = [],
+    attachmentPaths, effectiveMessage,
     permissionMode, controller, releaseSlot, startEvent,
   } = ctx;
+
+  // Appends this run's tool timeline to the session's working memory. Failing
+  // to persist a trace must never abort real work, so every write is guarded.
+  const recordEvent = (event) => {
+    try {
+      appendTurnEvent({ ...event, sessionId, userId, requestId });
+    } catch (err) {
+      console.warn("[TurnEvents] append failed:", err.message);
+    }
+  };
 
   const title = String(effectiveMessage || "").slice(0, 60);
   createJob({ requestId, sessionId, userId, controller, title });
@@ -310,6 +331,7 @@ async function startBackgroundRun(ctx) {
     const graphPromise = runKodoGraph({
       userMessage:          plannerContextMessage,
       rememberedTargetFile: rememberedFile,
+      priorMessages, priorConversation, recordEvent,
       sessionId, requestId, userId, workspacePath, modelRoute, visionRoute,
       attachmentPaths,
       emit: jobEmit,
@@ -404,6 +426,11 @@ async function startBackgroundRun(ctx) {
     if (approvalTimeoutId !== null) clearTimeout(approvalTimeoutId);
     pendingApprovals.delete(requestId);
     pendingQuestions.delete(requestId);
+    // Keep working memory bounded on long-lived sessions. Unpinned rows only —
+    // the active plan and user decisions are never pruned.
+    try { pruneTurnEvents(sessionId, userId); } catch (err) {
+      console.warn("[TurnEvents] prune failed:", err.message);
+    }
     releaseSlot();
   }
 }
@@ -446,6 +473,70 @@ function streamJobToResponse(requestId, reply, request) {
 
 // ── Slash commands (Claude Code approach: /init, /memory, /skills, /help) ────
 
+// ── MCP prompt commands ──────────────────────────────────────────────────────
+// Claude Code surfaces a server's prompts as /mcp__<server>__<prompt>. Unlike
+// Kodo's other slash commands these don't produce a reply — they expand into
+// the user instruction for this turn.
+
+export function isMcpPromptCommand(message) {
+  return /^\/mcp__[^\s_]+__\S+/.test(String(message || "").trim());
+}
+
+// `/mcp__github__review diff="a b" depth=2 rest of the text`
+// → { serverName, promptName, args: {diff:"a b", depth:"2"}, trailing:"rest of the text" }
+export function parseMcpPromptCommand(message) {
+  const m = String(message || "").trim().match(/^\/mcp__([^\s_]+)__(\S+)\s*([\s\S]*)$/);
+  if (!m) return null;
+  const [, serverName, promptName, rest] = m;
+
+  const args = {};
+  const leftover = [];
+  // key="quoted value" | key=bare | free text
+  const re = /([A-Za-z_][A-Za-z0-9_-]*)=(?:"([^"]*)"|'([^']*)'|(\S+))|(\S+)/g;
+  let tok;
+  while ((tok = re.exec(rest))) {
+    if (tok[1]) args[tok[1]] = tok[2] ?? tok[3] ?? tok[4] ?? "";
+    else leftover.push(tok[5]);
+  }
+  return { serverName, promptName, args, trailing: leftover.join(" ").trim() };
+}
+
+export async function expandMcpPromptCommand(message, workspacePath) {
+  const parsed = parseMcpPromptCommand(message);
+  if (!parsed) return { ok: false, error: "Malformed MCP prompt command." };
+
+  const { loadKodoSettings } = await import("../agents/nodes/agent_loop.mjs");
+  const { discoverMcpTools, getMcpPrompt, listMcpPrompts } = await import("../services/mcpTools.mjs");
+  const { mcpServers } = await loadKodoSettings(workspacePath);
+
+  if (!mcpServers?.[parsed.serverName]) {
+    return { ok: false, error: `No MCP server named "${parsed.serverName}" is configured. Run /mcp to see what's available.` };
+  }
+
+  const clients = new Map();
+  try {
+    await discoverMcpTools({
+      mcpServers: { [parsed.serverName]: mcpServers[parsed.serverName] },
+      cwd: workspacePath,
+      mcpClients: clients,
+    });
+    const res = await getMcpPrompt(parsed.serverName, parsed.promptName, parsed.args, { mcpClients: clients });
+    if (!res.success) {
+      const available = (await listMcpPrompts(clients)).map((p) => p.command).join(", ") || "(none)";
+      return { ok: false, error: `${res.error}\nAvailable prompts: ${available}` };
+    }
+    // Trailing free text is appended so `/mcp__x__review focus on auth` works
+    // without the user having to name every argument.
+    const text = parsed.trailing ? `${res.text}\n\n${parsed.trailing}` : res.text;
+    if (!text.trim()) return { ok: false, error: `Prompt "${parsed.promptName}" expanded to nothing.` };
+    return { ok: true, text };
+  } finally {
+    // Prompt expansion may run against a pooled client; only close what isn't.
+    const { isPooledClient } = await import("../services/mcpTools.mjs");
+    for (const c of clients.values()) if (!isPooledClient(c)) { try { c.close(); } catch {} }
+  }
+}
+
 async function handleSlashCommand(message, { workspacePath, modelRoute }) {
   const m = String(message || "").trim();
   if (!m.startsWith("/")) return null;
@@ -463,10 +554,61 @@ async function handleSlashCommand(message, { workspacePath, modelRoute }) {
         "- `/init` — analyse the workspace and generate KODO.md (project instructions loaded into every request)",
         "- `/memory` — show what Kodo remembers about this project",
         "- `/skills` — list available expert skills",
+        "- `/hooks` — show configured lifecycle hooks, their scope, type and status",
+        "- `/mcp` — show connected MCP servers, their tools, prompts and resources",
+        "- `/mcp__<server>__<prompt> [key=value …]` — run a prompt an MCP server provides",
         "- `/help` — this list",
         "",
         "Anything else you type goes to the agent. Say `remember: <fact>` to save a fact, `forget all memory` to wipe memory.",
       ].join("\n");
+
+    case "hooks": {
+      const { loadHookConfig, describeHookConfig, HOOK_EVENTS, EVENT_HANDLER_TYPES } = await import("../services/hooks.mjs");
+      const { activeSessionIds } = await import("../services/sessionHooks.mjs");
+      const { hooks, warnings, source } = await loadHookConfig(workspacePath);
+      const rows = describeHookConfig(hooks);
+
+      // Events Kodo registers but cannot fire because the underlying runtime
+      // doesn't exist — shown explicitly so "configured but silent" is never a
+      // mystery.
+      const UNSUPPORTED = {
+        WorktreeCreate: "no git-worktree runtime", WorktreeRemove: "no git-worktree runtime",
+        TaskCreated: "no task runtime", TaskCompleted: "no task runtime", TeammateIdle: "no concurrent workers",
+        Elicitation: "MCP elicitation not implemented", ElicitationResult: "MCP elicitation not implemented",
+        MessageDisplay: "no display-transform layer", Notification: "no notification channel",
+        CwdChanged: "workspace cwd is fixed per request", FileChanged: "no filesystem watcher",
+        ConfigChange: "no settings watcher", InstructionsLoaded: "not wired",
+      };
+
+      const lines = [`**Hooks** — \`${source}\``];
+      if (warnings.length) lines.push("", ...warnings.map((w) => `- ⚠️ ${w}`));
+
+      const configured = HOOK_EVENTS.filter((e) => rows.some((r) => r.event === e));
+      if (configured.length) {
+        lines.push("", "**Active**");
+        for (const event of configured) {
+          lines.push(`- **${event}**`);
+          for (const r of rows.filter((x) => x.event === event)) {
+            // Only the handler's target is shown; payloads and env are never
+            // rendered, so no secret can leak through the inspector.
+            const scope = r.legacy ? "project (legacy)" : "project";
+            lines.push(`    - ✓ ${scope} · \`${r.type}\` · matcher \`${r.matcher}\` · ${r.timeout}s · \`${String(r.target).slice(0, 60)}\``);
+          }
+        }
+      } else {
+        lines.push("", "_No hooks configured._");
+      }
+
+      const inert = configured.filter((e) => UNSUPPORTED[e]);
+      if (inert.length) {
+        lines.push("", "**Configured but NOT fired** (underlying runtime missing)");
+        for (const e of inert) lines.push(`- ✗ **${e}** — ${UNSUPPORTED[e]}`);
+      }
+
+      lines.push("", `**Runtime** — ${activeSessionIds().length} active session(s)`);
+      lines.push(`_Events supported: ${HOOK_EVENTS.length}. Handler types per event vary (e.g. SessionStart: ${EVENT_HANDLER_TYPES.SessionStart.join(", ")})._`);
+      return lines.join("\n");
+    }
 
     case "memory": {
       const index = await loadMemIdx(workspacePath);
@@ -479,6 +621,52 @@ async function handleSlashCommand(message, { workspacePath, modelRoute }) {
       const skills = await loadSkillIndex(workspacePath);
       if (!skills.length) return "No skills installed. Add markdown packs to `.kodo/skills/` (frontmatter: name, description).";
       return `**Available skills**\n${skills.map((s) => `- **${s.name}** — ${s.description}`).join("\n")}`;
+    }
+
+    // Connects to each declared server and reports what actually came up —
+    // a config listing would hide the common failure (server not installed).
+    case "mcp": {
+      const { loadKodoSettings } = await import("../agents/nodes/agent_loop.mjs");
+      const { discoverMcpTools } = await import("../services/mcpTools.mjs");
+      const { mcpServers } = await loadKodoSettings(workspacePath);
+      const names = Object.keys(mcpServers || {});
+      if (!names.length) {
+        return [
+          "No MCP servers configured.",
+          "",
+          "Add them to `.kodo/settings.json`:",
+          "```json",
+          '{ "mcpServers": {',
+          '  "playwright": { "command": "npx", "args": ["@playwright/mcp", "--headless"] },',
+          '  "remote":     { "type": "http", "url": "https://example.com/mcp" }',
+          "} }",
+          "```",
+        ].join("\n");
+      }
+      const clients = new Map();
+      try {
+        const { servers } = await discoverMcpTools({ mcpServers, cwd: workspacePath, mcpClients: clients });
+        const { listMcpPrompts, listMcpResources, isPooledClient } = await import("../services/mcpTools.mjs");
+        const [prompts, resources] = await Promise.all([listMcpPrompts(clients), listMcpResources(clients)]);
+
+        const lines = [`**MCP servers**`, ...servers.map((s) => (
+          s.ok
+            ? `- ✅ **${s.name}** — ${s.toolCount} tool${s.toolCount === 1 ? "" : "s"}`
+            : `- ❌ **${s.name}** — ${s.error || "unavailable"}`
+        ))];
+        if (prompts.length) {
+          lines.push("", "**Prompts** (run one as a command)", ...prompts.map((p) => `- \`${p.command}\`${p.description ? ` — ${p.description}` : ""}`));
+        }
+        if (resources.length) {
+          lines.push("", "**Resources** (the agent reads these on demand)", ...resources.slice(0, 20).map((r) => `- \`${r.uri}\`${r.name && r.name !== r.uri ? ` — ${r.name}` : ""}`));
+        }
+        // Only close clients this command owns; pooled ones outlive it.
+        for (const c of clients.values()) if (!isPooledClient(c)) { try { c.close(); } catch {} }
+        clients.clear();
+        return lines.join("\n");
+      } finally {
+        for (const c of clients.values()) { try { c.close(); } catch {} }
+      }
     }
 
     case "init": {
@@ -587,17 +775,94 @@ export default async function plannerAgentRoute(fastify) {
       return reply.code(400).send({ ok: false, message: modelRoute.message, ...mapped });
     }
 
-    const effectiveMessage = message
+    let effectiveMessage = message
       || (attachment_paths.length ? "Please analyse the uploaded attachment(s)." : "");
 
     if (!effectiveMessage) {
       return reply.code(400).send({ ok: false, error: "Message is required" });
     }
 
+    // MCP prompt commands (/mcp__<server>__<prompt> [k=v …]) are not replies —
+    // they EXPAND into the turn's actual instruction, exactly as Claude Code
+    // treats a server-provided prompt. Resolve here, before the planner
+    // context is assembled, so the rest of the pipeline sees ordinary text.
+    if (isMcpPromptCommand(effectiveMessage)) {
+      const expanded = await expandMcpPromptCommand(effectiveMessage, workspacePath);
+      if (!expanded.ok) {
+        return reply.code(400).send({ ok: false, error: expanded.error });
+      }
+      effectiveMessage = expanded.text;
+    }
+
     const sessionId = session_id
       || `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
     const requestId = `req_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+    // ── Session + prompt lifecycle hooks ─────────────────────────────────────
+    // This route owns session/request lifecycle; the agent loop is per-turn and
+    // must never fire these (Setup/SessionStart would then run per iteration).
+    const hookRunner = await createHookRunner({ workspacePath });
+    // A session already in the DB is a RESUME; anything else is new. Checked
+    // before createSession() below, which is upsert-style and would erase the
+    // distinction.
+    const sessionExisted = sessionExists(sessionId, userId);
+
+    await ensureSetup({ workspacePath, fire: hookRunner.fire });
+    const sessionStart = await ensureSessionStart({
+      sessionId, userId, workspacePath, isNew: !sessionExisted, fire: hookRunner.fire,
+    });
+    attachRunner(sessionId, hookRunner);
+
+    // Live config reload. The watcher is refcounted per workspace and released
+    // on SessionEnd; ConfigChange fires only after a new config is ACCEPTED, so
+    // an invalid edit rolls back silently instead of announcing a change.
+    // In-flight runs are unaffected — they snapshot their hooks at run start.
+    if (sessionStart.fired) {
+      try {
+        await acquireConfigWatcher(workspacePath, sessionId, async (payload) => {
+          const fresh = await createHookRunner({ workspacePath });
+          await fresh.fire("ConfigChange", payload);
+        });
+      } catch (err) {
+        console.warn("[ConfigWatcher] could not start:", err.message);
+      }
+    }
+
+    // The user's words, preserved verbatim for history/auditing before any
+    // hook is allowed to touch them.
+    const originalMessage = effectiveMessage;
+
+    // UserPromptSubmit — runs BEFORE the model sees anything, and can veto.
+    const submit = await hookRunner.fire("UserPromptSubmit", {
+      prompt: originalMessage, session_id: sessionId, request_id: requestId, cwd: workspacePath,
+    });
+    if (submit.decision === "block") {
+      const why = submit.reason || "Blocked by a UserPromptSubmit hook.";
+      // Persist the attempt so a blocked prompt is auditable rather than vanishing.
+      try {
+        createSession(sessionId, userId, normalizeSessionLabel(originalMessage, []));
+        saveMessage(sessionId, userId, "user", originalMessage, null, requestId, null, null);
+        saveMessage(sessionId, userId, "assistant", `⛔ ${why}`, "hook_blocked", requestId, null);
+      } catch { /* auditing must not mask the block */ }
+      return reply.code(403).send({ ok: false, error: "blocked_by_hook", message: why, session_id: sessionId });
+    }
+
+    // UserPromptExpansion — may rewrite the instruction the agent actually runs.
+    const expansion = await hookRunner.fire("UserPromptExpansion", {
+      prompt: originalMessage, session_id: sessionId, request_id: requestId, cwd: workspacePath,
+    });
+    if (expansion.decision === "block") {
+      const why = expansion.reason || "Blocked by a UserPromptExpansion hook.";
+      return reply.code(403).send({ ok: false, error: "blocked_by_hook", message: why, session_id: sessionId });
+    }
+    if (expansion.updatedPrompt) effectiveMessage = expansion.updatedPrompt;
+
+    // Context contributed by SessionStart/UserPromptSubmit/Expansion hooks is
+    // appended (never substituted) so it can inform the model without
+    // displacing what the user actually asked for.
+    const hookContext = [...(sessionStart.context || []), ...submit.context, ...expansion.context]
+      .filter(Boolean).join("\n");
 
     // ★ Memory: read DB memory + working-set of recent files
     const memory            = getMemory(sessionId, userId);
@@ -606,6 +871,19 @@ export default async function plannerAgentRoute(fastify) {
 
     // ★ Agent memory: file-based cross-session knowledge (MEMORY.md index)
     const agentMemoryIndex  = await loadMemoryIndex(workspacePath);
+
+    // ★ Working memory: replay this session's real execution timeline (tool
+    //   calls, their results, failures) so the agent continues the previous
+    //   turn instead of restarting. Read before this turn's user message is
+    //   persisted (further down), so it holds only completed history and never
+    //   duplicates the request we're about to run. `priorMessages` stays as the
+    //   text-only fallback for sessions recorded before the timeline existed.
+    const priorConversation = buildConversationFromEvents(
+      dedupeObservations(getTurnEvents(sessionId, userId)),
+    );
+    const priorMessages = priorConversation.length
+      ? []
+      : getSessionMessages(sessionId, userId, 12).map((m) => ({ role: m.role, content: m.content }));
 
     // ★ The file the user most recently edited in this session.
     //   Validate: must look like a real path (slash or extension), else ignore.
@@ -650,6 +928,7 @@ export default async function plannerAgentRoute(fastify) {
     const plannerContextMessage = [
       effectiveMessage,
       attachmentContext ? `Attached files (content below):\n${attachmentContext}` : "",
+      hookContext ? `Context from hooks:\n${hookContext}` : "",
       `Conversation memory:\n${memoryContext || "(none)"}`,
       agentMemoryIndex  ? `Agent memory:\n${agentMemoryIndex}`          : "",
     ].filter(Boolean).join("\n\n");
@@ -677,7 +956,18 @@ export default async function plannerAgentRoute(fastify) {
 
     const sessionLabel = normalizeSessionLabel(message, []);
     createSession(sessionId, userId, sessionLabel);
-    saveMessage(sessionId, userId, "user", effectiveMessage, null, null, null, userAttachmentsMeta);
+    // History records what the USER actually typed. When a hook rewrote it, the
+    // expansion is persisted as a separate turn_events row so both remain
+    // distinguishable for auditing instead of the original being overwritten.
+    saveMessage(sessionId, userId, "user", originalMessage, null, requestId, null, userAttachmentsMeta);
+    if (effectiveMessage !== originalMessage) {
+      try {
+        appendTurnEvent({
+          sessionId, userId, requestId, kind: "user",
+          content: `[expanded by UserPromptExpansion]\n${effectiveMessage}`,
+        });
+      } catch (err) { console.warn("[Hooks] could not record prompt expansion:", err.message); }
+    }
     touchSession(sessionId, userId);
     syncSessionMemory(sessionId, userId, {
       userMessage: effectiveMessage,
@@ -755,7 +1045,7 @@ export default async function plannerAgentRoute(fastify) {
     const jobController = new AbortController();
     void startBackgroundRun({
       requestId, sessionId, userId, workspacePath, modelRoute, visionRoute, modelMeta,
-      plannerContextMessage, rememberedFile,
+      plannerContextMessage, rememberedFile, priorMessages, priorConversation,
       attachmentPaths: attachment_paths,
       effectiveMessage, permissionMode,
       controller: jobController,
@@ -853,11 +1143,51 @@ export default async function plannerAgentRoute(fastify) {
     }
   });
 
+  // ── Pending interactions (MCP elicitation) ─────────────────────────────────
+  // The runtime opens an interaction; the client lists and answers it here.
+  // Nothing auto-answers: an interaction that is never answered times out as
+  // "cancel", which is the safe outcome.
+  fastify.get("/interactions", async (request, reply) => {
+    setCors(reply);
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+    const { interactions } = await import("../services/interactionManager.mjs");
+    return reply.send({ ok: true, pending: interactions.listPending(request.query?.session_id || null) });
+  });
+
+  fastify.post("/interactions/:id/respond", async (request, reply) => {
+    setCors(reply);
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+
+    const { interactions } = await import("../services/interactionManager.mjs");
+    const { action, content, reason } = parseIncomingPayload(request) || {};
+    if (!["accept", "decline", "cancel"].includes(String(action))) {
+      return reply.code(400).send({ ok: false, error: 'action must be "accept", "decline" or "cancel"' });
+    }
+    // Unknown/expired ids return ok:false rather than throwing, so a duplicate
+    // submit from a retrying client is a harmless no-op.
+    const delivered = interactions.respond(request.params.id, { action, content, reason });
+    return reply.send({ ok: delivered, delivered, id: request.params.id });
+  });
+
   fastify.delete("/sessions/:sessionId", async (request, reply) => {
     setCors(reply);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
     try {
+      // SessionEnd runs BEFORE the rows disappear, so a cleanup hook can still
+      // read the session it is closing. Hook failure must not block deletion.
+      try {
+        await endSession({
+          sessionId: request.params.sessionId,
+          reason: String(request.query?.reason || "clear"),
+          fire: (await createHookRunner({ workspacePath: authSession.workspace_path || process.cwd() })).fire,
+          extra: { force: true },
+        });
+      } catch (err) {
+        console.warn("[Hooks] SessionEnd failed on delete:", err.message);
+      }
       deleteSession(request.params.sessionId, authSession.user_id);
       return reply.send({ ok: true, deleted: request.params.sessionId });
     } catch (error) {
