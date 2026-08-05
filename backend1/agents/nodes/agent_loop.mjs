@@ -91,6 +91,18 @@ import { normalizeHookConfig, fireHookEvent } from "../../services/hooks.mjs";
 import { repairToolPairing } from "../../services/conversationStore.mjs";
 import { interactions } from "../../services/interactionManager.mjs";
 import { getAnsweredQuestion, recordAnsweredQuestion } from "../../services/sessionAnswers.mjs";
+import {
+  loadSubagentRegistry, composeSubagentTools, resolveSubagentModel, describeAgents,
+} from "../../services/subagentRegistry.mjs";
+import { createWorktree, removeWorktree } from "../../services/worktreeManager.mjs";
+import { createTaskController, VERIFY_COMMAND_RE } from "../../services/taskController.mjs";
+import {
+  extractWorktreeDiff, summarizeDiff, storePatch, getPatch, getPatchDiff,
+  listPatches, applyPatch, rejectPatch,
+} from "../../services/worktreePatch.mjs";
+import {
+  startBackgroundSubagent, getBackgroundTask, listBackgroundTasks,
+} from "../../services/backgroundSubagents.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -434,10 +446,51 @@ function matchesBashRule(segment, rule) {
   return parsed.exact ? seg === parsed.prefix : (seg === parsed.prefix || seg.startsWith(parsed.prefix + " "));
 }
 
-function splitBashSegments(cmd) {
+export function splitBashSegments(cmd) {
   // A single `&` is a separator too, so a backgrounded second command
   // doesn't ride along unchecked.
-  return String(cmd || "").split(/(?:\|\||&&|;|\||&)/).map((s) => s.trim()).filter(Boolean);
+  //
+  // Quoting matters: a naive split treated the `;` in
+  // `echo 'const a = 1;' > f.js` as a command separator, so the allowlist
+  // checked a second "command" called `'` and refused a perfectly ordinary
+  // write. The agent then got an error naming a quote character, which is
+  // both baffling and un-actionable — exactly the shape of a retry loop.
+  //
+  // Separators inside quotes are DATA, so skipping them is stricter shell
+  // semantics, not a weaker check: the quoted text was never going to run as
+  // a command. If the quotes do not balance, we fall back to the naive split
+  // — an unbalanced quote is a shell syntax error anyway, and failing closed
+  // is the only acceptable direction to be wrong in here.
+  const raw = String(cmd || "");
+  const segments = [];
+  let current = "";
+  let quote = null;
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (quote) {
+      // Inside double quotes a backslash escapes the next character; inside
+      // single quotes bash treats everything literally.
+      if (quote === '"' && ch === "\\" && i + 1 < raw.length) { current += ch + raw[++i]; continue; }
+      if (ch === quote) quote = null;
+      current += ch;
+      continue;
+    }
+    if (ch === "'" || ch === '"') { quote = ch; current += ch; continue; }
+    if (ch === ";" || ch === "|" || ch === "&") {
+      // Consume the doubled forms (`&&`, `||`) as one separator.
+      if ((ch === "|" || ch === "&") && raw[i + 1] === ch) i++;
+      segments.push(current);
+      current = "";
+      continue;
+    }
+    current += ch;
+  }
+  segments.push(current);
+  if (quote) {
+    // Unbalanced — do not trust our own parse.
+    return raw.split(/(?:\|\||&&|;|\||&)/).map((s) => s.trim()).filter(Boolean);
+  }
+  return segments.map((s) => s.trim()).filter(Boolean);
 }
 
 // True if this command needs a per-command approval pause before running,
@@ -1310,10 +1363,9 @@ const VERIFICATION_CLAIM_RE = /(✅\s*)?\bverified\b|\btests?\s+pass(ed|es)?\b|\
 // as a fabricated claim, or the correction note would contradict a sentence
 // that was true.
 const DENIAL_BEFORE_RE = /\b(not|n't|no|never|without|unable to|failed to|couldn't|didn't|isn't|wasn't|hasn't|haven't|aren't|weren't)\s+(\w+\s+){0,3}$/i;
-// Loosely matches bash commands that plausibly represent a real check —
-// deliberately broad (no toolchain guessing, same philosophy as runStopHook)
-// so this only fires when NOTHING resembling a check was run at all.
-const VERIFY_COMMAND_RE = /\b(test|lint|tsc|typecheck|jest|vitest|pytest|eslint|ruff|mypy|build|cargo\s+(check|test|build)|curl\s)\b/i;
+// Imported, not redeclared. Two copies of "what counts as a check" drifting
+// apart is exactly the kind of gap where the loop believes a run was verified
+// and the controller does not — so there is one definition, in the controller.
 
 // True only if `text` asserts verification happened, unhedged by a nearby
 // denial ("not verified" doesn't count — that's the model already being
@@ -1619,6 +1671,34 @@ const AGENT_TOOLS = [
   {
     type: "function",
     function: {
+      name: "review_patch",
+      description: "Review, apply or discard the changes a worktree-isolated subagent produced. Those changes are NOT in the workspace until you approve them. Use action 'diff' to read the actual patch, 'approve' to apply it, 'reject' to discard it. Omit patch_id to list pending patches.",
+      parameters: {
+        type: "object",
+        properties: {
+          patch_id: { type: "string", description: "The patch_id returned by spawn_agent. Omit to list pending patches." },
+          action: { type: "string", description: "'diff' (read it), 'approve' (apply to the workspace), or 'reject' (discard)." },
+          reason: { type: "string", description: "Why, when rejecting." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "subagent_status",
+      description: "Check a background subagent started by spawn_agent (agent_type with background:true). Returns its status and, once finished, its report. Call this AFTER doing other useful work — don't poll in a tight loop. Omit task_id to list this session's background tasks.",
+      parameters: {
+        type: "object",
+        properties: {
+          task_id: { type: "string", description: "The task_id returned by spawn_agent. Omit to list all background tasks for this session." },
+        },
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
       name: "read_mcp_resource",
       description: "Read a read-only resource exposed by a connected MCP server, addressed by its URI (see 'MCP resources' in the system prompt for what's available). Use this for context a server publishes — a document, record, schema, or config — rather than guessing at its contents. Only offered when a connected server actually publishes resources.",
       parameters: {
@@ -1641,6 +1721,7 @@ const AGENT_TOOLS = [
         properties: {
           description: { type: "string", description: "3-5 word summary of the task, e.g. 'trace auth flow'" },
           prompt: { type: "string", description: "The complete, self-contained investigation task. Include enough context for the sub-agent to work without seeing this conversation. Tell it exactly what to report back." },
+          agent_type: { type: "string", description: "Optional specialised agent defined in .kodo/agents/*.md (see AVAILABLE SUBAGENTS in the system prompt). Omit for the default read-only explorer." },
         },
         required: ["prompt"],
       },
@@ -1901,7 +1982,95 @@ async function runAndFormatToolCall(toolCall, args, ctx, iteration, iterationBud
     durationMs: Date.now() - startedAt,
     pinned: PINNED_TOOLS.has(toolCall.function.name),
   });
+  // Task state machine: the same choke point feeds the controller, so it sees
+  // exactly the calls that actually executed — not the ones the model merely
+  // proposed. This is what lets it recognise a stuck path and know whether
+  // verification has genuinely run.
+  ctx.taskController?.recordToolCall({
+    tool: toolName,
+    args,
+    ok: result?.success !== false,
+    output: capped,
+  });
+
+  // ── Task memory: don't hand back a file the model already has ─────────────
+  // An agent with no memory of what it has read has no reason not to read it
+  // again, and re-reading a large unchanged file costs a turn and thousands of
+  // tokens for nothing.
+  //
+  // The controller compares the content just read against what was delivered
+  // before — PROVING it unchanged rather than assuming it — so a file the user
+  // edited in their own editor mid-run still comes back in full. Runs after
+  // the recording above so the controller's own accounting still sees the real
+  // call and the real result; only what goes to the MODEL is condensed.
+  //
+  // A TRUNCATED read is deliberately excluded: the controller would be hashing
+  // the full file while the model only ever received the first slice of it, so
+  // "you already have this" would be a lie about content it never saw.
+  const truncated = raw.length > MAX_TOOL_OUTPUT_CHARS;
+  if (!truncated && toolName === "read_file" && result?.success !== false && typeof result?.content === "string") {
+    const seen = ctx.taskController?.recallRead?.(args?.path, result.content);
+    if (seen) {
+      return {
+        role: "tool",
+        tool_call_id: toolCall.id,
+        content: JSON.stringify({
+          success: true,
+          path: args.path,
+          unchanged: true,
+          note: `You already read ${args.path} earlier in this task and nothing has changed it since. Use the content you already have — do not read it again. To see a different part of the file, pass an offset.`,
+        }),
+      };
+    }
+    ctx.taskController?.rememberRead?.(args?.path, result.content);
+  }
   return { role: "tool", tool_call_id: toolCall.id, content: capped };
+}
+
+/**
+ * Tool dependency analyzer: split one turn's calls into ordered execution
+ * groups, each either fully parallel or strictly sequential.
+ *
+ * The rule is about SIDE EFFECTS, not about files. A read cannot affect
+ * anything another call observes, so any run of consecutive reads is one
+ * parallel group. Anything that writes, runs a shell, spawns a process or
+ * asks the user gets a group of its own — kodo's undo-snapshot, hook and
+ * approval machinery all assume one mutation completes before the next
+ * starts, and two concurrent approval prompts would be incoherent besides.
+ *
+ * ORDERING IS PRESERVED ABSOLUTELY. Groups run in order and results are
+ * written back by original index, so a read issued before a write always
+ * observes the pre-write state, and a read issued after it always observes
+ * the post-write state. That is the whole dependency guarantee, and it falls
+ * out of the grouping rather than needing a path-level analysis: since every
+ * writer is alone in its group, no reader can ever straddle a write.
+ *
+ * `bash` stays sequential even when the command is read-only. It can hit the
+ * approval flow, and a mis-classified command would reorder a real mutation —
+ * a bad trade for a small speedup on a call that is usually slow for reasons
+ * concurrency would not fix.
+ *
+ * Pure and total: no I/O, no ctx, unparseable arguments degrade to `{}`.
+ * Exported so the scheduling can be tested directly, which is the thing that
+ * was previously impossible — it was inline in the executor.
+ */
+export function planToolBatch(toolCalls) {
+  const groups = [];
+  for (let index = 0; index < (toolCalls?.length ?? 0); index++) {
+    const toolCall = toolCalls[index];
+    let args = {};
+    try { args = JSON.parse(toolCall?.function?.arguments || "{}"); } catch { args = {}; }
+    const entry = { index, toolCall, args };
+
+    if (!PARALLELIZABLE_TOOLS.has(toolCall?.function?.name)) {
+      groups.push({ parallel: false, calls: [entry] });
+      continue;
+    }
+    const last = groups[groups.length - 1];
+    if (last?.parallel) last.calls.push(entry);
+    else groups.push({ parallel: true, calls: [entry] });
+  }
+  return groups;
 }
 
 // Execute one turn's tool calls: side-effect-free ones (PARALLELIZABLE_TOOLS)
@@ -1915,23 +2084,20 @@ async function runAndFormatToolCall(toolCall, args, ctx, iteration, iterationBud
 // LLM call.
 export async function executeToolCallsBatch(toolCalls, ctx, iteration, iterationBudget, abortSignal) {
   const results = new Array(toolCalls.length);
-  let pendingParallel = [];
-  for (let i = 0; i < toolCalls.length; i++) {
+  for (const group of planToolBatch(toolCalls)) {
     if (abortSignal?.aborted) break;
-    const toolCall = toolCalls[i];
-    let args = {};
-    try { args = JSON.parse(toolCall.function.arguments || "{}"); } catch {}
-
-    if (PARALLELIZABLE_TOOLS.has(toolCall.function.name)) {
-      pendingParallel.push(
-        runAndFormatToolCall(toolCall, args, ctx, iteration, iterationBudget).then((r) => { results[i] = r; })
-      );
+    if (group.parallel) {
+      await Promise.all(group.calls.map(({ index, toolCall, args }) =>
+        runAndFormatToolCall(toolCall, args, ctx, iteration, iterationBudget)
+          .then((r) => { results[index] = r; })));
       continue;
     }
-    if (pendingParallel.length) { await Promise.all(pendingParallel); pendingParallel = []; }
-    results[i] = await runAndFormatToolCall(toolCall, args, ctx, iteration, iterationBudget);
+    // Sequential group: one call, awaited before anything after it starts.
+    for (const { index, toolCall, args } of group.calls) {
+      if (abortSignal?.aborted) break;
+      results[index] = await runAndFormatToolCall(toolCall, args, ctx, iteration, iterationBudget);
+    }
   }
-  if (pendingParallel.length) await Promise.all(pendingParallel);
   return results.filter(Boolean);
 }
 
@@ -1958,14 +2124,23 @@ const SUBAGENT_SYSTEM = `You are a focused sub-agent spawned by Kodo's main codi
  * readFiles / conversation, so nothing here can mutate parent state.
  */
 async function runSubAgent(opts) {
-  const { creds, root, description, abortSignal, fireHook, parentSessionId, parentRequestId, task } = opts;
-  const subagentId = `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const { creds, root, description, abortSignal, fireHook, parentSessionId, parentRequestId, task, agent, maxTurns, worktree } = opts;
+  const subagentId = opts.subagentId || `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const label = String(description || "investigating").slice(0, 60);
   const startedAt = Date.now();
+  // The real agent identity, not a hardcoded string — hooks must be able to
+  // tell a "reviewer" run from an "explorer" run.
   const base = {
-    subagent_id: subagentId, subagent_type: "explorer",
+    subagent_id: subagentId,
+    subagent_type: agent?.name || "explorer",
+    read_only: agent ? !agent.writeCapable : true,
+    max_turns: Number(maxTurns) > 0 ? Number(maxTurns) : SUBAGENT_MAX_ITERATIONS,
     parent_session_id: parentSessionId ?? null, parent_request_id: parentRequestId ?? null,
     description: label, model: creds?.model ?? null, cwd: root,
+    isolation: agent?.isolation || "none",
+    background: !!agent?.background,
+    worktree_path: worktree?.path || null,
+    worktree_id: worktree?.worktreeId || null,
   };
 
   let stopFired = false;
@@ -1994,7 +2169,7 @@ async function runSubAgent(opts) {
   }
 }
 
-async function runSubAgentBody({ creds, root, description, task, workspaceSnapshot, hooks, permissions, emit, abortSignal }) {
+async function runSubAgentBody({ creds, root, description, task, workspaceSnapshot, hooks, permissions, emit, abortSignal, agent, tools, maxTurns, skillBlock }) {
   const label = String(description || "investigating").slice(0, 60);
   emit?.({ type: "progress", stage: "exploring", message: `🔍 sub-agent: ${label}` });
 
@@ -2017,16 +2192,33 @@ async function runSubAgentBody({ creds, root, description, task, workspaceSnapsh
     readFiles: new Set(),
     todosRef: { current: [] },
     workspaceSnapshot,
-    permissionMode: "plan",
+    // The definition may only NARROW this: a "plan" agent stays read-only, and
+    // even an opted-in write agent is still bounded by the parent's own
+    // permission rules inside executeTool (deny always wins).
+    permissionMode: agent?.permissionMode || "plan",
     askUser: null,
     isSubAgent: true,
     creds,
   };
 
-  const conversation = [{ role: "user", content: String(task || "").slice(0, 8000) }];
+  // Precedence, lowest to highest: the agent's base prompt, then its skills,
+  // then the non-negotiable runtime constraints. Safety is appended LAST so a
+  // skill body can never talk the subagent out of it.
+  const systemPrompt = [
+    agent?.prompt || SUBAGENT_SYSTEM,
+    skillBlock || "",
+    agent && agent.name !== "explorer"
+      ? `\n\n## Runtime constraints (these override anything above)\n- You have only the tools you were given; nothing here can grant more.\n- You do NOT see the main conversation.\n- Finish with a plain-text report and stop.`
+      : "",
+  ].filter(Boolean).join("");
+  const toolsForAgent = tools || SUBAGENT_TOOLS;
+  const budget = Number(maxTurns) > 0 ? Number(maxTurns) : SUBAGENT_MAX_ITERATIONS;
+
+  const seed = agent?.initialPrompt ? `${agent.initialPrompt}\n\n${task}` : String(task || "");
+  const conversation = [{ role: "user", content: seed.slice(0, 8000) }];
   let iteration = 0;
 
-  while (iteration < SUBAGENT_MAX_ITERATIONS) {
+  while (iteration < budget) {
     if (abortSignal?.aborted) return "Sub-agent cancelled.";
     iteration++;
 
@@ -2034,9 +2226,9 @@ async function runSubAgentBody({ creds, root, description, task, workspaceSnapsh
     try {
       ({ message } = await chatWithTools({
         creds,
-        system: SUBAGENT_SYSTEM,
+        system: systemPrompt,
         messages: conversation,
-        tools: SUBAGENT_TOOLS,
+        tools: toolsForAgent,
         maxTokens: 4000,
         temperature: 0,
         signal: abortSignal || undefined,
@@ -2052,14 +2244,14 @@ async function runSubAgentBody({ creds, root, description, task, workspaceSnapsh
       return String(message.content || "").trim() || "Sub-agent returned no findings.";
     }
 
-    conversation.push(...(await executeToolCallsBatch(message.tool_calls, subCtx, iteration, SUBAGENT_MAX_ITERATIONS, abortSignal)));
+    conversation.push(...(await executeToolCallsBatch(message.tool_calls, subCtx, iteration, budget, abortSignal)));
   }
 
   // Budget exhausted — ask for a final report with no more tools.
   try {
     const { message } = await chatWithTools({
       creds,
-      system: SUBAGENT_SYSTEM,
+      system: systemPrompt,
       messages: [...conversation, { role: "user", content: "Stop investigating and report your findings so far as plain text." }],
       tools: [],
       maxTokens: 1500,
@@ -2075,7 +2267,7 @@ async function runSubAgentBody({ creds, root, description, task, workspaceSnapsh
 
 // ── System prompt ─────────────────────────────────────────────────────────────
 
-function buildSystemPrompt({ workspaceTree, kodoMd, memoryIndex, skillIndex, permissionMode, mcpServers = [], mcpResources = [] }) {
+function buildSystemPrompt({ workspaceTree, kodoMd, memoryIndex, skillIndex, permissionMode, mcpServers = [], mcpResources = [], subagents = [] }) {
   const snapshot = workspaceTree
     .filter((f) => (f.isDir ? f.path.split("/").length <= 2 : f.path.split("/").length <= 3))
     .slice(0, 150)
@@ -2088,6 +2280,12 @@ function buildSystemPrompt({ workspaceTree, kodoMd, memoryIndex, skillIndex, per
 
   const skillSection = skillIndex.length
     ? `\n## Available skills (load with load_skill when relevant)\n${skillIndex.map((s) => `- ${s.name} — ${s.description}`).join("\n")}\n`
+    : "";
+
+  // Only worth listing when a project actually defines specialised agents;
+  // otherwise the default explorer needs no explanation.
+  const subagentSection = subagents.some((a) => !a.builtin)
+    ? `\n## Available subagents (spawn_agent agent_type)\n${subagents.map((a) => `- \`${a.name}\`${a.builtin ? " (default)" : ""} — ${a.description}${a.writeCapable ? " [can edit files]" : " [read-only]"}`).join("\n")}\nPass agent_type to spawn_agent to use one; omit it for the default read-only explorer.\n`
     : "";
 
   const kodoSection = kodoMd
@@ -2153,7 +2351,7 @@ Don't use spawn_agent for a lookup you can already scope to a handful of known f
 
 # Web search — don't answer stale facts from memory
 You have web_search(query) and fetch_url(url). ALWAYS web_search first — never answer from memory — when the question is about anything time-sensitive or that changes over time, even if you think you already know: the "latest/newest/current/last/recent" version, release, price, score, WINNER, standings, ranking, or news; anything with "today/now/this year/as of"; who currently holds a role or title; or any fact tied to a date near or after your training cutoff. Your training data is stale, so a confident answer is often WRONG. Flow: web_search to find sources, then fetch_url the best result to read the real page (snippets can be stale). If the user gives a URL, fetch_url it. Do NOT search for the user's own codebase or stable general knowledge.
-${planModeSection}${kodoSection}${memorySection}${skillSection}${mcpSection}
+${planModeSection}${kodoSection}${memorySection}${skillSection}${subagentSection}${mcpSection}
 # Workspace layout (partial)
 ${snapshot}
 `;
@@ -2447,20 +2645,164 @@ export async function executeTool(name, args, ctx) {
         const task = String(args.prompt || "").trim();
         if (!task) return { success: false, error: "prompt is required" };
         if (!creds) return { success: false, error: "Sub-agents are unavailable in this context." };
-        const report = await runSubAgent({
-          creds, root,
-          description: String(args.description || "").trim(),
+
+        // Resolve the requested agent from the registry. An omitted agent_type
+        // resolves to the built-in explorer, preserving the previous behaviour
+        // exactly.
+        const requestedType = String(args.agent_type || "").trim() || "explorer";
+        const { agents, errors: registryErrors } = await loadSubagentRegistry(root);
+        const agent = agents.get(requestedType);
+        if (!agent) {
+          const available = [...agents.keys()].join(", ");
+          const badFiles = registryErrors.length ? ` Some definitions failed to load: ${registryErrors.join("; ")}` : "";
+          return { success: false, error: `Unknown agent_type "${requestedType}". Available: ${available}.${badFiles}` };
+        }
+
+        // SECURITY: the subagent's tools are an intersection with what THIS
+        // context actually holds — a definition can never add a capability the
+        // parent lacks. ctx.validToolNames is the set the parent was offered.
+        const parentTools = ctx.validToolNames || new Set(AGENT_TOOLS.map((t) => t.function.name));
+        const { effective, refused } = composeSubagentTools(agent, parentTools);
+        if (!effective.length) {
+          return { success: false, error: `Agent "${agent.name}" has no usable tools after applying this workspace's permissions: ${refused.map((r) => `${r.name} (${r.why})`).join(", ") || "(none requested)"}` };
+        }
+
+        // Model override is policy-gated; without an explicit allow rule the
+        // subagent inherits the parent's model rather than escalating itself.
+        const { model, overridden, refused: refusedModel } = resolveSubagentModel(agent, creds.model, permissions);
+        if (refusedModel) {
+          console.warn(`[Subagent] "${agent.name}" requested model "${refusedModel}" but no Subagent(model:…) allow rule permits it — inheriting ${creds.model}`);
+        }
+
+        const subagentId = `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+        // ── isolation: worktree ────────────────────────────────────────────
+        // A real git checkout. The subagent's root becomes that directory, so
+        // its edits genuinely cannot reach the parent workspace. If isolation
+        // was requested and cannot be honoured, FAIL — never silently downgrade
+        // to running against the live workspace.
+        let worktree = null;
+        if (agent.isolation === "worktree") {
+          const created = await createWorktree({ workspacePath: root, subagentId, sessionId });
+          if (!created.ok) return { success: false, error: created.error };
+          worktree = created.worktree;
+          emit?.({ type: "progress", stage: "exploring", message: `🌳 isolated worktree for ${agent.name}` });
+        }
+
+        // Skills declared by the definition are loaded and injected into the
+        // SUBAGENT's system prompt only — never into the parent conversation.
+        // A missing skill fails the spawn rather than silently degrading the
+        // agent into one without its domain knowledge.
+        let skillBlock = "";
+        if (agent.skills?.length) {
+          const loaded = [];
+          const seen = new Set();
+          for (const skillName of agent.skills) {
+            if (seen.has(skillName)) continue; // dedupe, preserve first-seen order
+            seen.add(skillName);
+            const skill = await loadSkillByName(root, skillName);
+            if (!skill) {
+              return { success: false, error: `Agent "${agent.name}" declares skill "${skillName}", which could not be loaded from .kodo/skills/ or the built-in skills. Fix the definition or remove the reference.` };
+            }
+            loaded.push(`<skill name="${skillName}">\n${String(skill.body || skill).slice(0, 6000)}\n</skill>`);
+          }
+          if (loaded.length) skillBlock = `\n\n## Skills loaded for this agent\n${loaded.join("\n\n")}`;
+        }
+
+        const spawnOpts = {
+          creds: overridden ? { ...creds, model } : creds,
+          // THE isolation boundary: safeResolve() confines every path tool to
+          // this root, so the subagent cannot escape its worktree.
+          root: worktree ? worktree.path : root,
+          description: String(args.description || "").trim() || agent.description,
           task,
-          workspaceSnapshot,
+          workspaceSnapshot: worktree ? [] : workspaceSnapshot,
           hooks,
           permissions,
           emit,
-          abortSignal,
           fireHook: ctx.fireHook,
           parentSessionId: sessionId,
           parentRequestId: requestId,
-        });
-        return { success: true, report };
+          agent,
+          subagentId,
+          skillBlock,
+          tools: AGENT_TOOLS.filter((t) => effective.includes(t.function.name)),
+          maxTurns: agent.maxTurns,
+          worktree,
+        };
+
+        // Capture the subagent's work as a reviewable patch BEFORE the
+        // worktree is removed — otherwise isolation just means "discarded".
+        // Only meaningful for a write-capable agent; a read-only one cannot
+        // have produced changes.
+        let capturedPatch = null;
+        const capturePatch = async () => {
+          if (!worktree || !agent.writeCapable) return null;
+          try {
+            const diff = await extractWorktreeDiff(worktree.path);
+            if (!diff.ok) return { error: diff.error };
+            if (diff.empty) return { empty: true };
+            const summary = summarizeDiff(diff, root);
+            const patchId = storePatch({
+              subagentId, agentType: agent.name, sessionId, requestId,
+              workspaceRoot: root, diff, summary,
+            });
+            return { patchId, summary };
+          } catch (err) {
+            return { error: String(err?.message || err) };
+          }
+        };
+
+        const cleanupWorktree = async () => (worktree ? removeWorktree(worktree.worktreeId) : null);
+
+        // ── background: true ───────────────────────────────────────────────
+        // Returns immediately with a task id; the subagent keeps running on
+        // its own promise chain while this turn continues.
+        if (agent.background) {
+          const started = startBackgroundSubagent({
+            agentType: agent.name, subagentId, sessionId, requestId,
+            worktreePath: worktree?.path || null,
+            run: async (signal) => {
+              const report = await runSubAgent({ ...spawnOpts, abortSignal: signal });
+              // Capture inside the task, before onSettled removes the worktree.
+              const captured = await capturePatch();
+              return captured?.patchId
+                ? { report, patch_id: captured.patchId, patch_summary: captured.summary }
+                : report;
+            },
+            onSettled: cleanupWorktree,
+          });
+          if (!started.ok) {
+            await cleanupWorktree();
+            return { success: false, error: started.error };
+          }
+          return {
+            success: true, background: true, task_id: started.taskId,
+            agent_type: agent.name, tools_used: effective, model,
+            isolation: agent.isolation, worktree: worktree?.path || null,
+            message: `Started "${agent.name}" in the background as ${started.taskId}. Use subagent_status with this task_id to collect the report — do NOT wait idly for it.`,
+          };
+        }
+
+        try {
+          const report = await runSubAgent({ ...spawnOpts, abortSignal });
+          capturedPatch = await capturePatch();
+          return {
+            success: true, report, agent_type: agent.name, tools_used: effective, model,
+            isolation: agent.isolation, worktree: worktree?.path || null,
+            ...(capturedPatch?.patchId
+              ? {
+                patch_id: capturedPatch.patchId,
+                patch_summary: capturedPatch.summary,
+                review_required: "The subagent's changes are NOT in your workspace yet. Review patch_summary, then call review_patch with action approve or reject.",
+              }
+              : capturedPatch?.empty ? { patch: "none — the subagent made no changes" }
+                : capturedPatch?.error ? { patch_error: capturedPatch.error } : {}),
+          };
+        } finally {
+          // Cleanup on success, error AND abort — always, patch or not.
+          await cleanupWorktree();
+        }
       }
 
       case "ask_user": {
@@ -2489,6 +2831,46 @@ export async function executeTool(name, args, ctx) {
           // later attempt genuinely re-asks rather than reusing a non-answer.
           return { success: false, error: `Question cancelled: ${String(err?.message || err)}` };
         }
+      }
+
+      case "review_patch": {
+        const patchId = String(args.patch_id || "").trim();
+        const action = String(args.action || "").trim().toLowerCase();
+        if (!patchId) return { success: true, patches: listPatches(sessionId) };
+
+        const record = getPatch(patchId);
+        if (!record) return { success: false, error: `Unknown patch "${patchId}".` };
+
+        if (!action || action === "diff") {
+          return { success: true, ...record, diff: getPatchDiff(patchId) };
+        }
+        if (action === "approve") {
+          // Apply is a real workspace mutation, so it obeys plan mode.
+          if (permissionMode === "plan") {
+            return { success: false, error: "Plan mode — patches cannot be applied. Present the review as text instead." };
+          }
+          const res = await applyPatch(patchId, { workspaceRoot: root });
+          if (!res.ok) return { success: false, error: res.error, blocked: !!res.blocked };
+          for (const f of res.files) ctx.editedFiles.set(f, "edit");
+          emit?.({ type: "progress", stage: "executing", message: `✅ applied patch ${patchId} (${res.files.length} file(s))` });
+          return { success: true, applied: true, files: res.files };
+        }
+        if (action === "reject") {
+          const res = rejectPatch(patchId, args.reason);
+          if (!res.ok) return { success: false, error: res.error };
+          return { success: true, rejected: true, workspace: "unchanged" };
+        }
+        return { success: false, error: `Unknown action "${action}" — use diff, approve or reject.` };
+      }
+
+      case "subagent_status": {
+        const taskId = String(args.task_id || "").trim();
+        if (!taskId) {
+          return { success: true, tasks: listBackgroundTasks(sessionId) };
+        }
+        const task = getBackgroundTask(taskId);
+        if (!task) return { success: false, error: `Unknown background task "${taskId}".` };
+        return { success: true, ...task };
       }
 
       case "read_mcp_resource": {
@@ -2589,9 +2971,6 @@ function looksBuildRequest(msg) {
   if (CODE_ONLY_RE.test(m)) return false;
   return BUILD_VERB_RE.test(m);
 }
-function hasCodeBlocks(text) {
-  return /```/.test(String(text || ""));
-}
 
 // Questions about current/recent facts a model can't know reliably. Weak models
 // answer these confidently from stale training data instead of calling
@@ -2653,13 +3032,15 @@ export async function agentLoopNode(state) {
     return { finalAnswer: msg, editedFiles: [], messages: [new AIMessage(msg)] };
   }
 
-  const [workspaceSnapshot, memoryIndex, skillIndex, kodoSettings, kodoMd] = await Promise.all([
+  const [workspaceSnapshot, memoryIndex, skillIndex, kodoSettings, kodoMd, subagentRegistry] = await Promise.all([
     walkWorkspace(root, 8),
     loadMemoryIndex(root),
     loadSkillIndex(root),
     loadKodoSettings(root),
     readFileSafe(path.join(root, "KODO.md"), 24_000),
+    loadSubagentRegistry(root),
   ]);
+  for (const err of subagentRegistry.errors) console.warn(`[Subagent] ${err}`);
   const { hooks, permissions, mcpServers } = kodoSettings;
 
   // Seed context: files whose FULL relative path appears verbatim in the message
@@ -2685,6 +3066,11 @@ export async function agentLoopNode(state) {
     recordEvent,
     mcpClients: new Map(), // populated by MCP discovery + verify_ui; closed at the end of this run
     mcpRoutes: new Map(),  // "mcp__server__tool" → { serverName, toolName }
+    // inspect → plan → patch → verify → finish. Observes every executed tool
+    // call so the loop can tell a productive retry from a stuck one, and can
+    // refuse to finish on unverified edits. Sub-agents get their own (they run
+    // read-only, so it stays inert there).
+    taskController: createTaskController({ task: cleanMessage }),
   };
 
   // ── Lifecycle hooks ────────────────────────────────────────────────────────
@@ -2745,6 +3131,7 @@ export async function agentLoopNode(state) {
     permissionMode,
     mcpServers: mcpServerStatus,
     mcpResources,
+    subagents: [...subagentRegistry.agents.values()],
   });
   for (const f of workspaceSnapshot) {
     if (f.isDir || seedBlocks.length >= 3) continue;
@@ -2810,15 +3197,25 @@ export async function agentLoopNode(state) {
   const PLAN_MODE_BLOCKED_TOOLS = new Set(["write_file", "edit_file"]);
   // read_mcp_resource is only meaningful when a connected server actually
   // publishes resources — otherwise its schema is dead weight every iteration.
-  const baseTools = mcpResources.length
-    ? AGENT_TOOLS
-    : AGENT_TOOLS.filter((t) => t.function.name !== "read_mcp_resource");
+  const hasBackgroundAgent = [...subagentRegistry.agents.values()].some((a) => a.background);
+  const baseTools = AGENT_TOOLS.filter((t) => {
+    if (t.function.name === "read_mcp_resource") return mcpResources.length > 0;
+    // Dead weight on every iteration unless a background agent is defined.
+    if (t.function.name === "subagent_status") return hasBackgroundAgent;
+    if (t.function.name === "review_patch") {
+      return [...subagentRegistry.agents.values()].some((a) => a.isolation === "worktree" && a.writeCapable);
+    }
+    return true;
+  });
   const toolsForThisRun = permissionMode === "plan"
     ? baseTools.filter((t) => !PLAN_MODE_BLOCKED_TOOLS.has(t.function.name))
     : [...baseTools, ...mcpTools];
   // Exactly the names the model was offered — what tool-call sanitising must
   // accept, so a discovered MCP tool isn't discarded as "unknown".
   const validToolNames = new Set(toolsForThisRun.map((t) => t.function.name));
+  // Subagent tool composition intersects against this, so a definition can
+  // never grant something this run does not itself hold.
+  ctx.validToolNames = validToolNames;
 
   // One tool-calling turn loop, reused for both the main pass and the bounded
   // post-verification fix-up pass — same LLM-call/tool-execution/context-trim
@@ -2827,8 +3224,8 @@ export async function agentLoopNode(state) {
   async function runToolLoop({ iterationBudget, approvalState, nudgeOnStall = false }) {
     let iteration = 0;
     let consecutiveErrors = 0;
-    let enforcedApply = false;   // only force "apply the code" once per loop
     let stallNudged = false;     // only nudge once per loop
+    let stoppedEarly = false;    // controller ended the task before the budget
     let finalAnswer = "";
     const onChunk = (chunk) => emit?.({ type: "content", content: chunk });
 
@@ -2958,20 +3355,64 @@ export async function agentLoopNode(state) {
         toolCalls: message.tool_calls?.length ? message.tool_calls : null,
       });
 
-      // Plain text response = the agent is done — UNLESS this was a build/change
-      // request and it just DESCRIBED code (a ``` block) without editing any
-      // files. Weak models bail to code-dumping instead of calling write_file;
-      // reject that once and force them to actually apply it to the real files.
+      // Plain text response = the agent believes it is done. The controller
+      // decides whether it actually is. Two gates, in order:
+      //
+      //   1. Execution intent — the user asked for a change and nothing in the
+      //      workspace moved. Describing the implementation, however well, is
+      //      not performing it. Back to execution.
+      //   2. Verification — files changed but nothing was checked.
+      //
+      // Both are bounded inside the controller, so neither can trap a run: a
+      // question finishes immediately, and a model that simply will not call a
+      // tool ends with an honest report rather than an infinite loop.
       if (!message.tool_calls?.length) {
         const text = String(message.content || "").trim();
-        if (!enforcedApply && ctx.editedFiles.size === 0 && looksBuildRequest(cleanMessage) && hasCodeBlocks(text)) {
-          enforcedApply = true;
-          emit?.({ type: "progress", stage: "executing", message: "✋ You described code — now applying it to the real files..." });
-          conversation.push({
-            role: "user",
-            content: "STOP — you output code as text but did NOT create or edit any files. That is a failure; the user wants this change APPLIED to their project, not explained.\n\nNow actually do it:\n1. Use grep / glob / list_files to find the correct existing file(s) and directory for this feature (do not assume paths — this is a real repo; search for the route/page).\n2. Use write_file to create new files, or edit_file to modify existing ones, with a real implementation that matches THIS project's stack, imports, and design conventions.\n3. Verify (typecheck if frontend), then give a short summary of which files you changed.\nDo NOT paste code as text again — make the edits with the tools.",
-          });
+        const gate = ctx.taskController.canFinish({
+          editedPaths: ctx.editedFiles.keys(),
+          responseText: text,
+        });
+        if (!gate.allowed) {
+          // Each refusal is a different thing the user should see happening —
+          // "verifying" while the agent is actually being told to go and build
+          // the other half of the feature is just confusing. Keyed on the
+          // gate's own `kind` so the wording cannot drift out of sync with it.
+          const REFUSAL = {
+            no_mutation:        { stage: "executing", message: "✋ You described the change — now apply it to the real files..." },
+            open_plan_items:    { stage: "executing", message: "📋 Not done yet — finishing the remaining steps..." },
+            incomplete_shape:   { stage: "executing", message: "🧩 Not done yet — the request asked for more than this..." },
+            unverified:         { stage: "verifying", message: "🔍 Not done yet — verifying the changes first..." },
+            verification_failed:{ stage: "verifying", message: "🔍 Verification is still failing — fixing it first..." },
+          }[gate.kind] ?? { stage: "verifying", message: "🔍 Not done yet — verifying the changes first..." };
+          emit?.({ type: "progress", ...REFUSAL });
+          conversation.push({ role: "user", content: gate.directive });
           continue;
+        }
+        // The agent was asked to change something and never did, even after
+        // being sent back. Say so plainly rather than presenting the
+        // explanation as if it were the delivered work.
+        if (gate.unfulfilled) {
+          const note = "\n\n⚠️ **No files were changed.** You asked for an implementation, but the agent only described it — nothing above has been applied to your project.";
+          finalAnswer = text + note;
+          emit?.({ type: "content", content: note });
+          break;
+        }
+        // Verified, but the agent's own plan still has open items. Say which,
+        // rather than letting a green checkmark imply the feature is whole.
+        if (gate.incomplete) {
+          const note = `\n\n⚠️ **Some planned steps were left undone:**\n${gate.openItems.map((t) => `- ☐ ${t}`).join("\n")}`;
+          finalAnswer = text + note;
+          emit?.({ type: "content", content: note });
+          break;
+        }
+        // Or the request itself is still not satisfied — checked against what
+        // actually changed on disk, so this fires even when the agent kept no
+        // plan at all to be honest about.
+        if (gate.unmet?.length) {
+          const note = `\n\n⚠️ **This may not be complete:**\n${gate.unmet.map((u) => `- ${u}`).join("\n")}`;
+          finalAnswer = text + note;
+          emit?.({ type: "content", content: note });
+          break;
         }
         finalAnswer = text;
         break;
@@ -3035,6 +3476,45 @@ export async function agentLoopNode(state) {
         });
       }
       conversation.push(...toolResults);
+
+      // Repetition detection: the same fix re-applied to the same file while
+      // the identical failure keeps coming back. Left alone, the model burns
+      // the whole budget nudging one type annotation back and forth. Force it
+      // to re-plan, and escalate to a structurally different approach if it
+      // gets stuck again on the same path.
+      const thrash = ctx.taskController.detectThrash();
+      if (thrash) {
+        ctx.taskController.escalateStrategy();
+        emit?.({ type: "progress", stage: "planning", message: "🔄 That fix isn't working — re-planning..." });
+        conversation.push({ role: "user", content: ctx.taskController.strategyDirective(thrash) });
+      }
+
+      // Termination policy. Close the turn with the controller and let it
+      // decide whether this task is still worth continuing. Without this, a
+      // task that is stuck keeps calling the model until MAX_ITERATIONS —
+      // burning a whole quota to arrive at the same wall it hit on step 4.
+      // Stopping here is the difference between an honest blocker report and
+      // an expensive one.
+      const verdict = ctx.taskController.endIteration();
+      if (verdict.stop) {
+        console.log(`[AgentLoop] stopping early after ${verdict.iterations} step(s): ${verdict.reason} — ${verdict.detail}`);
+        emit?.({ type: "progress", stage: "stopped", message: `⛔ Stopping early: ${verdict.reason.replace(/_/g, " ")}` });
+        finalAnswer = ctx.taskController.blockerReport();
+        emit?.({ type: "content", content: finalAnswer });
+        stoppedEarly = true;
+        break;
+      }
+      // Not a stop — the controller wants to steer (e.g. the discovery budget
+      // is spent and it is time to commit to a plan and start editing).
+      if (verdict.directive) {
+        const NUDGE = {
+          recovery:         { stage: "executing", message: "🔁 That keeps failing — trying a different approach..." },
+          discovery_grace:  { stage: "planning",  message: "📋 Going in circles — committing to a plan..." },
+          discovery_budget: { stage: "planning",  message: "📋 Enough exploring — time to implement..." },
+        }[verdict.directiveKind] ?? { stage: "planning", message: "📋 Enough exploring — time to implement..." };
+        emit?.({ type: "progress", ...NUDGE });
+        conversation.push({ role: "user", content: verdict.directive });
+      }
 
       // PostToolBatch: fires once after a parallel batch settles, so a hook can
       // react to the group (re-lint everything touched, emit one notification)
@@ -3147,7 +3627,7 @@ export async function agentLoopNode(state) {
       }
     }
 
-    return { finalAnswer, iterations: iteration };
+    return { finalAnswer, iterations: iteration, stoppedEarly };
   }
 
   const approvalState = { granted: permissionMode !== "ask", promise: approvalPromise };
@@ -3198,7 +3678,12 @@ export async function agentLoopNode(state) {
     let result = await runStopHook(root, hooks, emit);
     let attempt = 0;
 
-    while (result.ran && !result.passed && attempt < MAX_FIX_ATTEMPTS && !abortSignal?.aborted) {
+    // The hook still RUNS after an early stop — the user deserves to know the
+    // real state of their tree. But the fix-up loop is skipped: the controller
+    // just concluded this task is stuck, and spending another 3×8 turns on it
+    // is exactly the quota burn the early stop exists to prevent.
+    while (result.ran && !result.passed && attempt < MAX_FIX_ATTEMPTS
+           && !mainResult.stoppedEarly && !abortSignal?.aborted) {
       attempt++;
       emit?.({ type: "progress", stage: "executing", message: `⚠️ Verification failed — fixing (attempt ${attempt}/${MAX_FIX_ATTEMPTS})...` });
       conversation.push({
@@ -3219,6 +3704,11 @@ export async function agentLoopNode(state) {
     if (note) emit?.({ type: "content", content: note });
     stopHookPassed = result.ran && result.passed;
     stopHookRan = result.ran;
+    // The project's own declared check is verification too — tell the
+    // controller, so its final state reflects what actually happened.
+    if (result.ran) {
+      ctx.taskController.recordVerification({ command: hooks.stop, passed: result.passed, output: result.output });
+    }
   }
 
   // Anti-fabrication backstop: the stop-hook note above is the only
@@ -3230,9 +3720,18 @@ export async function agentLoopNode(state) {
   // real backs it (no passing stop hook, no test/lint/build/curl-shaped bash
   // command actually run this turn), correct it rather than let it stand.
   if (hasUnhedgedVerificationClaim(finalAnswer) && !stopHookPassed) {
-    const ranRealCheck = ctx.bashCommands.some((cmd) => VERIFY_COMMAND_RE.test(cmd));
-    if (!ranRealCheck) {
-      const correction = "\n\n⚠️ Correction: the summary above claims verification, but no test/lint/build/typecheck command was actually run this turn — treat it as unverified.";
+    // "Was a check RUN" is the wrong question — it was the old one, and it let
+    // through the two claims that matter most: a check that ran and FAILED,
+    // and a check that passed before further edits. The controller tracks both
+    // precisely, so ask it. (Sub-agent runs have no controller; fall back.)
+    const snap = ctx.taskController?.snapshot();
+    const backed = snap
+      ? snap.verificationCurrent
+      : ctx.bashCommands.some((cmd) => VERIFY_COMMAND_RE.test(cmd));
+    if (!backed) {
+      const correction = snap?.verificationStale
+        ? "\n\n⚠️ Correction: the summary above claims verification, but files changed after the last passing check — that result no longer describes the current state. Treat it as unverified."
+        : "\n\n⚠️ Correction: the summary above claims verification, but no test/lint/build/typecheck command actually ran and passed this turn — treat it as unverified.";
       finalAnswer += correction;
       emit?.({ type: "content", content: correction });
     }

@@ -356,6 +356,21 @@ export default function ChatComposer({
     onSlashCommand?.(id);
   }
 
+  // A server-side command is INSERTED rather than dispatched: the user may
+  // still need to type arguments, and pressing Enter is what sends it through
+  // the normal message path.
+  function handleSlashInsert(text: string) {
+    setShowPalette(false);
+    setSlashQuery("");
+    setMessageInput(text);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(text.length, text.length);
+    });
+  }
+
   // ── Central add-files gate ──────────────────────────────────────────────
   // Images require a vision model; when none is configured we drop them and
   // show a clear message, but still accept the text/PDF files in the same batch.
@@ -979,6 +994,7 @@ export default function ChatComposer({
                 query={slashQuery}
                 visible={showPalette}
                 onSelect={handleSlashSelect}
+                onInsert={handleSlashInsert}
               />
               <textarea
                 ref={textareaRef}

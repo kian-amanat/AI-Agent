@@ -48,6 +48,13 @@ import {
   ensureSetup, ensureSessionStart, endSession, attachRunner,
 } from "../services/sessionHooks.mjs";
 import { acquireConfigWatcher } from "../services/configWatcher.mjs";
+import {
+  collectProjectEvidence, evidenceFooter, generateValidatedKodoMd,
+} from "../services/projectEvidence.mjs";
+import {
+  loadCommandRegistry, parseCommandInvocation, expandCommand, resolveCommand,
+  describeCommands, completeCommand, RESERVED_COMMANDS,
+} from "../services/slashCommands.mjs";
 import { buildConversationFromEvents, dedupeObservations } from "../services/conversationStore.mjs";
 
 // ★ LangGraph runner + working-set memory
@@ -537,7 +544,7 @@ export async function expandMcpPromptCommand(message, workspacePath) {
   }
 }
 
-async function handleSlashCommand(message, { workspacePath, modelRoute }) {
+export async function handleSlashCommand(message, { workspacePath, modelRoute }) {
   const m = String(message || "").trim();
   if (!m.startsWith("/")) return null;
   const [cmdRaw, ...rest] = m.slice(1).split(/\s+/);
@@ -549,15 +556,27 @@ async function handleSlashCommand(message, { workspacePath, modelRoute }) {
 
   switch (cmd) {
     case "help":
+      // Grouped so the two kinds of information stay distinguishable: commands
+      // that read YOUR PROJECT vs commands that report KODO'S OWN RUNTIME.
+      // Conflating them is what lets runtime state be mistaken for project
+      // truth, so the boundary is stated in the UI rather than implied.
       return [
         "**Kodo commands**",
-        "- `/init` — analyse the workspace and generate KODO.md (project instructions loaded into every request)",
-        "- `/memory` — show what Kodo remembers about this project",
-        "- `/skills` — list available expert skills",
-        "- `/hooks` — show configured lifecycle hooks, their scope, type and status",
-        "- `/mcp` — show connected MCP servers, their tools, prompts and resources",
+        "",
+        "**Your project**",
+        "- `/init` — inspect the repository and generate KODO.md (project instructions loaded into every request)",
+        "- `/commands` — list custom slash commands defined in `.kodo/commands` and `.kodo/skills`",
+        "",
+        "**Kodo runtime** _(introspection — describes the agent, not your codebase)_",
+        "- `/memory` — what Kodo remembers from past sessions",
+        "- `/skills` — expert skills available to load",
+        "- `/agents` — subagents, their tools, model and read-only status",
+        "- `/hooks` — configured lifecycle hooks, their scope, type and status",
+        "- `/mcp` — connected MCP servers, their tools, prompts and resources",
         "- `/mcp__<server>__<prompt> [key=value …]` — run a prompt an MCP server provides",
         "- `/help` — this list",
+        "",
+        "_Runtime output describes Kodo itself and is never used as evidence about your project — `/init` reads repository files only._",
         "",
         "Anything else you type goes to the agent. Say `remember: <fact>` to save a fact, `forget all memory` to wipe memory.",
       ].join("\n");
@@ -607,6 +626,73 @@ async function handleSlashCommand(message, { workspacePath, modelRoute }) {
 
       lines.push("", `**Runtime** — ${activeSessionIds().length} active session(s)`);
       lines.push(`_Events supported: ${HOOK_EVENTS.length}. Handler types per event vary (e.g. SessionStart: ${EVENT_HANDLER_TYPES.SessionStart.join(", ")})._`);
+      return lines.join("\n");
+    }
+
+    case "commands": {
+      const { commands, conflicts, errors } = await loadCommandRegistry(workspacePath);
+      const rows = describeCommands(commands);
+      const lines = ["**Custom slash commands** — project `.kodo/` and user `~/.kodo/`"];
+      if (!rows.length) {
+        lines.push("", "_None defined. Create `.kodo/commands/deploy.md` to add `/deploy`._");
+      } else {
+        let category = null;
+        for (const c of rows) {
+          if (c.category !== category) { category = c.category; lines.push("", `**${category}**`); }
+          const alias = c.aliases.length ? ` (aliases: ${c.aliases.map((a) => `/${a}`).join(", ")})` : "";
+          lines.push(`- **/${c.name}**${c.version ? ` v${c.version}` : ""}${alias} — ${c.description}`);
+          lines.push(`    - usage: \`${c.usage}\``);
+          lines.push(`    - scope: ${c.scope} · source: ${c.source === "commands" ? "`.kodo/commands`" : "`.kodo/skills`"} · \`${c.file}\``);
+          if (c.arguments.length) {
+            lines.push(`    - arguments: ${c.arguments.map((a) => `${a.name}${a.required ? "*" : ""}${a.enum?.length ? `=${a.enum.join("|")}` : ""}${a.default ? ` (default ${a.default})` : ""}`).join(", ")}`);
+          }
+          if (c.requires.length) lines.push(`    - requires: ${c.requires.join(", ")}`);
+          if (c.declaredPermissions.length) {
+            lines.push(`    - declares (advisory only, grants nothing): ${c.declaredPermissions.join(", ")}`);
+          }
+          if (c.examples.length) lines.push(`    - e.g. ${c.examples.map((e) => `\`${e}\``).join(" · ")}`);
+          lines.push(`    - status: ${c.enabled ? "enabled" : `⚠️ disabled — ${c.disabledReason}`}`);
+        }
+      }
+      if (conflicts.length) {
+        lines.push("", "**Conflicts** (not loaded)");
+        for (const c of conflicts) lines.push(`- ⚠️ ${c}`);
+      }
+      if (errors.length) {
+        lines.push("", "**Invalid**");
+        for (const e of errors) lines.push(`- ⚠️ ${e}`);
+      }
+      lines.push("", "_Command bodies are not shown. A command expands into your prompt — it cannot grant tools or bypass permissions._");
+      return lines.join("\n");
+    }
+
+    case "agents": {
+      const { loadSubagentRegistry, describeAgents, SUBAGENT_BASE_READONLY_TOOLS, SUBAGENT_WRITE_TOOLS } =
+        await import("../services/subagentRegistry.mjs");
+      const { agents, errors } = await loadSubagentRegistry(workspacePath);
+      // Compose against the full built-in ceiling so the inspector shows what
+      // each agent WOULD get; a live run intersects with that run's tools too.
+      const parentTools = new Set([...SUBAGENT_BASE_READONLY_TOOLS, ...SUBAGENT_WRITE_TOOLS]);
+      const rows = describeAgents(agents, parentTools);
+
+      const lines = ["**Subagents** — `.kodo/agents/*.md`"];
+      for (const a of rows) {
+        lines.push("", `- **${a.name}**${a.builtin ? " _(built-in)_" : ""} — ${a.description}`);
+        lines.push(`    - source: \`${a.source}\``);
+        lines.push(`    - access: ${a.readOnly ? "🔒 read-only" : "✏️ WRITE-CAPABLE (explicit opt-in)"} · mode \`${a.permissionMode}\``);
+        lines.push(`    - model: ${a.model} · maxTurns: ${a.maxTurns}`);
+        lines.push(`    - isolation: ${a.isolation === "worktree" ? "🌳 git worktree (real, auto-removed on completion/failure/abort)" : "none (runs in the workspace)"}`);
+        lines.push(`    - execution: ${a.background ? "⏳ background (returns a task_id; collect with subagent_status)" : "foreground (blocks until done)"}`);
+        lines.push(`    - tools: ${a.effectiveTools?.length ? a.effectiveTools.join(", ") : "(none available)"}`);
+        if (a.refusedTools?.length) {
+          lines.push(`    - refused: ${a.refusedTools.map((r) => `${r.name} (${r.why})`).join(", ")}`);
+        }
+      }
+      if (errors.length) {
+        lines.push("", "**Invalid definitions** (not loaded)");
+        for (const e of errors) lines.push(`- ⚠️ ${e}`);
+      }
+      lines.push("", "_Prompt bodies are not shown. Subagent tools are always an intersection with the parent's — a definition can never widen access._");
       return lines.join("\n");
     }
 
@@ -670,25 +756,62 @@ async function handleSlashCommand(message, { workspacePath, modelRoute }) {
     }
 
     case "init": {
+      // PROJECT DATA ONLY. walkWorkspace excludes .kodo/.claude;
+      // collectProjectEvidence independently excludes those AND every git
+      // worktree under the workspace, so a temporary subagent checkout is
+      // never mistaken for the project.
       const tree = await walkWorkspace(workspacePath, 6);
-      const snapshot = tree.slice(0, 250).map((f) => (f.isDir ? `${f.path}/` : f.path)).join("\n");
-      const pkgs = [];
-      for (const f of tree) {
-        if (!f.isDir && f.path.endsWith("package.json") && f.path.split("/").length <= 3) {
-          try { pkgs.push(`--- ${f.path} ---\n${(await fs.readFile(path.join(workspacePath, f.path), "utf-8")).slice(0, 1500)}`); } catch {}
-        }
-      }
-      const result = await callLLM({
-        system: `You write KODO.md files — concise project instructions an AI coding agent loads on every request. Cover: what the project is, layout (which dir is which app), how to run/build/typecheck each part, code conventions visible from the structure, and any gotchas. Max ~120 lines of markdown. No filler.`,
-        messages: [{ role: "user", content: `File tree:\n${snapshot}\n\n${pkgs.join("\n\n")}\n\nWrite the KODO.md content now (markdown only).` }],
-        modelRoute,
-        maxTokens: 2500,
-        temperature: 0.2,
+      const evidence = await collectProjectEvidence(workspacePath, { tree });
+
+      // Generate → validate → repair. Nothing is written until a draft passes;
+      // an invalid document is discarded and regenerated with the validator's
+      // own findings fed back as corrections.
+      const outcome = await generateValidatedKodoMd({
+        evidence,
+        generate: async ({ system, user }) => {
+          const result = await callLLM({
+            system,
+            messages: [{ role: "user", content: user }],
+            modelRoute,
+            maxTokens: 2500,
+            temperature: 0.2,
+          });
+          return String(result?.content || "");
+        },
       });
-      const content = String(result?.content || "").replace(/^```(?:markdown|md)?\n?/, "").replace(/\n?```\s*$/, "").trim();
-      if (!content) return "Could not generate KODO.md — the model returned nothing. Try again.";
-      await fs.writeFile(path.join(workspacePath, "KODO.md"), content + "\n", "utf-8");
-      return `Created **KODO.md** (${content.split("\n").length} lines). It now loads into every agent request. Edit it any time — it's your project's standing instructions.\n\n${content.slice(0, 1200)}${content.length > 1200 ? "\n…" : ""}`;
+
+      const kodoPath = path.join(workspacePath, "KODO.md");
+
+      if (!outcome.ok) {
+        // Retries exhausted. Do NOT overwrite — an existing KODO.md, even a
+        // stale one, is better than one with known unsupported claims.
+        let existing = false;
+        try { await fs.access(kodoPath); existing = true; } catch {}
+        return [
+          `Could not generate a valid KODO.md after ${outcome.attemptsUsed} attempt(s). **Nothing was written.**`,
+          existing ? "Your existing `KODO.md` is unchanged." : "No `KODO.md` was created.",
+          "",
+          "The generated drafts kept failing these checks:",
+          ...outcome.violations.slice(0, 8).map((v) => `- ${v.detail}`),
+          "",
+          `_Inspected ${evidence.filesInspected.length} file(s)${evidence.excludedWorktrees.length ? `; excluded ${evidence.excludedWorktrees.length} worktree(s)` : ""}. Try again, or write KODO.md by hand._`,
+        ].join("\n");
+      }
+
+      const finalContent = `${outcome.content}\n${evidenceFooter(evidence)}\n`;
+      await fs.writeFile(kodoPath, finalContent, "utf-8");
+
+      const excluded = evidence.excludedWorktrees.length
+        ? `\n\n**Excluded ${evidence.excludedWorktrees.length} worktree(s)** (not part of this project): ${evidence.excludedWorktrees.map((w) => `\`${w}\``).join(", ")}`
+        : "";
+      const inspected = evidence.filesInspected.length
+        ? `\n\n**Files inspected:** ${evidence.filesInspected.map((f) => `\`${f}\``).join(", ")}`
+        : "\n\n**No manifest files were found** — the document is based on the file tree alone, so most of it will be under _Inferred_.";
+      const retried = outcome.attemptsUsed > 1
+        ? `\n\n_Validation rejected ${outcome.attemptsUsed - 1} earlier draft(s); the written document passed all checks._`
+        : "";
+
+      return `Created **KODO.md** (${finalContent.split("\n").length} lines), validated against ${evidence.filesInspected.length} inspected file(s).${inspected}${excluded}${retried}\n\n${outcome.content.slice(0, 1200)}${outcome.content.length > 1200 ? "\n…" : ""}`;
     }
 
     default:
@@ -794,6 +917,39 @@ export default async function plannerAgentRoute(fastify) {
       effectiveMessage = expanded.text;
     }
 
+    // What the user literally typed, captured before ANY expansion (slash
+    // command, MCP prompt, or hook) can rewrite it. History records this.
+    const typedMessage = effectiveMessage;
+
+    // Custom slash commands (.kodo/commands/*.md and .kodo/skills/**). Expanded
+    // here — before the planner — so they are real prompt expansion rather than
+    // a fake built-in. Built-ins keep their own handler further down and are
+    // never shadowed (see RESERVED_COMMANDS).
+    let slashCommand = null;
+    {
+      const invocation = parseCommandInvocation(effectiveMessage);
+      if (invocation && !RESERVED_COMMANDS.has(invocation.name)) {
+        const { commands, aliases, conflicts } = await loadCommandRegistry(workspacePath);
+        for (const c of conflicts) console.warn(`[SlashCommand] ${c}`);
+        // Resolve through aliases too, so /d works when declared as an alias.
+        if (resolveCommand(invocation.name, commands, aliases)) {
+          const result = expandCommand(invocation, commands, { aliases, workspacePath });
+          // A bad argument must fail loudly with usage, not silently expand.
+          if (!result.ok) return reply.code(400).send({ ok: false, error: result.error });
+          slashCommand = {
+            name: result.command.name,
+            args: invocation.args,
+            named: invocation.named,
+            values: result.values,
+            source: result.command.source,
+            scope: result.command.scope,
+            file: result.command.file,
+          };
+          effectiveMessage = result.expanded;
+        }
+      }
+    }
+
     const sessionId = session_id
       || `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 
@@ -829,9 +985,10 @@ export default async function plannerAgentRoute(fastify) {
       }
     }
 
-    // The user's words, preserved verbatim for history/auditing before any
-    // hook is allowed to touch them.
-    const originalMessage = effectiveMessage;
+    // The user's words, preserved verbatim for history/auditing. This is what
+    // they TYPED (e.g. "/deploy staging"), not the expanded command body — a
+    // slash command must stay recognisable in the transcript.
+    const originalMessage = typedMessage;
 
     // UserPromptSubmit — runs BEFORE the model sees anything, and can veto.
     const submit = await hookRunner.fire("UserPromptSubmit", {
@@ -851,6 +1008,17 @@ export default async function plannerAgentRoute(fastify) {
     // UserPromptExpansion — may rewrite the instruction the agent actually runs.
     const expansion = await hookRunner.fire("UserPromptExpansion", {
       prompt: originalMessage, session_id: sessionId, request_id: requestId, cwd: workspacePath,
+      // A slash command IS a prompt expansion, so the hook sees it as one.
+      ...(slashCommand ? {
+        expansion_type: "slash_command",
+        command_name: slashCommand.name,
+        command_args: slashCommand.args,
+        command_source: slashCommand.source,
+        command_scope: slashCommand.scope,
+        command_values: slashCommand.values,
+        command_file: slashCommand.file,
+        expanded_prompt: effectiveMessage,
+      } : {}),
     });
     if (expansion.decision === "block") {
       const why = expansion.reason || "Blocked by a UserPromptExpansion hook.";
@@ -962,11 +1130,12 @@ export default async function plannerAgentRoute(fastify) {
     saveMessage(sessionId, userId, "user", originalMessage, null, requestId, null, userAttachmentsMeta);
     if (effectiveMessage !== originalMessage) {
       try {
+        const via = slashCommand ? `slash command /${slashCommand.name}` : "UserPromptExpansion hook";
         appendTurnEvent({
           sessionId, userId, requestId, kind: "user",
-          content: `[expanded by UserPromptExpansion]\n${effectiveMessage}`,
+          content: `[expanded by ${via}]\n${effectiveMessage}`,
         });
-      } catch (err) { console.warn("[Hooks] could not record prompt expansion:", err.message); }
+      } catch (err) { console.warn("[Prompt] could not record expansion:", err.message); }
     }
     touchSession(sessionId, userId);
     syncSessionMemory(sessionId, userId, {
@@ -1141,6 +1310,24 @@ export default async function plannerAgentRoute(fastify) {
     } catch (error) {
       return reply.code(500).send({ ok: false, error: "Failed to get session", details: error.message });
     }
+  });
+
+  // Autocomplete for the composer's slash-command menu. Metadata only —
+  // command bodies are never returned.
+  fastify.get("/commands", async (request, reply) => {
+    setCors(reply);
+    const authSession = requireUserSession(request, reply);
+    if (!authSession) return;
+    const workspacePath = authSession.workspace_path || process.cwd();
+    const { commands, aliases, conflicts, errors } = await loadCommandRegistry(workspacePath);
+    const prefix = String(request.query?.q ?? "");
+    return reply.send({
+      ok: true,
+      completions: prefix ? completeCommand(prefix, commands, aliases) : [],
+      commands: describeCommands(commands),
+      conflicts,
+      errors,
+    });
   });
 
   // ── Pending interactions (MCP elicitation) ─────────────────────────────────

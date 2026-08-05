@@ -438,6 +438,70 @@ await test("no hooks configured → tools run exactly as before", async () => {
   assert.ok(/"success":true/.test(res.content), res.content.slice(0, 120));
 });
 
+console.log("\n📦 abort-listener hygiene (regression)");
+
+await test("REGRESSION: repeated firings on ONE run-scoped signal do not leak listeners", async () => {
+  // Was a real bug: runCommand/runHttp attached an abort listener to the
+  // run-scoped signal and never detached it, so a run firing >10 hooks emitted
+  // MaxListenersExceededWarning and accumulated listeners for the whole run.
+  let warned = null;
+  const onWarning = (w) => { if (/MaxListeners/.test(w.name + w.message)) warned = w.message; };
+  process.on("warning", onWarning);
+  try {
+    const controller = new AbortController();
+    const config = cfg({ PostToolUse: [{ hooks: [{ type: "command", command: "exit 0" }] }] });
+    for (let i = 0; i < 40; i++) {
+      await fireHookEvent("PostToolUse", { i }, { config, cwd: tmp, signal: controller.signal });
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(warned, null, `listener leak warning was emitted: ${warned}`);
+  } finally {
+    process.off("warning", onWarning);
+  }
+});
+
+await test("REGRESSION: an http hook also detaches its abort listener", async () => {
+  const server = http.createServer((req, res) => { res.writeHead(200, { "content-type": "application/json" }); res.end("{}"); });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  let warned = null;
+  const onWarning = (w) => { if (/MaxListeners/.test(w.name + w.message)) warned = w.message; };
+  process.on("warning", onWarning);
+  try {
+    const url = `http://127.0.0.1:${server.address().port}/hook`;
+    const controller = new AbortController();
+    const config = cfg({ PostToolUse: [{ hooks: [{ type: "http", url }] }] });
+    for (let i = 0; i < 30; i++) {
+      await fireHookEvent("PostToolUse", { i }, { config, cwd: tmp, signal: controller.signal });
+    }
+    await new Promise((r) => setTimeout(r, 50));
+    assert.strictEqual(warned, null, `http hooks leaked listeners: ${warned}`);
+  } finally {
+    process.off("warning", onWarning);
+    await new Promise((r) => server.close(r));
+  }
+});
+
+await test("cancellation still aborts a running hook after the fix", async () => {
+  const controller = new AbortController();
+  const p = fireHookEvent("PostToolUse", {}, {
+    config: cfg({ PostToolUse: [{ hooks: [{ type: "command", command: "sleep 5" }] }] }),
+    cwd: tmp, signal: controller.signal,
+  });
+  setTimeout(() => controller.abort(), 80);
+  const res = await p;
+  assert.strictEqual(res.results[0].aborted, true, "abort must still stop a running hook");
+});
+
+await test("an ALREADY-aborted signal still aborts immediately", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const res = await fireHookEvent("PostToolUse", {}, {
+    config: cfg({ PostToolUse: [{ hooks: [{ type: "command", command: "sleep 5" }] }] }),
+    cwd: tmp, signal: controller.signal,
+  });
+  assert.ok(res.results[0].aborted || res.results[0].ok === false, "a pre-aborted signal must not run to completion");
+});
+
 console.log("\n📦 PreCompact / PostCompact (real compaction path)");
 
 // Drive the loop's ACTUAL compaction by replaying its exact algorithm against a

@@ -48,7 +48,8 @@ import PlanPreviewPanel from "./components/chat/PlanPreviewPanel";
 import QuestionPanel from "./components/chat/QuestionPanel";
 import FileTreeSidebar from "./components/chat/FileTreeSidebar";
 import SettingsSidebar from "./components/chat/SettingsSidebar";
-import type { SlashCommandId } from "./components/chat/SlashCommandPalette";
+import SlashCommandPalette, { type SlashCommandId } from "./components/chat/SlashCommandPalette";
+import { isPaletteShortcut } from "./lib/commandPalette";
 
 const nowIso = () => new Date().toISOString();
 
@@ -118,6 +119,7 @@ function getPreviewFromMessages(messages: Message[], fallback: string) {
 
 export default function MinimalChatComponent() {
   const [messageInput, setMessageInput]   = useState("");
+  const [paletteOpen, setPaletteOpen]     = useState(false);
   const [isSending, setIsSending]         = useState(false);
   const [isRecording, setIsRecording]     = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
@@ -500,6 +502,44 @@ export default function MinimalChatComponent() {
         ]);
         break;
     }
+  }
+
+  // ── Cmd/Ctrl+K — the global command palette ───────────────────
+  // Bound on the window rather than a container so it works wherever focus is,
+  // including inside the composer. It TOGGLES: pressing the same chord again is
+  // how people reflexively dismiss a palette they opened by accident.
+  //
+  // The default is prevented because Ctrl+K is "focus the address bar" in some
+  // browsers and "delete to end of line" in a text field on macOS — both would
+  // fire alongside ours otherwise.
+  useEffect(() => {
+    function onKeyDown(e: KeyboardEvent) {
+      if (!isPaletteShortcut(e)) return;
+      e.preventDefault();
+      setPaletteOpen((open) => !open);
+    }
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // Selecting a client-side action from the modal runs it and closes up.
+  function handlePaletteSelect(id: SlashCommandId) {
+    setPaletteOpen(false);
+    handleSlashCommand(id);
+  }
+
+  // A server-side command is placed in the composer with the caret at the end,
+  // matching the inline palette: commands that take arguments are unusable if
+  // selecting one sends it immediately.
+  function handlePaletteInsert(text: string) {
+    setPaletteOpen(false);
+    setMessageInput(text);
+    requestAnimationFrame(() => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(text.length, text.length);
+    });
   }
 
   // ── File select from file tree ────────────────────────────────
@@ -1126,6 +1166,17 @@ export default function MinimalChatComponent() {
                 canUploadImages={canUploadImages}
               />
             </div>
+
+            {/* Cmd/Ctrl+K command palette — app-level, so it is reachable
+                from anywhere in the view, not just the composer. */}
+            <SlashCommandPalette
+              mode="modal"
+              query=""
+              visible={paletteOpen}
+              onSelect={handlePaletteSelect}
+              onInsert={handlePaletteInsert}
+              onClose={() => setPaletteOpen(false)}
+            />
 
             {/* File tree right sidebar */}
             <FileTreeSidebar
