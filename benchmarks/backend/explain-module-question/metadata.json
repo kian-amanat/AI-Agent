@@ -1,0 +1,9 @@
+{
+  "title": "Question-only prompt: explain a module without touching it",
+  "difficulty": "easy",
+  "golden": true,
+  "capabilities": [
+    "question_only"
+  ],
+  "timeoutMs": 240000
+}

@@ -47,6 +47,7 @@ export async function runKodoGraph({
     finalAnswer:     "",
     editedFiles:     [],
     usage:           null,
+    runMetrics:      null,
     sessionId,
     requestId,
     userId,
@@ -89,9 +90,10 @@ export async function runKodoGraph({
   const finalAnswer = finalState?.finalAnswer || "";
   const editedFiles = Array.isArray(finalState?.editedFiles) ? finalState.editedFiles : [];
   const usage       = finalState?.usage || null;
+  const runMetrics  = finalState?.runMetrics || null;
 
   // Note: abortSignal cleanup is handled in plannerAgent.mjs after runKodoGraph resolves
   console.log(`[KodoGraph] ✅ Done. Answer=${finalAnswer.length} chars, editedFiles=${editedFiles.length}`);
 
-  return { finalAnswer, editedFiles, usage };
+  return { finalAnswer, editedFiles, usage, runMetrics };
 }

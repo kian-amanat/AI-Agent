@@ -80,6 +80,10 @@ export const KodoStateAnnotation = {
   finalAnswer: { default: () => "" },
   editedFiles: { default: () => [] },
   usage:       { default: () => null },
+  // Purely observational run telemetry produced by agent_loop (exit reason,
+  // iteration count, controller snapshot). No node branches on it — it exists
+  // so the benchmark runner can score a run from real signals. See bench/.
+  runMetrics:  { default: () => null },
 
   // Set by the answer node when it detects the request actually needs
   // workspace tools — routes answer → agent_loop instead of END.

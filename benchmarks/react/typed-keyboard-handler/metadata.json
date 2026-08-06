@@ -1,0 +1,8 @@
+{
+  "title": "Finish a component with a typed keyboard handler",
+  "difficulty": "easy",
+  "golden": true,
+  "capabilities": ["resume", "implementation", "single_file"],
+  "timeoutMs": 300000,
+  "notes": "Regression probe for the React.<x> type-position false positive in utils/syntax.util.mjs that made typed event handlers unwritable."
+}

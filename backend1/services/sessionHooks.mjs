@@ -117,6 +117,13 @@ export async function endSession({ sessionId, reason = "other", fire, extra = {}
     if (cancelled) console.log(`[SessionHooks] cancelled ${cancelled} pending interaction(s) for ${sessionId}`);
   } catch { /* interaction manager unavailable — nothing to clean up */ }
 
+  // A background subagent outlives its turn but NOT its session.
+  try {
+    const { cancelSessionTasks } = await import("./backgroundSubagents.mjs");
+    const n = cancelSessionTasks(sessionId);
+    if (n) console.log(`[SessionHooks] cancelled ${n} background subagent(s) for ${sessionId}`);
+  } catch { /* module unavailable */ }
+
   // An ended session's clarifying answers must not carry into a later one.
   try {
     const { clearSessionAnswers } = await import("./sessionAnswers.mjs");

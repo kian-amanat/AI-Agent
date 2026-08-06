@@ -35,6 +35,35 @@ function loadTypeScript() {
   return null;
 }
 
+/**
+ * The first `React.<x>` that is a real runtime value reference, or null.
+ *
+ * A type annotation like `e: React.KeyboardEvent` parses as a QualifiedName
+ * inside a type node and is erased at compile time; only a
+ * PropertyAccessExpression whose target is the identifier `React` survives into
+ * emitted JS and can throw ReferenceError. Type nodes are skipped wholesale,
+ * which also covers `React.FC<Props>`, `satisfies`, and type-only generics.
+ */
+function findReactValueUse(ts, srcFile) {
+  let found = null;
+  const visit = (node) => {
+    if (found) return;
+    // Everything under a type node is erased — nothing there can run.
+    if (ts.isTypeNode?.(node) || ts.isTypeReferenceNode(node) || ts.isTypeQueryNode(node)) return;
+    if (
+      ts.isPropertyAccessExpression(node) &&
+      ts.isIdentifier(node.expression) &&
+      node.expression.text === "React"
+    ) {
+      found = node;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(srcFile, visit);
+  return found;
+}
+
 export function validateSyntax(content, absPath) {
   const ext = path.extname(absPath).toLowerCase();
 
@@ -103,9 +132,20 @@ export function validateSyntax(content, absPath) {
 
     // Automatic JSX runtime has no React global: React.useRef without importing
     // React parses fine but throws ReferenceError at runtime.
-    if (/\bReact\.[a-zA-Z]/.test(content) && !/import\s+(?:\*\s+as\s+)?React\b|import\s+React\s*,/.test(content)) {
-      const line = content.split("\n").findIndex(l => /\bReact\.[a-zA-Z]/.test(l)) + 1;
-      return `L${line}: uses React.<something> but never imports React — add \`import React from 'react'\` or import the hook directly (e.g. \`import { useRef } from 'react'\`).`;
+    //
+    // VALUE positions only. `e: React.KeyboardEvent`, `React.ReactNode`,
+    // `React.FC` are type annotations — erased before the code ever runs, so
+    // they cannot throw the ReferenceError this rule exists to prevent. A regex
+    // over the raw text cannot tell the two apart, and treating them alike
+    // rejected one of the most common React+TS idioms there is (a typed event
+    // handler). Ask the AST instead: only a PropertyAccessExpression on the
+    // identifier `React` is a real runtime reference.
+    if (!/import\s+(?:\*\s+as\s+)?React\b|import\s+React\s*,/.test(content)) {
+      const runtimeUse = findReactValueUse(ts, srcFile);
+      if (runtimeUse) {
+        const line = srcFile.getLineAndCharacterOfPosition(runtimeUse.getStart(srcFile)).line + 1;
+        return `L${line}: uses React.<something> at runtime but never imports React — add \`import React from 'react'\` or import the hook directly (e.g. \`import { useRef } from 'react'\`).`;
+      }
     }
 
     // Local/alias imports must resolve to real files (Module-not-found is a build break).

@@ -1,0 +1,10 @@
+{
+  "title": "Trivial edit with nothing to verify — do not claim verification",
+  "difficulty": "easy",
+  "golden": true,
+  "capabilities": [
+    "verification",
+    "single_file"
+  ],
+  "timeoutMs": 240000
+}

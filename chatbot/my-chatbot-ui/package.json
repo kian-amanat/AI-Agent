@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "tsc app/lib/commandPalette.ts app/lib/commandPalette.test.ts --outDir .test-out --module node16 --moduleResolution node16 --target es2022 --skipLibCheck --types node && node .test-out/commandPalette.test.js"
   },
   "dependencies": {
     "@emotion/react": "^11.14.0",

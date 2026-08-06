@@ -1,0 +1,11 @@
+{
+  "title": "Diagnose and fix a real failing test suite",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "verification",
+    "multi_file"
+  ],
+  "timeoutMs": 600000
+}

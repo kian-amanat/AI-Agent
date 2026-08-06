@@ -451,6 +451,41 @@ export async function cancelJob(requestId: string): Promise<void> {
 
 // ─── Sessions ─────────────────────────────────────────────────
 
+export type ServerCommand = {
+  name:                 string;
+  description:          string;
+  usage:                string;
+  category:             string;
+  aliases:              string[];
+  examples:             string[];
+  scope:                "project" | "user" | "builtin";
+  source:               string;
+  enabled:              boolean;
+  disabledReason:       string | null;
+  version:              string;
+  arguments:            { name: string; required: boolean; enum: string[] | null; default: string | null }[];
+};
+
+/**
+ * Custom slash commands discovered from .kodo/commands and .kodo/skills
+ * (project + user scope). Built-ins are added client-side in the palette,
+ * since they live in the route's own switch rather than the registry.
+ * Returns [] when unauthenticated or the backend is unreachable — the palette
+ * still renders its built-ins rather than disappearing.
+ */
+export async function fetchCommands(): Promise<ServerCommand[]> {
+  const token = getToken();
+  if (!token) return [];
+  try {
+    const res = await fetch(`${BASE_URL}/commands`, { method: "GET", cache: "no-store", headers: authHeaders() });
+    if (!res.ok) return [];
+    const data = await readJson<{ ok: boolean; commands?: ServerCommand[] }>(res);
+    return Array.isArray(data.commands) ? data.commands : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function fetchSessions(): Promise<Session[]> {
   const token = getToken();
   if (!token) return [];

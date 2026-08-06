@@ -1,0 +1,12 @@
+{
+  "title": "Resume half-built work from the state of the tree",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "resume",
+    "implementation",
+    "multi_file",
+    "wiring"
+  ],
+  "timeoutMs": 600000
+}

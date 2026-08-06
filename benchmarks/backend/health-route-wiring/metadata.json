@@ -1,0 +1,11 @@
+{
+  "title": "Add a health endpoint into an existing route table",
+  "difficulty": "easy",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "single_file",
+    "wiring"
+  ],
+  "timeoutMs": 300000
+}

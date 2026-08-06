@@ -202,9 +202,18 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
     shuttingDown = true;
     console.log(`\n[Server] ${signal} — closing sessions...`);
     try {
+      const { shutdownBackgroundSubagents } = await import("./services/backgroundSubagents.mjs");
+      const { aborted } = await shutdownBackgroundSubagents();
+      if (aborted) console.log(`[Server] aborted ${aborted} background subagent(s)`);
+
       const { endAllSessions } = await import("./services/sessionHooks.mjs");
       const ended = await endAllSessions("shutdown");
       if (ended.length) console.log(`[Server] SessionEnd fired for ${ended.length} session(s)`);
+
+      // Worktrees last: background cleanup may still have been removing them.
+      const { removeAllWorktrees } = await import("./services/worktreeManager.mjs");
+      const wt = await removeAllWorktrees();
+      if (wt.length) console.log(`[Server] removed ${wt.filter((w) => w.removed).length}/${wt.length} worktree(s)`);
     } catch (err) {
       console.warn("[Server] SessionEnd during shutdown failed:", err.message);
     }

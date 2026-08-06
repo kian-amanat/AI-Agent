@@ -176,8 +176,15 @@ function runCommand(handler, { cwd, payload, signal }) {
   const command = String(handler.command).replace(/\{(\w+)\}/g, (whole, key) =>
     payload?.[key] != null ? String(payload[key]) : whole);
 
+  // Adding a listener to an ALREADY-aborted signal never fires, so an aborted
+  // run would otherwise still execute its hooks to completion. Check upfront.
+  if (signal?.aborted) {
+    return Promise.resolve({ ok: false, aborted: true, exitCode: null, stdout: "", stderr: "aborted before start" });
+  }
+
   return new Promise((resolve) => {
     let child;
+    let onAbort = null;
     try {
       child = spawn(command, { cwd, shell: true, env: { ...sanitizedChildEnv(), KODO_HOOK_EVENT: String(payload?.event || "") } });
     } catch (err) {
@@ -186,7 +193,17 @@ function runCommand(handler, { cwd, payload, signal }) {
     }
 
     let stdout = "", stderr = "", settled = false;
-    const finish = (r) => { if (!settled) { settled = true; clearTimeout(timer); resolve(r); } };
+    // `onAbort` is attached to a RUN-SCOPED signal that outlives this call, so
+    // it must be detached when the child settles. Without this, every hook
+    // firing in a run leaves a listener behind and Node warns about a leak
+    // after ~10 — a single run easily fires hundreds.
+    const finish = (r) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (onAbort) signal?.removeEventListener?.("abort", onAbort);
+      resolve(r);
+    };
 
     const timer = setTimeout(() => {
       try { child.kill("SIGTERM"); } catch { /* already gone */ }
@@ -194,7 +211,7 @@ function runCommand(handler, { cwd, payload, signal }) {
     }, handler.timeout * 1000);
     timer.unref?.();
 
-    const onAbort = () => { try { child.kill("SIGTERM"); } catch {} finish({ ok: false, aborted: true, exitCode: null, stdout: "", stderr: "aborted" }); };
+    onAbort = () => { try { child.kill("SIGTERM"); } catch {} finish({ ok: false, aborted: true, exitCode: null, stdout: "", stderr: "aborted" }); };
     signal?.addEventListener?.("abort", onAbort, { once: true });
 
     child.stdout?.on("data", (d) => { stdout += d; });
@@ -207,10 +224,16 @@ function runCommand(handler, { cwd, payload, signal }) {
 }
 
 async function runHttp(handler, { payload, signal }) {
+  if (signal?.aborted) {
+    return { ok: false, aborted: true, exitCode: null, stdout: "", stderr: "aborted before start" };
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), handler.timeout * 1000);
   timer.unref?.();
-  signal?.addEventListener?.("abort", () => controller.abort(), { once: true });
+  // Detached in `finally` — a run-scoped signal must not accumulate one
+  // listener per HTTP hook invocation.
+  const onAbort = () => controller.abort();
+  signal?.addEventListener?.("abort", onAbort, { once: true });
   try {
     const res = await fetch(handler.url, {
       method: handler.method || "POST",
@@ -224,6 +247,7 @@ async function runHttp(handler, { payload, signal }) {
     return { ok: false, exitCode: null, stdout: "", stderr: err?.name === "AbortError" ? `hook timed out after ${handler.timeout}s` : String(err?.message || err) };
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener?.("abort", onAbort);
   }
 }
 
