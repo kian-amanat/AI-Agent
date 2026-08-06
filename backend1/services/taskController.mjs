@@ -183,6 +183,26 @@ const MENTIONS_INTEGRATION_RE = /\b(wire\s+(it|them|this|that|up|into|in\b)|wiri
 // from an open-ended feature.
 const NAMES_FILE_RE = /\b[\w.\-/]+\.(tsx?|jsx?|mjs|cjs|py|go|rs|rb|java|kt|swift|cpp?|h|css|s[ac]ss|html?|json|ya?ml|md|sql|sh|toml)\b/i;
 
+/** Global twin of NAMES_FILE_RE — every path the request mentions, not just the first. */
+const NAMES_FILE_RE_G = new RegExp(NAMES_FILE_RE.source, "gi");
+
+/**
+ * Every file path named in the request, as basenames.
+ *
+ * Basenames rather than full paths because the request and the workspace often
+ * disagree about the prefix ("finish src/components/Palette.tsx" vs an edit
+ * recorded as "components/Palette.tsx"), and a prefix mismatch must not be
+ * mistaken for unfinished work.
+ */
+export function namedFiles(task) {
+  const out = new Set();
+  for (const m of String(task || "").match(NAMES_FILE_RE_G) ?? []) {
+    const base = m.split("/").pop();
+    if (base) out.add(base.toLowerCase());
+  }
+  return [...out];
+}
+
 // Repairing what already exists. A narrower act than building something new,
 // so it gets the narrow shape unless the request says otherwise.
 const FIX_VERB_RE = /\b(fix|repair|correct|resolve|debug|unbreak)\b/i;
@@ -216,7 +236,7 @@ export function classifyTask(task) {
   const mentionsIntegration = MENTIONS_INTEGRATION_RE.test(m);
 
   if (!requiresMutation) {
-    return { shape: "question", requiresMutation: false, mentionsTests, mentionsIntegration, multiPart: false };
+    return { shape: "question", requiresMutation: false, mentionsTests, mentionsIntegration, multiPart: false, named: [] };
   }
 
   // Positive evidence that the request spans more than one file, kept separate
@@ -224,7 +244,7 @@ export function classifyTask(task) {
   // unknown scope deserves a long leash, but that is an ADMISSION OF IGNORANCE
   // and must not also be used to accuse the agent of under-delivering.
   const multiPart = looksMultiStep(m);
-  const base = { requiresMutation: true, mentionsTests, mentionsIntegration, multiPart };
+  const base = { requiresMutation: true, mentionsTests, mentionsIntegration, multiPart, named: namedFiles(m) };
 
   if (RESUME_RE.test(m)) return { shape: "resume", ...base };
   if (REFACTOR_RE.test(m)) return { shape: "refactor", ...base };
@@ -519,10 +539,45 @@ const HARD_FAILURE_RE = /\b(command not found|permission denied|ENOENT|EACCES|ti
  * Ground truth is the exit code, and the loop already puts it in the payload.
  * Text is consulted only when there is no exit code to read.
  */
+/**
+ * A test command that ran nothing and exited 0.
+ *
+ * `node --test` in a project with no test files exits 0. So do jest, vitest and
+ * pytest when nothing matches. The exit code says "passed" and the output says
+ * "zero tests" — and the exit code used to win, so a run that verified nothing
+ * was recorded as verified. That is not a hypothetical: an agent that could not
+ * run the project's real (missing) test runner reached for `node --test`
+ * instead, got a clean exit, and finished believing the suite was green.
+ *
+ * A check that could not have failed is not evidence, so it must not be
+ * credited as verification.
+ */
+const VACUOUS_TEST_RUN_RE =
+  /^\s*#\s*tests\s+0\s*$|^\s*#\s*pass\s+0\s*$|\bno tests? (?:were )?(?:found|ran|to run|matched)\b|\bno test (?:files?|suites?) found\b|\bfound no tests\b|\b0 (?:tests?|specs?|examples?) (?:ran|executed|passed)\b/im;
+
+/**
+ * Accepts either raw command output or a JSON tool payload. Both reach this
+ * function in practice, and a JSON payload has its newlines escaped — so
+ * testing the raw string would silently never match node's line-anchored TAP
+ * summary. Parse first, then test.
+ */
+export function isVacuousTestRun(output) {
+  const p = parsePayload(output);
+  const s = p
+    ? [p.stdout, p.stderr, p.output].filter(Boolean).join("\n")
+    : String(output || "");
+  // "# tests 0" must not match "# tests 10" — the multiline anchors above
+  // handle node's TAP summary; the phrase alternatives cover the other runners.
+  return VACUOUS_TEST_RUN_RE.test(s);
+}
+
 export function verificationOutcome(ok, output) {
   const p = parsePayload(output);
   if (p) {
     if (p.timed_out === true) return { passed: false, why: "timed out" };
+    // Checked BEFORE exit_code: a vacuous test run's whole problem is that it
+    // exits 0 while proving nothing.
+    if (isVacuousTestRun(output)) return { passed: false, why: "the test command ran zero tests" };
     // `exit_code` is the authority. A process that exited 0 passed, whatever
     // words it printed on the way.
     if (typeof p.exit_code === "number") return { passed: p.exit_code === 0 };
@@ -534,7 +589,9 @@ export function verificationOutcome(ok, output) {
     if (p.success === true) return { passed: true };
   }
   if (!ok) return { passed: false };
-  return { passed: !textShowsFailure(String(output || "")) };
+  const raw = String(output || "");
+  if (isVacuousTestRun(raw)) return { passed: false, why: "the test command ran zero tests" };
+  return { passed: !textShowsFailure(raw) };
 }
 
 function textShowsFailure(text) {
@@ -653,6 +710,8 @@ export function createTaskController({
   let settledGate = null;          // the terminal verdict, once reached
   let shapeChallenged = false;     // the one-time "does this look done?" challenge
   let unmetOnFinish = [];          // shape requirements never satisfied
+  let markersChallenged = false;   // the one-time "you left the TODOs" challenge (resume only)
+  let markersOnFinish = [];        // unfinished-work markers still present at the end
 
   // ── Recovery memory ───────────────────────────────────────────────────────
   // What has already been TRIED AND FAILED in this task, keyed by the action
@@ -956,6 +1015,11 @@ export function createTaskController({
 
   /** Explicit hook for verification run outside the bash tool (e.g. a stop hook). */
   function recordVerification({ command = "(stop hook)", passed, output = "" } = {}) {
+    // A caller's `passed` is usually just an exit code, and an exit code cannot
+    // see that the suite ran zero tests. Both routes into the controller must
+    // agree on what "verified" means, or the same command certifies the
+    // workspace through one path and not the other.
+    if (passed && isVacuousTestRun(output)) passed = false;
     verifications.push({ command, passed: !!passed, at: history.length });
     if (!passed) {
       const sig = extractErrorSignature(output);
@@ -1478,6 +1542,20 @@ export function createTaskController({
     if (intent.mentionsIntegration && integrationEdits === 0) {
       missing.push("the request asks for this to be wired up, but nothing that already existed was modified — whatever you built is not reachable yet");
     }
+    // A resume task is defined by unfinished work that ALREADY EXISTS, and the
+    // request usually points straight at it. Wiring that file into the app
+    // without finishing it satisfies every other requirement here — the
+    // integration demand is met (a pre-existing file changed) and the file
+    // count is met (resume asks for one) — while the half-built component the
+    // user actually asked about is never touched. That was observed: a run
+    // whose only change was App.tsx, importing a palette that still had both
+    // its TODOs. So for a resume, the named file must itself have moved.
+    if (intent.shape === "resume" && intent.named?.length) {
+      const changedBases = new Set([...changed].map((p) => String(p).split("/").pop()?.toLowerCase()));
+      for (const n of intent.named.filter((n) => !changedBases.has(n))) {
+        missing.push(`this is a resume task and the request names ${n}, but that file was never changed — wiring it up is not finishing it`);
+      }
+    }
     // A ticked-off plan is the agent's own account of its work, not evidence
     // about the workspace — and an agent that stops early is exactly the one
     // whose plan says otherwise. So the file count is checked regardless.
@@ -1489,7 +1567,7 @@ export function createTaskController({
     return missing;
   }
 
-  function canFinish({ editedPaths: authoritative, responseText = "" } = {}) {
+  function canFinish({ editedPaths: authoritative, responseText = "", unresolvedMarkers = [] } = {}) {
     const edited = authoritative ? [...authoritative] : [...editedPaths];
     const mutated = edited.length > 0 || mutations > 0;
 
@@ -1610,6 +1688,36 @@ export function createTaskController({
       };
     }
     if (unmet.length > 0) unmetOnFinish = unmet;
+
+    // ── Leftover-marker gate (resume tasks only) ───────────────────────────
+    // On a resume, the TODO/FIXME comments sitting in the half-built file ARE
+    // the specification — they are how the previous author recorded what is
+    // left. Editing that file and leaving its markers in place is the precise
+    // shape of "finished the wiring, skipped the behaviour", and no other gate
+    // sees it: the file changed, so the count and integration demands are met.
+    //
+    // Scoped to resume because everywhere else a TODO is ordinary and durable;
+    // demanding their removal in general would be a nag, not a check. Issued
+    // once, like the shape gate, so an agent whose remaining marker is genuinely
+    // out of scope says so and proceeds.
+    if (mutated && !markersChallenged && intent.shape === "resume" && unresolvedMarkers.length > 0) {
+      markersChallenged = true;
+      return {
+        allowed: false,
+        kind: "unresolved_markers",
+        reason: "the half-built work still carries its unfinished-work markers",
+        directive: [
+          "You edited the half-finished file but left the markers that say what was unfinished:",
+          ...unresolvedMarkers.slice(0, 8).map((m) => `  ☐ ${m.file}:${m.line}  ${m.text}`),
+          "",
+          "On a resume task those comments are the specification — the previous author wrote them",
+          "to record exactly what still had to be done. Implement each one now, then delete the",
+          "comment. Wiring the component in without implementing its behaviour is not finishing it.",
+          "If one genuinely does not apply, say in one line why, then finish.",
+        ].join("\n"),
+      };
+    }
+    if (unresolvedMarkers.length > 0) markersOnFinish = unresolvedMarkers.map((m) => `${m.file}:${m.line}`);
 
     if (edited.length === 0) return { allowed: true, reason: "no edits — nothing to verify" };
 
@@ -1744,6 +1852,10 @@ export function createTaskController({
         completionPushbacks,
         incompleteOnFinish,
         shapeChallenged,
+        markersChallenged,
+        // Unfinished-work markers still in the tree when the run ended. Empty
+        // on every clean resume; non-empty is the run to go and read.
+        markersOnFinish,
         unmet: unmetRequirements([...editedPaths]),
         integrationEdits,
         resolvedBlockers,

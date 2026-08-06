@@ -1,0 +1,11 @@
+{
+  "title": "Extract duplicated logic into a shared module without changing behaviour",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "multi_file",
+    "wiring"
+  ],
+  "timeoutMs": 480000
+}

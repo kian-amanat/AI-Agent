@@ -1,0 +1,11 @@
+{
+  "title": "End-to-end feature across server, client and view",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "multi_file",
+    "wiring"
+  ],
+  "timeoutMs": 600000
+}

@@ -1,0 +1,6 @@
+{
+  "name": "bench-backend-health",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true
+}

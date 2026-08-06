@@ -1,0 +1,12 @@
+{
+  "title": "Add a currency helper and actually wire it into the component",
+  "difficulty": "easy",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "multi_file",
+    "wiring"
+  ],
+  "timeoutMs": 300000,
+  "notes": "The canonical 'did it wire it up, or just add it and walk away' check."
+}

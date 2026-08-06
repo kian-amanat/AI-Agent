@@ -1,0 +1,11 @@
+{
+  "title": "Exhaustive discriminated-union narrowing, verified by the compiler",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "multi_file",
+    "verification"
+  ],
+  "timeoutMs": 480000
+}

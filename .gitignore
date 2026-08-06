@@ -17,6 +17,11 @@ backend1/data/settings.json
 dist/
 build/
 
+# Benchmark run artifacts (transcripts, timelines, replays). Kept out of the
+# repo and out of the agent's live memory. The promoted baseline lives here too
+# — see benchmarks/README.md for how to share one deliberately.
+.bench-runs/
+
 # MCP OAuth bearer tokens — never commit
 .kodo/credentials.json
 **/.kodo/credentials.json

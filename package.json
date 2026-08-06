@@ -8,6 +8,7 @@
     "backend": "npm --prefix backend1 run dev",
     "frontend": "npm --prefix chatbot/my-chatbot-ui run dev",
     "test": "npm --prefix backend1 test",
-    "test:e2e": "npm --prefix backend1 run test:e2e"
+    "test:e2e": "npm --prefix backend1 run test:e2e",
+    "bench": "npm --prefix backend1 run bench --"
   }
 }

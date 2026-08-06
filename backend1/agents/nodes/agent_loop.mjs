@@ -2464,7 +2464,16 @@ export async function executeTool(name, args, ctx) {
 
         const syntaxErr = validateSyntax(content, absPath);
         if (syntaxErr) {
-          return { success: false, error: `Write rejected — content is broken: ${syntaxErr}. Fix and retry.` };
+          // "The file is unchanged" is not padding — without it a rejected
+          // write reads as a partial one, and the next move is an edit_file
+          // against content that never reached disk. That fails with
+          // "old_string not found", which looks like a different problem, and
+          // the run burns its budget chasing it. edit_file's rejection has
+          // always said this; write_file's silence was the asymmetry.
+          return {
+            success: false,
+            error: `Write rejected — content is broken: ${syntaxErr}. ${existing !== null ? "The file is unchanged on disk (your new content was NOT written)" : "The file was NOT created"} — fix the content and send the complete file again with write_file.`,
+          };
         }
 
         await snapshotForUndo(root, sessionId, requestId, relPath, absPath);
@@ -3007,6 +3016,49 @@ export function webSearchDirective() {
 // Back-compat alias — some callers reference the constant name.
 export const WEB_SEARCH_DIRECTIVE = webSearchDirective();
 
+/**
+ * Unfinished-work markers still present in the files this run edited.
+ *
+ * Only meaningful for a resume task, where a `TODO`/`FIXME` left behind in a
+ * file the agent just edited is the previous author's own record of what was
+ * still missing. Reads the real files rather than trusting the model's account
+ * of what it wrote, and is bounded so a large run cannot turn the finish gate
+ * into a full-tree scan.
+ *
+ * `@ts-` pragmas and eslint directives are deliberately excluded: they are
+ * durable configuration, not unfinished work.
+ */
+// `\/\*+` and `\*+` rather than single characters so a JSDoc opener (`/** TODO`)
+// and a continuation line (` * TODO`) are both recognised.
+const MARKER_RE = /(?:^|\s)(?:\/\/+|\/\*+|\*+|#+|<!--)\s*(TODO|FIXME|XXX|HACK)\b[:\s]?(.*)$/i;
+const MAX_MARKER_FILES = 24;
+
+export async function findUnresolvedMarkers(root, relPaths) {
+  const out = [];
+  for (const rel of relPaths.slice(0, MAX_MARKER_FILES)) {
+    let content;
+    try {
+      content = await fs.readFile(path.resolve(root, rel), "utf-8");
+    } catch {
+      continue; // deleted or unreadable — nothing to resolve
+    }
+    if (content.length > 400_000) continue;
+    const lines = content.split("\n");
+    for (let i = 0; i < lines.length; i++) {
+      const m = MARKER_RE.exec(lines[i]);
+      if (!m) continue;
+      out.push({
+        file: rel,
+        line: i + 1,
+        // Trailing comment terminators are noise in the directive the model reads.
+        text: `${m[1].toUpperCase()}: ${String(m[2] || "").replace(/\s*(?:\*\/|-->)\s*$/, "").trim()}`.slice(0, 120),
+      });
+      if (out.length >= 20) return out;
+    }
+  }
+  return out;
+}
+
 // ── Main node ─────────────────────────────────────────────────────────────────
 
 export async function agentLoopNode(state) {
@@ -3184,6 +3236,9 @@ export async function agentLoopNode(state) {
   }
   ctx.recordEvent?.({ kind: "user", content: cleanMessage });
   const usage = { inputTokens: 0, outputTokens: 0, llmCalls: 0 };
+  // Set when the provider itself gave up (auth, quota, persistent 5xx) rather
+  // than the task going badly. Observability only — no behaviour branches on it.
+  let providerError = null;
   // write_file/edit_file are hard-rejected at the executor in plan mode
   // (see the "case edit_file"/"case write_file" guards below) — their only
   // possible outcome there is an error telling the model to stop, so their
@@ -3314,6 +3369,17 @@ export async function agentLoopNode(state) {
           iteration--; // recovery retry doesn't consume budget
           continue;
         }
+        // Recorded BEFORE the synthesis fallback below, not only on the
+        // terminal path. The provider has already failed at this point; whether
+        // a salvage call happens to succeed changes what the USER sees, not
+        // whether the run was cut short. Setting it only on the terminal path
+        // let the more misleading case through: a run that died on iteration 3
+        // came back with a confident prose answer, no edits, and scored
+        // `partial` — indistinguishable from an agent that chose to explain
+        // instead of act. It was a provider outage, and the report said the
+        // agent under-delivered.
+        providerError = { message: errStr.slice(0, 300), attempts: consecutiveErrors, salvaged: false };
+
         // Graceful degradation: the provider broke mid-loop (common with weak
         // OpenAI-compatible providers on multi-turn tool use). Rather than
         // returning "provider failed", make ONE clean, small, no-tools call to
@@ -3322,11 +3388,18 @@ export async function agentLoopNode(state) {
           try {
             emit?.({ type: "progress", stage: "answering", message: "⚙️ Provider hiccup — writing the answer from what I found..." });
             const synth = await synthesizeFromGathered({ creds, conversation, cleanMessage, onChunk, abortSignal });
-            if (synth) { finalAnswer = synth; break; }
+            // The user still gets the salvaged answer; the run still records
+            // that it was salvaged rather than completed.
+            if (synth) { finalAnswer = synth; providerError.salvaged = true; break; }
           } catch (e) {
             console.warn("[AgentLoop] synthesis fallback failed:", String(e?.message || e).slice(0, 120));
           }
         }
+        // Recorded, not just rendered into prose. An evaluator has to be able
+        // to tell "the agent did the task badly" from "the provider never
+        // answered" — scoring a 403 out-of-quota as a task failure is how a
+        // benchmark suite quietly reports nonsense. See runMetrics below.
+        providerError = { message: errStr.slice(0, 300), attempts: consecutiveErrors };
         finalAnswer = `The AI provider failed after ${consecutiveErrors} attempt(s): ${errStr.slice(0, 200)}. Please try again.`;
         break;
       } finally {
@@ -3371,6 +3444,12 @@ export async function agentLoopNode(state) {
         const gate = ctx.taskController.canFinish({
           editedPaths: ctx.editedFiles.keys(),
           responseText: text,
+          // Read from disk, not from what the model said it wrote. Only
+          // computed for resume tasks — see the leftover-marker gate in
+          // taskController for why the check is scoped that narrowly.
+          unresolvedMarkers: ctx.taskController.shape === "resume"
+            ? await findUnresolvedMarkers(root, [...ctx.editedFiles.keys()])
+            : [],
         });
         if (!gate.allowed) {
           // Each refusal is a different thing the user should see happening —
@@ -3381,6 +3460,7 @@ export async function agentLoopNode(state) {
             no_mutation:        { stage: "executing", message: "✋ You described the change — now apply it to the real files..." },
             open_plan_items:    { stage: "executing", message: "📋 Not done yet — finishing the remaining steps..." },
             incomplete_shape:   { stage: "executing", message: "🧩 Not done yet — the request asked for more than this..." },
+            unresolved_markers: { stage: "executing", message: "📌 Not done yet — the TODOs marking the unfinished work are still there..." },
             unverified:         { stage: "verifying", message: "🔍 Not done yet — verifying the changes first..." },
             verification_failed:{ stage: "verifying", message: "🔍 Verification is still failing — fixing it first..." },
           }[gate.kind] ?? { stage: "verifying", message: "🔍 Not done yet — verifying the changes first..." };
@@ -3746,6 +3826,10 @@ export async function agentLoopNode(state) {
   // StopFailure is NOT "the task failed" — it fires when stopping itself is
   // unclean: verification still failing, the iteration budget exhausted with no
   // answer, or an aborted run.
+  // `exitReason` is hoisted out of this block because it is also the single
+  // most useful thing an outside observer (the benchmark runner) can know
+  // about how a run ended — see the runMetrics return below.
+  let exitReason;
   {
     const budgetExhausted = mainResult.iterations >= MAX_ITERATIONS && !mainResult.finalAnswer;
     const verifyFailing = ctx.editedFiles.size > 0 && stopHookRan && !stopHookPassed;
@@ -3754,6 +3838,7 @@ export async function agentLoopNode(state) {
       : verifyFailing ? "verification_failing"
         : budgetExhausted ? "iteration_budget_exhausted"
           : "completed";
+    exitReason = stopReason;
     const unclean = stopReason !== "completed";
 
     const stopPayload = {
@@ -3784,6 +3869,23 @@ export async function agentLoopNode(state) {
     finalAnswer,
     editedFiles,
     usage,
+    // Observability only — nothing in the graph reads this back, and no
+    // behaviour branches on it. It exists so an evaluator (bench/) can score a
+    // run from what actually happened instead of re-deriving it from prose:
+    // how the run terminated, how many turns it took, and the controller's own
+    // verification/stop bookkeeping. See bench/scoring.mjs.
+    runMetrics: {
+      exitReason,
+      iterations: mainResult.iterations,
+      stoppedEarly: !!mainResult.stoppedEarly,
+      durationMs: totalMs,
+      model: creds.model,
+      stopHookRan,
+      stopHookPassed,
+      // null unless the provider itself failed — see the assignment above.
+      providerError,
+      controller: ctx.taskController?.snapshot?.() ?? null,
+    },
     messages: [new AIMessage(finalAnswer)],
   };
 }

@@ -1,0 +1,6 @@
+{
+  "name": "bench-fullstack-users",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true
+}

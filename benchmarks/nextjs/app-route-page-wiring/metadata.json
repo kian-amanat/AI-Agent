@@ -1,0 +1,11 @@
+{
+  "title": "Add an App Router page and link it from home",
+  "difficulty": "easy",
+  "golden": false,
+  "capabilities": [
+    "implementation",
+    "wiring",
+    "multi_file"
+  ],
+  "timeoutMs": 420000
+}

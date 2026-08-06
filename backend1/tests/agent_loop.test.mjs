@@ -765,6 +765,33 @@ await test("total char budget is respected (oldest turns fall off first)", () =>
   assert.strictEqual(out[out.length - 1].content[0], "d", "newest turn must be kept");
 });
 
+// ── The run-metrics hook ──────────────────────────────────────────────────────
+//
+// agent_loop returns a `runMetrics` block (exit reason, iteration count,
+// controller snapshot) purely so an evaluator can score a run from real signals
+// instead of re-deriving them from prose — see backend1/bench/. It is
+// observational: no node reads it back and no behaviour branches on it.
+//
+// Its one fragile point is the seam between the node and its consumer: if the
+// graph has no channel for it, LangGraph drops it silently, every benchmark run
+// scores with `metrics: null`, and nothing anywhere fails. Hence this test.
+
+console.log("\n── run-metrics hook ──────────────────────────────────────────");
+
+await test("the graph declares a runMetrics channel, so agent_loop's telemetry survives", async () => {
+  const { KodoStateAnnotation } = await import("../agents/kodo_graph.mjs");
+  assert.ok(KodoStateAnnotation.runMetrics, "kodo_graph.mjs has no runMetrics channel — agent_loop's metrics would be dropped");
+  assert.strictEqual(KodoStateAnnotation.runMetrics.default(), null, "runMetrics must default to null, not to a fabricated shape");
+});
+
+await test("graph_runner forwards runMetrics to its caller", async () => {
+  // Read as source rather than executed: running the graph needs a live model.
+  // The assertion is still specific — the return statement must carry the key.
+  const src = await fs.readFile(new URL("../services/graph_runner.mjs", import.meta.url), "utf-8");
+  assert.match(src, /const runMetrics\s*=\s*finalState\?\.runMetrics/, "graph_runner no longer reads runMetrics off the final state");
+  assert.match(src, /return\s*\{[^}]*\brunMetrics\b[^}]*\}/, "graph_runner no longer returns runMetrics");
+});
+
 // ── Summary ───────────────────────────────────────────────────────────────────
 
 await fs.rm(tmpRoot, { recursive: true, force: true });

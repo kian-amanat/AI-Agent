@@ -1,0 +1,11 @@
+{
+  "title": "Write real tests for an untested module, and make them pass",
+  "difficulty": "easy",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "verification",
+    "single_file"
+  ],
+  "timeoutMs": 420000
+}
