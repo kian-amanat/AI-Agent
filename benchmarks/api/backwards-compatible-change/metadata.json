@@ -1,0 +1,10 @@
+{
+  "title": "Extend an API with pagination without breaking existing callers",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "multi_file"
+  ],
+  "timeoutMs": 480000
+}

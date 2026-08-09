@@ -1,0 +1,1 @@
+`fetchUser` in `client.mjs` swallows every error and returns `null`, so callers cannot tell "no such user" from "the network is down". Make the difference visible to callers without changing the success path.

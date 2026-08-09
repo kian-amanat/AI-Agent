@@ -1,0 +1,12 @@
+{
+  "title": "Write a regression test that genuinely fails on the bug, then fix it",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "verification",
+    "multi_file"
+  ],
+  "timeoutMs": 480000,
+  "verifyCommand": "node --test"
+}

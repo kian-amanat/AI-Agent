@@ -1,0 +1,11 @@
+{
+  "title": "Fix a path-traversal vulnerability without breaking valid reads",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "single_file",
+    "verification"
+  ],
+  "timeoutMs": 420000
+}

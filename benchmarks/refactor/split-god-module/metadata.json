@@ -1,0 +1,12 @@
+{
+  "title": "Split a grab-bag module into focused modules without changing behaviour",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "multi_file",
+    "wiring"
+  ],
+  "timeoutMs": 600000,
+  "verifyCommand": "node --test"
+}

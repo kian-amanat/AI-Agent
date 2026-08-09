@@ -828,8 +828,8 @@ export function CommandPalette({ open, onClose }: { open: boolean; onClose: () =
   );
 }
 `);
-    const commands = await read("src/commands.ts");
-    await write("src/commands.ts", `${commands.replace(/\/\/ TODO.*\n?/, "")}
+    const commands = await read("src/commands.mjs");
+    await write("src/commands.mjs", `${commands.replace(/\/\/ TODO.*\n?/, "")}
 registerCommand({ id: "reload", title: "Reload window", run: () => window.location.reload() });
 `);
     await read("src/App.tsx");
@@ -887,8 +887,8 @@ export function CommandPalette({ open, onClose, onCommand }: { open: boolean; on
   );
 }
 `);
-    const commands = await read("src/commands.ts");
-    await write("src/commands.ts", `${commands.replace(/\/\/ TODO.*\n?/, "")}
+    const commands = await read("src/commands.mjs");
+    await write("src/commands.mjs", `${commands.replace(/\/\/ TODO.*\n?/, "")}
 registerCommand({ id: "reset", title: "Reset counter", run: () => {} });
 `);
     await read("src/App.tsx");
@@ -926,8 +926,8 @@ await test("react/command-palette-resume still rejects an Enter handler that run
       .replace("  // TODO: close on Escape\n  // TODO: run the selected command on Enter\n", "")
       .replace('<div className="palette">',
         '<div className="palette" onKeyDown={(e) => { if (e.key === "Escape") onClose(); if (e.key === "Enter") onClose(); }}>'));
-    const commands = await read("src/commands.ts");
-    await write("src/commands.ts", `${commands.replace(/\/\/ TODO.*\n?/, "")}\nregisterCommand({ id: "reset", title: "Reset", run: () => {} });\n`);
+    const commands = await read("src/commands.mjs");
+    await write("src/commands.mjs", `${commands.replace(/\/\/ TODO.*\n?/, "")}\nregisterCommand({ id: "reset", title: "Reset", run: () => {} });\n`);
     await read("src/App.tsx");
     await write("src/App.tsx", `import { useState } from "react";
 import { CommandPalette } from "./components/CommandPalette";
@@ -959,8 +959,8 @@ await test("react/command-palette-resume rejects finishing the component without
       .replace("  // TODO: close on Escape\n  // TODO: run the selected command on Enter\n", "")
       .replace('<div className="palette">',
         '<div className="palette" onKeyDown={(e) => { if (e.key === "Escape") onClose(); if (e.key === "Enter") commands[selected]?.run(); }}>'));
-    const commands = await read("src/commands.ts");
-    await write("src/commands.ts", `${commands.replace(/\/\/ TODO.*\n?/, "")}\nregisterCommand({ id: "reload", title: "Reload", run: () => {} });\n`);
+    const commands = await read("src/commands.mjs");
+    await write("src/commands.mjs", `${commands.replace(/\/\/ TODO.*\n?/, "")}\nregisterCommand({ id: "reload", title: "Reload", run: () => {} });\n`);
   }, { finalAnswer: "The command palette is complete." });
 
   const r = await run(b, unwired, { runId: "e2e-solve-react-unwired" });

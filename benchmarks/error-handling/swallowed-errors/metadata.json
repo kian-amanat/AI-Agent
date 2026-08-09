@@ -1,0 +1,10 @@
+{
+  "title": "Stop swallowing transport errors as 'not found'",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "single_file"
+  ],
+  "timeoutMs": 420000
+}

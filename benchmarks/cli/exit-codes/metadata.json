@@ -1,0 +1,12 @@
+{
+  "title": "Make a CLI report failure through its exit code",
+  "difficulty": "easy",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "single_file",
+    "verification"
+  ],
+  "timeoutMs": 300000,
+  "verifyCommand": "node cli.mjs Ada"
+}

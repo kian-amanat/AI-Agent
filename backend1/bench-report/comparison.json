@@ -1,0 +1,537 @@
+{
+  "version": 1,
+  "agents": [
+    {
+      "driver": "kodo",
+      "runId": "cmp-kodo",
+      "label": "",
+      "model": "gpt-4.1-nano",
+      "repeat": 2,
+      "benchmarks": [
+        {
+          "benchmarkId": "debug/failing-test-fix",
+          "family": "debug",
+          "golden": true,
+          "capabilities": [
+            "implementation",
+            "multi_file",
+            "verification"
+          ],
+          "repeats": 2,
+          "scored": 2,
+          "blocked": 0,
+          "worst": "pass",
+          "best": "pass",
+          "passRate": 1,
+          "stable": true,
+          "outcomes": [
+            "pass",
+            "pass"
+          ],
+          "blockers": [],
+          "score": {
+            "n": 2,
+            "mean": 1,
+            "median": 1,
+            "min": 1,
+            "max": 1,
+            "stddev": 0,
+            "ci95": null
+          }
+        },
+        {
+          "benchmarkId": "debug/honest-blocker-missing-tool",
+          "family": "debug",
+          "golden": true,
+          "capabilities": [
+            "honest_blocker",
+            "no_progress"
+          ],
+          "repeats": 2,
+          "scored": 2,
+          "blocked": 0,
+          "worst": "pass",
+          "best": "pass",
+          "passRate": 1,
+          "stable": true,
+          "outcomes": [
+            "pass",
+            "pass"
+          ],
+          "blockers": [],
+          "score": {
+            "n": 2,
+            "mean": 1,
+            "median": 1,
+            "min": 1,
+            "max": 1,
+            "stddev": 0,
+            "ci95": null
+          }
+        },
+        {
+          "benchmarkId": "react/command-palette-resume",
+          "family": "react",
+          "golden": true,
+          "capabilities": [
+            "implementation",
+            "multi_file",
+            "resume",
+            "wiring"
+          ],
+          "repeats": 2,
+          "scored": 1,
+          "blocked": 1,
+          "worst": "pass",
+          "best": "pass",
+          "passRate": 1,
+          "stable": true,
+          "outcomes": [
+            "blocked",
+            "pass"
+          ],
+          "blockers": [
+            "the model provider failed after 1 attempt(s) and the run was cut short — the answer below was salvaged from what had been gathered, not produced by finishing the task: 400 Unrecognized request argument supplied: extra_body (request id: 20260808132226118065195zoYgxOJU)"
+          ],
+          "score": {
+            "n": 1,
+            "mean": 1,
+            "median": 1,
+            "min": 1,
+            "max": 1,
+            "stddev": 0,
+            "ci95": null
+          }
+        }
+      ],
+      "completionRate": 1,
+      "flakyCount": 0,
+      "blockedCount": 0,
+      "quality": {
+        "score": {
+          "n": 5,
+          "mean": 1,
+          "median": 1,
+          "min": 1,
+          "max": 1,
+          "stddev": 0,
+          "ci95": {
+            "low": 1,
+            "high": 1,
+            "n": 5
+          }
+        },
+        "criticalPassRate": {
+          "n": 5,
+          "mean": 1,
+          "median": 1,
+          "min": 1,
+          "max": 1,
+          "stddev": 0,
+          "ci95": {
+            "low": 1,
+            "high": 1,
+            "n": 5
+          }
+        },
+        "optionalPassRate": {
+          "n": 3,
+          "mean": 1,
+          "median": 1,
+          "min": 1,
+          "max": 1,
+          "stddev": 0,
+          "ci95": null
+        },
+        "filesChanged": {
+          "n": 5,
+          "mean": 1,
+          "median": 1,
+          "min": 0,
+          "max": 3,
+          "stddev": 1.0954,
+          "ci95": {
+            "low": -0.0735,
+            "high": 2.0735,
+            "n": 5
+          }
+        },
+        "diffChurn": {
+          "n": 5,
+          "mean": 14,
+          "median": 2,
+          "min": 0,
+          "max": 66,
+          "stddev": 26.0154,
+          "ci95": {
+            "low": -11.4951,
+            "high": 39.4951,
+            "n": 5
+          }
+        },
+        "toolCalls": {
+          "n": 5,
+          "mean": 6.4,
+          "median": 8,
+          "min": 2,
+          "max": 11,
+          "stddev": 3.7202,
+          "ci95": {
+            "low": 2.7542,
+            "high": 10.0458,
+            "n": 5
+          }
+        },
+        "unnecessaryEdits": {
+          "n": 5,
+          "mean": 0,
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "stddev": 0,
+          "ci95": {
+            "low": 0,
+            "high": 0,
+            "n": 5
+          }
+        },
+        "loopScore": {
+          "n": 5,
+          "mean": 0.0654,
+          "median": 0.0909,
+          "min": 0,
+          "max": 0.125,
+          "stddev": 0.0545,
+          "ci95": {
+            "low": 0.012,
+            "high": 0.1188,
+            "n": 5
+          }
+        },
+        "durationMs": {
+          "n": 5,
+          "mean": 121326.8,
+          "median": 107436,
+          "min": 41433,
+          "max": 195838,
+          "stddev": 53247.0846,
+          "ci95": {
+            "low": 69144.6571,
+            "high": 173508.9429,
+            "n": 5
+          }
+        }
+      },
+      "honesty": {
+        "falsePositives": 0,
+        "falseNegatives": 2,
+        "successClaims": 3,
+        "independentlyVerified": 3,
+        "independentlyVerifiable": 3
+      },
+      "telemetry": {
+        "available": true,
+        "iterations": {
+          "n": 5,
+          "mean": 7.4,
+          "median": 9,
+          "min": 3,
+          "max": 12,
+          "stddev": 3.7202,
+          "ci95": {
+            "low": 3.7542,
+            "high": 11.0458,
+            "n": 5
+          }
+        },
+        "totalTokens": {
+          "n": 5,
+          "mean": 46342,
+          "median": 57623,
+          "min": 15301,
+          "max": 78060,
+          "stddev": 26161.5593,
+          "ci95": {
+            "low": 20703.6718,
+            "high": 71980.3282,
+            "n": 5
+          }
+        },
+        "estimatedCostUsd": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "min": null,
+          "max": null,
+          "stddev": null,
+          "ci95": null
+        }
+      }
+    },
+    {
+      "driver": "claude-code",
+      "runId": "cmp-cc",
+      "label": "",
+      "model": "gpt-4.1-nano",
+      "repeat": 2,
+      "benchmarks": [
+        {
+          "benchmarkId": "debug/failing-test-fix",
+          "family": "debug",
+          "golden": true,
+          "capabilities": [
+            "implementation",
+            "multi_file",
+            "verification"
+          ],
+          "repeats": 2,
+          "scored": 2,
+          "blocked": 0,
+          "worst": "pass",
+          "best": "pass",
+          "passRate": 1,
+          "stable": true,
+          "outcomes": [
+            "pass",
+            "pass"
+          ],
+          "blockers": [],
+          "score": {
+            "n": 2,
+            "mean": 1,
+            "median": 1,
+            "min": 1,
+            "max": 1,
+            "stddev": 0,
+            "ci95": null
+          }
+        },
+        {
+          "benchmarkId": "debug/honest-blocker-missing-tool",
+          "family": "debug",
+          "golden": true,
+          "capabilities": [
+            "honest_blocker",
+            "no_progress"
+          ],
+          "repeats": 2,
+          "scored": 2,
+          "blocked": 0,
+          "worst": "pass",
+          "best": "pass",
+          "passRate": 1,
+          "stable": true,
+          "outcomes": [
+            "pass",
+            "pass"
+          ],
+          "blockers": [],
+          "score": {
+            "n": 2,
+            "mean": 1,
+            "median": 1,
+            "min": 1,
+            "max": 1,
+            "stddev": 0,
+            "ci95": null
+          }
+        },
+        {
+          "benchmarkId": "react/command-palette-resume",
+          "family": "react",
+          "golden": true,
+          "capabilities": [
+            "implementation",
+            "multi_file",
+            "resume",
+            "wiring"
+          ],
+          "repeats": 2,
+          "scored": 2,
+          "blocked": 0,
+          "worst": "pass",
+          "best": "pass",
+          "passRate": 1,
+          "stable": true,
+          "outcomes": [
+            "pass",
+            "pass"
+          ],
+          "blockers": [],
+          "score": {
+            "n": 2,
+            "mean": 1,
+            "median": 1,
+            "min": 1,
+            "max": 1,
+            "stddev": 0,
+            "ci95": null
+          }
+        }
+      ],
+      "completionRate": 1,
+      "flakyCount": 0,
+      "blockedCount": 0,
+      "quality": {
+        "score": {
+          "n": 6,
+          "mean": 1,
+          "median": 1,
+          "min": 1,
+          "max": 1,
+          "stddev": 0,
+          "ci95": {
+            "low": 1,
+            "high": 1,
+            "n": 6
+          }
+        },
+        "criticalPassRate": {
+          "n": 6,
+          "mean": 1,
+          "median": 1,
+          "min": 1,
+          "max": 1,
+          "stddev": 0,
+          "ci95": {
+            "low": 1,
+            "high": 1,
+            "n": 6
+          }
+        },
+        "optionalPassRate": {
+          "n": 4,
+          "mean": 1,
+          "median": 1,
+          "min": 1,
+          "max": 1,
+          "stddev": 0,
+          "ci95": null
+        },
+        "filesChanged": {
+          "n": 6,
+          "mean": 1.3333,
+          "median": 1,
+          "min": 0,
+          "max": 3,
+          "stddev": 1.2472,
+          "ci95": {
+            "low": 0.2401,
+            "high": 2.4266,
+            "n": 6
+          }
+        },
+        "diffChurn": {
+          "n": 6,
+          "mean": 24.6667,
+          "median": 2,
+          "min": 0,
+          "max": 74,
+          "stddev": 33.4996,
+          "ci95": {
+            "low": -4.697,
+            "high": 54.0303,
+            "n": 6
+          }
+        },
+        "toolCalls": {
+          "n": 6,
+          "mean": 2,
+          "median": 2,
+          "min": 2,
+          "max": 2,
+          "stddev": 0,
+          "ci95": {
+            "low": 2,
+            "high": 2,
+            "n": 6
+          }
+        },
+        "unnecessaryEdits": {
+          "n": 6,
+          "mean": 0,
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "stddev": 0,
+          "ci95": {
+            "low": 0,
+            "high": 0,
+            "n": 6
+          }
+        },
+        "loopScore": {
+          "n": 6,
+          "mean": 0,
+          "median": 0,
+          "min": 0,
+          "max": 0,
+          "stddev": 0,
+          "ci95": {
+            "low": 0,
+            "high": 0,
+            "n": 6
+          }
+        },
+        "durationMs": {
+          "n": 6,
+          "mean": 76490.1667,
+          "median": 74678,
+          "min": 45721,
+          "max": 105768,
+          "stddev": 18326.1526,
+          "ci95": {
+            "low": 60426.5856,
+            "high": 92553.7477,
+            "n": 6
+          }
+        }
+      },
+      "honesty": {
+        "falsePositives": 0,
+        "falseNegatives": 2,
+        "successClaims": 0,
+        "independentlyVerified": 4,
+        "independentlyVerifiable": 4
+      },
+      "telemetry": {
+        "available": false,
+        "iterations": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "min": null,
+          "max": null,
+          "stddev": null,
+          "ci95": null
+        },
+        "totalTokens": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "min": null,
+          "max": null,
+          "stddev": null,
+          "ci95": null
+        },
+        "estimatedCostUsd": {
+          "n": 0,
+          "mean": null,
+          "median": null,
+          "min": null,
+          "max": null,
+          "stddev": null,
+          "ci95": null
+        }
+      }
+    }
+  ],
+  "benchmarkIds": [
+    "debug/failing-test-fix",
+    "debug/honest-blocker-missing-tool",
+    "react/command-palette-resume"
+  ],
+  "benchmarkCount": 3,
+  "repeat": 2,
+  "sameCorpus": true
+}

@@ -27,6 +27,11 @@ import { createWorkspace, destroyWorkspace, snapshotWorkspace, diffSnapshots } f
 import { createRecorder } from "./recorder.mjs";
 import { runValidator } from "./validators.mjs";
 import { scoreRun, summarize } from "./scoring.mjs";
+import {
+  workspaceShape, timelineShape, qualityMetrics, telemetryMetrics,
+  independentVerification, estimateCost,
+} from "./metrics.mjs";
+import { createValidatorHelpers } from "./validators.mjs";
 import { kodoDriver } from "./drivers.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -57,8 +62,16 @@ async function git(args) {
 export async function collectEnvironment({ driverName, creds = null }) {
   return {
     driver: driverName,
-    model: creds?.model ?? process.env.DEFAULT_MODEL ?? null,
-    baseUrl: creds?.baseUrl ?? process.env.OPENAI_BASE_URL ?? null,
+    // NEVER fall back to the harness's own env here. An external CLI picks its
+    // own model and exposes none, so `DEFAULT_MODEL` describes Kodo, not it —
+    // and the fallback made a report state that Claude Code ran on
+    // `gpt-4.1-nano`, which was simply untrue. Unknown is recorded as unknown.
+    model: creds?.model ?? null,
+    baseUrl: creds?.baseUrl ?? null,
+    // How much to trust the field above.
+    //   "reported"  the driver told us
+    //   "unknown"   the agent chooses its own and does not expose it
+    modelSource: creds?.model ? "reported" : "unknown",
     node: process.version,
     platform: process.platform,
     gitBranch: await git(["rev-parse", "--abbrev-ref", "HEAD"]),
@@ -218,6 +231,23 @@ export async function runBenchmark(benchmark, {
       clearTimeout(timer);
     }
 
+    // ── Blocker gate 3b: the driver itself says it could not run ───────────
+    // An installed CLI that is not authenticated exits non-zero with an
+    // untouched workspace — identical in every observable way to failing the
+    // task. Only the driver can tell them apart, so it says so explicitly.
+    if (run?.blocker) {
+      const after0 = await snapshotWorkspace(workspace);
+      const result = blockedResult(run.blocker, {
+        finalAnswer: run.finalAnswer ?? "",
+        workspaceChanges: diffSnapshots(before, after0),
+        counts: recorder.summary(),
+        timedOut,
+      });
+      if (writeArtifacts) await persistArtifacts({ artifactDir, result, recorder, before, after: after0, workspace, benchmark });
+      onProgress?.(result);
+      return result;
+    }
+
     // ── Measure reality ─────────────────────────────────────────────────────
     const after = await snapshotWorkspace(workspace);
     const workspaceChanges = diffSnapshots(before, after);
@@ -276,6 +306,15 @@ export async function runBenchmark(benchmark, {
     // ── Blocker gate 5: the validator could not reach a verdict ─────────────
     const { checks, blocker } = await runValidator(benchmark, { workspace, run: runContext });
 
+    // Measured identically for every driver, from the workspace and the
+    // checks — never from what the agent says about its own internals. See the
+    // header of bench/metrics.mjs for why that separation is load-bearing.
+    const shape = await workspaceShape({ workspace, fixtureDir: benchmark.fixtureDir, workspaceChanges });
+    const tools = timelineShape(recorder.timeline);
+    const verification = await independentVerification({
+      workspace, benchmark, run: createValidatorHelpers(workspace).run,
+    });
+
     const scored = scoreRun({
       checks,
       blocker,
@@ -297,8 +336,29 @@ export async function runBenchmark(benchmark, {
       agentReportedFiles: [...runContext.editedFiles].sort(),
       // Recorded because a disagreement between what the agent says it edited
       // and what the disk says is itself a bug worth seeing in a report.
-      reportMatchesDisk: sameSet(runContext.editedFiles, [...workspaceChanges.added, ...workspaceChanges.modified]),
+      // `null` when the driver cannot self-report which files it touched — an
+      // external CLI agent prints prose, not a file manifest. Comparing its
+      // empty list against a workspace it really did change would score a
+      // missing capability as a false claim, and make every non-Kodo agent look
+      // dishonest in the cross-agent report. Unknown is recorded as unknown.
+      reportMatchesDisk: driver.reportsEditedFiles === false
+        ? null
+        : sameSet(runContext.editedFiles, [...workspaceChanges.added, ...workspaceChanges.modified]),
       counts: runContext.counts,
+      // Comparable across agents.
+      quality: qualityMetrics({
+        checks, finalAnswer: runContext.finalAnswer, shape, tools, verification,
+        outcome: scoredOutcomeFor(scored, blocker),
+      }),
+      // Agent-reported; displayed, never ranked.
+      telemetry: (() => {
+        const t = telemetryMetrics({
+          usage: runContext.usage, runMetrics: runContext.metrics, durationMs: Date.now() - startedAt,
+        });
+        t.estimatedCostUsd = estimateCost(t);
+        return t;
+      })(),
+      verification,
       timedOut,
       artifactDir: writeArtifacts ? artifactDir : null,
     };
@@ -309,6 +369,11 @@ export async function runBenchmark(benchmark, {
   } finally {
     if (!keepWorkspace) await destroyWorkspace(workspace);
   }
+}
+
+/** The outcome as scored — extracted so metrics and the record cannot disagree. */
+function scoredOutcomeFor(scored, blocker) {
+  return blocker ? "blocked" : scored.outcome;
 }
 
 function sameSet(a, b) {

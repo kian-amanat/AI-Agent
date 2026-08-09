@@ -1,0 +1,6 @@
+{
+  "name": "bench-errors",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true
+}

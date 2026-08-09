@@ -24,7 +24,7 @@ import os from "os";
 
 import {
   createTaskController, classifyTask, namedFiles,
-  verificationOutcome, isVacuousTestRun,
+  verificationOutcome, isVacuousTestRun, commandSignature, fixSignature,
 } from "../services/taskController.mjs";
 import { findUnresolvedMarkers } from "../agents/nodes/agent_loop.mjs";
 
@@ -310,6 +310,101 @@ await test("a vacuous run leaves the controller unverified", () => {
   const snap = c.snapshot();
   assert.strictEqual(snap.verificationCurrent, false,
     "a command that ran zero tests must not certify the workspace");
+});
+
+// ── command normalisation ───────────────────────────────────────────────────
+console.log("\n══ rephrasing a command is not new work ══════════════════════");
+
+// Observed: an agent ran the same failing install three times, varying only the
+// redirect and a redundant --prefix. Three distinct raw strings meant three
+// distinct dedup keys, so each rephrasing earned fresh no-progress credit and
+// thrash detection — which counts repeats of ONE signature — could never fire.
+const SAME = [
+  ["npm install", "npm install --prefix ."],
+  ["npm install vite typescript 2>&1", "npm install typescript vite"],
+  ["npm install a b 2>&1", "npm install --prefix . b a"],
+  ["npm install x > out.log", "npm install x"],
+  ["npm install x | tee log", "npm install x"],
+  ["npm  install   x", "npm install x"],
+];
+const DIFFERENT = [
+  ["npm install vite", "npm install typescript"],
+  ["npm test", "npm run build"],
+  ["npm install", "npm ci"],
+  ["rm -rf a", "rm -rf b"],
+  ["git commit -m one", "git commit -m two"],
+  ["node a.mjs", "node b.mjs"],
+];
+
+await test("harmless rephrasings collapse to one signature", () => {
+  for (const [a, b] of SAME) {
+    assert.strictEqual(commandSignature(a), commandSignature(b), `should match: ${a} / ${b}`);
+  }
+});
+
+await test("genuinely different commands stay distinguishable", () => {
+  for (const [a, b] of DIFFERENT) {
+    assert.notStrictEqual(commandSignature(a), commandSignature(b), `should differ: ${a} / ${b}`);
+  }
+});
+
+await test("normalisation is conservative — non-package-manager argv order is preserved", () => {
+  // Reordering arbitrary argv could change meaning, so only package-manager
+  // flags are sorted.
+  assert.notStrictEqual(commandSignature("cp a b"), commandSignature("cp b a"));
+  assert.notStrictEqual(commandSignature("diff old new"), commandSignature("diff new old"));
+});
+
+await test("the three observed installs now share one signature", () => {
+  const observed = [
+    "npm install --prefix . vite @vitejs/plugin-react typescript @types/react @types/node 2>&1",
+    "npm install vite @vitejs/plugin-react typescript @types/react @types/node 2>&1",
+    "npm install vite @vitejs/plugin-react typescript @types/react @types/node",
+  ];
+  assert.strictEqual(new Set(observed.map(commandSignature)).size, 1,
+    "the run that provoked this fix must now be seen as one repeated action");
+});
+
+await test("rephrased installs converge on ONE thrash signature", () => {
+  // `npm install` is a MUTATING command, so it is tracked by fixSignature for
+  // thrash detection rather than by the inspection dedup. That is the path that
+  // has to converge, and the raw-string version never did.
+  const shapes = [
+    "npm install --prefix . vite typescript 2>&1",
+    "npm install vite typescript 2>&1",
+    "npm install typescript vite",
+  ];
+  const sigs = new Set(shapes.map((cmd) => fixSignature("bash", { command: cmd })));
+  assert.strictEqual(sigs.size, 1, `three rephrasings produced ${sigs.size} signatures — thrash detection cannot count them`);
+});
+
+await test("different installs keep different thrash signatures", () => {
+  assert.notStrictEqual(
+    fixSignature("bash", { command: "npm install vite" }),
+    fixSignature("bash", { command: "npm install typescript" })
+  );
+});
+
+await test("a non-bash tool's signature is unchanged", () => {
+  assert.strictEqual(fixSignature("edit_file", { path: "src/a.ts" }), "edit_file:src/a.ts");
+});
+
+await test("rephrased read-only commands earn no fresh inspection credit", () => {
+  // The inspection path, exercised with a NON-mutating command.
+  const c = createTaskController({ task: "Look around the project" });
+  for (const cmd of ["ls -la src 2>&1", "ls -la src", "ls  -la   src"]) {
+    c.recordToolCall({ tool: "bash", args: { command: cmd }, ok: true });
+  }
+  assert.strictEqual(c.snapshot().inspectedCount, 1,
+    `three rephrasings registered as ${c.snapshot().inspectedCount} distinct inspections`);
+});
+
+await test("distinct read-only commands still each count", () => {
+  const c = createTaskController({ task: "Look around the project" });
+  for (const cmd of ["ls -la src", "ls -la lib", "pwd"]) {
+    c.recordToolCall({ tool: "bash", args: { command: cmd }, ok: true });
+  }
+  assert.strictEqual(c.snapshot().inspectedCount, 3);
 });
 
 // ── the protections that must survive ───────────────────────────────────────

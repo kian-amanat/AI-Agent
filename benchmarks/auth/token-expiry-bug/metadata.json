@@ -1,0 +1,10 @@
+{
+  "title": "Fix an off-by-one in token expiry validation",
+  "difficulty": "easy",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "single_file"
+  ],
+  "timeoutMs": 300000
+}

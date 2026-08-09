@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { listCommands } from "../commands";
+import { listCommands } from "../commands.mjs";
 
 export function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [query, setQuery] = useState("");

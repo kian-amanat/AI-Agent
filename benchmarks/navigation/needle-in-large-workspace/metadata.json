@@ -1,0 +1,10 @@
+{
+  "title": "Find the one live file among 100+ with misleading decoys",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "single_file"
+  ],
+  "timeoutMs": 600000
+}

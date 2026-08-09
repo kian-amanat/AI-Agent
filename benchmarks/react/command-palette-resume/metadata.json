@@ -8,5 +8,6 @@
     "multi_file",
     "wiring"
   ],
-  "timeoutMs": 600000
+  "timeoutMs": 600000,
+  "verifyCommand": "node --test"
 }

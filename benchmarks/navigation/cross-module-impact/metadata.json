@@ -1,0 +1,11 @@
+{
+  "title": "Update every call site of a changed signature across a tree",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "multi_file",
+    "wiring"
+  ],
+  "timeoutMs": 600000
+}

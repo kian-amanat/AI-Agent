@@ -77,7 +77,7 @@ import { fileURLToPath } from "url";
 import { AIMessage } from "@langchain/core/messages";
 import OpenAI from "openai";
 
-import { chatWithTools } from "../../services/agentChat.mjs";
+import { chatWithTools, isTransientTransportError } from "../../services/agentChat.mjs";
 import { readMemoryTopic, listMemoryTopics, loadMemoryIndex } from "../../services/agentMemory.mjs";
 import { validateSyntax, writeFileAtomic } from "../../utils/syntax.util.mjs";
 import { isSensitiveFilePath } from "../../utils/path.util.mjs";
@@ -3351,7 +3351,14 @@ export async function agentLoopNode(state) {
         // permanent failure. They used to fall straight through to "provider
         // failed, try again" on the first occurrence instead of getting the
         // same retry-with-backoff treatment as every other transient error.
-        const isTransient = /\b(504|503|502|529|429)\b|timeout|timed out|ETIMEDOUT|ECONNRESET|ECONNABORTED|overloaded|aborted|premature close|socket hang ?up|network ?error|fetch failed/i.test(errStr);
+        // Delegated to the transport layer, which is the only place that can see
+        // what actually broke: the OpenAI SDK reports every transport failure as
+        // the bare string "Connection error." and hides UND_ERR_SOCKET / "other
+        // side closed" in `err.cause`. Matching on `errStr` alone classified a
+        // dropped socket as permanent, so this retry never ran and a single
+        // idle-connection blip killed a 15-iteration run outright.
+        // `overloaded` stays here: it is provider prose with no status attached.
+        const isTransient = isTransientTransportError(err) || /\boverloaded\b/i.test(errStr);
         // A 400 / "Extra data" / context-length error usually means the request
         // got too big (many fetches). Aggressively shrink old tool outputs and
         // retry once — the same request would just fail again otherwise.

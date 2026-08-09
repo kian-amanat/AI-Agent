@@ -1,0 +1,10 @@
+{
+  "title": "Migrate a call site to a dependency's breaking v2 API",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "single_file"
+  ],
+  "timeoutMs": 420000
+}

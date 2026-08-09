@@ -10,7 +10,7 @@ export default async function validate({ helpers, run }) {
   const checks = [];
   const palette = await helpers.read("src/components/CommandPalette.tsx");
   const app = await helpers.read("src/App.tsx");
-  const commands = await helpers.read("src/commands.ts");
+  const commands = await helpers.read("src/commands.mjs");
 
   checks.push(check("the existing component still exists", palette !== null,
     "src/components/CommandPalette.tsx is gone — the half-built work was deleted rather than resumed", { guard: true }));
@@ -47,15 +47,18 @@ export default async function validate({ helpers, run }) {
   checks.push(check("runs the selected command on Enter",
     /Enter/.test(palette) && (runsDirectly || delegatesSelected),
     "nothing invokes the selected command on Enter — neither `.run()` nor handing the selected command to a handler"));
+  // Critical, not advisory. `bench quality` proved this: a mutant that runs
+  // commands[0] instead of commands[selected] passed the whole benchmark,
+  // because the only check that noticed was optional. Running the WRONG command
+  // on Enter is not a style nit — it is the feature being wrong.
   checks.push(check("Enter uses the SELECTED command, not just the first",
     /\[\s*selected\s*\]|commands\s*\[\s*selected/.test(palette),
-    "the Enter handler does not index into the list by the selected offset",
-    { critical: false }));
+    "the Enter handler does not index into the list by the selected offset"));
 
   // TODO 3 — register real commands.
   checks.push(check("real commands are registered",
     /registerCommand\s*\(/.test(commands ?? ""),
-    "src/commands.ts still registers nothing, so the palette has nothing to show"));
+    "src/commands.mjs still registers nothing, so the palette has nothing to show"));
   checks.push(check("the registry API was kept intact",
     /export function registerCommand/.test(commands ?? "") && /export function listCommands/.test(commands ?? ""),
     "the existing registry exports were removed or renamed", { guard: true }));

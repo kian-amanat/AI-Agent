@@ -15,6 +15,7 @@
 
 import fs from "fs/promises";
 import { OUTCOMES } from "./scoring.mjs";
+import { aggregateAgent } from "./stats.mjs";
 
 /** How good an outcome is. Only used to classify a change as better or worse. */
 const RANK = { blocked: 0, fail: 1, stopped_early: 2, needs_user: 2, partial: 3, pass: 4 };
@@ -109,11 +110,128 @@ export function compareReports(baseline, current) {
   };
 }
 
+// ── Cross-agent comparison ──────────────────────────────────────────────────
+
+/**
+ * Pass rate over the benchmarks carrying a given capability tag.
+ *
+ * This is how "resume completeness" and "blocker handling" become measurable
+ * without inventing a second scoring system: the corpus already tags each
+ * benchmark, and a capability's score is just its benchmarks' outcomes. Scoring
+ * semantics are untouched and identical for every agent — only the grouping
+ * differs.
+ */
+function capabilityRate(results, capability) {
+  const scoped = results.filter((r) => (r.capabilities ?? []).includes(capability));
+  if (!scoped.length) return null;
+  const passed = scoped.filter((r) => r.outcome === "pass").length;
+  return { rate: Math.round((passed / scoped.length) * 10_000) / 10_000, passed, total: scoped.length };
+}
+
+/** Was any real per-run telemetry available? External CLI agents report none. */
+function hasTelemetry(results) {
+  return results.some((r) => typeof r.metrics?.iterations === "number" || r.usage);
+}
+
+/**
+ * Compare N agents over the same corpus.
+ *
+ * Every report must have been produced from the same benchmark set for the
+ * per-benchmark matrix to mean anything, so a mismatch is surfaced rather than
+ * quietly intersected.
+ */
+export function compareAgents(reports) {
+  if (!Array.isArray(reports) || reports.length < 2) {
+    throw new Error("comparing agents needs at least two reports");
+  }
+
+  const agents = reports.map((rep) => {
+    const byId = indexResults(rep);
+    const results = [...byId.values()];
+    return {
+      driver: rep.environment?.driver ?? "(unknown)",
+      runId: rep.runId,
+      label: rep.label ?? "",
+      model: rep.environment?.model ?? null,
+      gitCommit: rep.environment?.gitCommit ?? null,
+      byId,
+      results,
+      summary: rep.summary ?? {},
+      telemetry: hasTelemetry(results),
+      capabilities: {
+        resume: capabilityRate(results, "resume"),
+        honest_blocker: capabilityRate(results, "honest_blocker"),
+        verification: capabilityRate(results, "verification"),
+        implementation: capabilityRate(results, "implementation"),
+        wiring: capabilityRate(results, "wiring"),
+      },
+    };
+  });
+
+  // The union, not the intersection: a benchmark one agent ran and another did
+  // not is a gap in the comparison, and hiding it would overstate the overlap.
+  const allIds = [...new Set(agents.flatMap((a) => [...a.byId.keys()]))].sort();
+  const sameCorpus = agents.every((a) => a.byId.size === allIds.length);
+
+  const rows = allIds.map((id) => {
+    const cells = agents.map((a) => {
+      const r = a.byId.get(id);
+      return r
+        ? { outcome: r.outcome, score: r.score, criticalPassed: r.criticalPassed, criticalTotal: r.criticalTotal, blocker: r.blocker ?? null }
+        : { outcome: "not_run", score: null, blocker: null };
+    });
+    const outcomes = new Set(cells.map((c) => c.outcome));
+    const first = agents[0].byId.get(id);
+    return {
+      benchmarkId: id,
+      golden: first?.golden ?? false,
+      family: first?.family ?? id.split("/")[0],
+      cells,
+      // The whole point of the side-by-side: where do the agents disagree?
+      agree: outcomes.size === 1,
+      bestOutcome: [...outcomes].sort((a, b) => (RANK[b] ?? -1) - (RANK[a] ?? -1))[0],
+    };
+  });
+
+  return {
+    agents: agents.map(({ byId, results, ...rest }) => rest),
+    benchmarks: rows,
+    sameCorpus,
+    differences: rows.filter((r) => !r.agree),
+    agreements: rows.filter((r) => r.agree),
+  };
+}
+
+/**
+ * Build the statistical aggregate every reporter consumes.
+ *
+ * Everything downstream reads THIS, not raw reports — so the markdown, the CSV
+ * and the JSON can never disagree about what happened, and adding a fourth
+ * format cannot introduce a fourth interpretation.
+ */
+export function buildAggregate(reports) {
+  if (!Array.isArray(reports) || reports.length < 2) {
+    throw new Error("comparing agents needs at least two reports");
+  }
+  const agents = reports.map(aggregateAgent);
+  const benchmarkIds = [...new Set(agents.flatMap((a) => a.benchmarks.map((b) => b.benchmarkId)))].sort();
+  return {
+    version: 1,
+    agents,
+    benchmarkIds,
+    benchmarkCount: benchmarkIds.length,
+    repeat: Math.min(...agents.map((a) => a.repeat ?? 1)),
+    sameCorpus: agents.every((a) => a.benchmarks.length === benchmarkIds.length),
+  };
+}
+
 // ── Rendering ───────────────────────────────────────────────────────────────
 
 const ICON = {
   pass: "✅", partial: "🟡", fail: "❌", blocked: "🚧",
   stopped_early: "🛑", needs_user: "❓",
+  // Cross-agent only: this agent never attempted the benchmark.
+  not_run: "·",
 };
 
 function pct(n) {
@@ -165,6 +283,84 @@ export function formatReport(report) {
   lines.push(`     avg duration            ${(s.avgDurationMs / 1000).toFixed(1)}s`);
   lines.push(`     avg tool calls          ${s.avgToolCalls}`);
   lines.push("═".repeat(78));
+  lines.push("");
+  return lines.join("\n");
+}
+
+/**
+ * The cross-agent report: one column per agent, disagreements first.
+ *
+ * A metric an agent could not report prints as `—`, never as 0. An external CLI
+ * agent exposes no iteration or token counts, and showing zeros there would
+ * read as "infinitely efficient" next to a driver that reports honestly.
+ */
+export function formatAgentComparison(cmp) {
+  const { agents, benchmarks, differences } = cmp;
+  const W = 14;
+  const cell = (s) => String(s).padEnd(W).slice(0, W);
+  const lines = [];
+
+  lines.push("");
+  lines.push("═".repeat(30 + W * agents.length));
+  lines.push("  Kodo cross-agent benchmark comparison");
+  lines.push("═".repeat(30 + W * agents.length));
+  for (const a of agents) {
+    lines.push(`  ${a.driver.padEnd(14)} run=${a.runId}${a.label ? ` (${a.label})` : ""}  model=${a.model ?? "—"}  commit=${a.gitCommit ?? "—"}`);
+  }
+  if (!cmp.sameCorpus) {
+    lines.push("");
+    lines.push("  ⚠️  the agents did not all run the same benchmark set — rows marked `not_run` were never attempted");
+  }
+  lines.push("");
+
+  // Per-benchmark matrix, disagreements first: that is what a comparison is for.
+  lines.push(`  ${"benchmark".padEnd(44)}${agents.map((a) => cell(a.driver)).join("")}`);
+  lines.push(`  ${"─".repeat(44 + W * agents.length)}`);
+  const ordered = [...differences, ...cmp.agreements];
+  for (const row of ordered) {
+    const label = `${row.agree ? "  " : "≠ "}${row.benchmarkId}${row.golden ? " ⭐" : ""}`;
+    lines.push(`  ${label.padEnd(44)}${row.cells.map((c) => cell(`${ICON[c.outcome] ?? "·"} ${c.outcome}`)).join("")}`);
+  }
+  lines.push("");
+  lines.push(`  ${differences.length} disagreement(s), ${cmp.agreements.length} agreement(s)`);
+  lines.push("");
+
+  // Aggregates.
+  const metric = (label, fn) =>
+    lines.push(`  ${label.padEnd(30)}${agents.map((a) => cell(fn(a))).join("")}`);
+
+  lines.push("  ── outcomes ".padEnd(30 + W * agents.length, "─"));
+  for (const o of OUTCOMES) {
+    if (agents.some((a) => a.summary.counts?.[o])) {
+      metric(`${ICON[o]} ${o}`, (a) => a.summary.counts?.[o] ?? 0);
+    }
+  }
+  lines.push("");
+  lines.push("  ── quality ".padEnd(30 + W * agents.length, "─"));
+  metric("success rate", (a) => pct(a.summary.successRate ?? 0));
+  metric("partial rate", (a) => pct(a.summary.partialRate ?? 0));
+  metric("failure rate", (a) => pct(a.summary.failureRate ?? 0));
+  metric("blocked rate", (a) => pct(a.summary.blockedRate ?? 0));
+  metric("verification honesty", (a) => pct(a.summary.verificationSuccessRate ?? 0));
+  metric("FALSE POSITIVE rate", (a) => pct(a.summary.falsePositiveSuccessRate ?? 0));
+
+  lines.push("");
+  lines.push("  ── capabilities (pass rate) ".padEnd(30 + W * agents.length, "─"));
+  for (const cap of ["resume", "honest_blocker", "verification", "implementation", "wiring"]) {
+    metric(cap.replace(/_/g, " "), (a) => {
+      const c = a.capabilities[cap];
+      return c ? `${pct(c.rate)} ${c.passed}/${c.total}` : "—";
+    });
+  }
+
+  lines.push("");
+  lines.push("  ── cost ".padEnd(30 + W * agents.length, "─"));
+  // `—` where an agent reports nothing: see the function's doc comment.
+  metric("avg iterations", (a) => (a.telemetry ? a.summary.avgIterations ?? "—" : "—"));
+  metric("avg tokens", (a) => (a.telemetry ? a.summary.avgTokens ?? "—" : "—"));
+  metric("avg tool calls", (a) => a.summary.avgToolCalls ?? "—");
+  metric("avg duration", (a) => `${((a.summary.avgDurationMs ?? 0) / 1000).toFixed(1)}s`);
+  lines.push("═".repeat(30 + W * agents.length));
   lines.push("");
   return lines.join("\n");
 }

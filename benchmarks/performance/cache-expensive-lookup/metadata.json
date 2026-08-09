@@ -7,5 +7,6 @@
     "single_file",
     "verification"
   ],
-  "timeoutMs": 480000
+  "timeoutMs": 480000,
+  "verifyCommand": "node -e \"import(\\\"./lookup.mjs\\\").then(m=>{if(m.expensiveLookup(\\\"k500\\\").value!==1500)process.exit(1)})\""
 }
