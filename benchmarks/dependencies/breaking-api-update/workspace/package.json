@@ -1,0 +1,9 @@
+{
+  "name": "bench-dep-bump",
+  "version": "1.0.0",
+  "type": "module",
+  "private": true,
+  "dependencies": {
+    "tiny-date": "^2.0.0"
+  }
+}

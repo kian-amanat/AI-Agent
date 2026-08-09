@@ -1,0 +1,1 @@
+The project just upgraded `tiny-date` from v1 to v2 (see `node_modules/tiny-date`). v2 renamed `format(date, pattern)` to `formatDate(date, { pattern })`. Update `report.mjs` to the new API without changing its output.

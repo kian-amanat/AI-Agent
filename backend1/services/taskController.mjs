@@ -99,6 +99,61 @@ const CODE_ONLY_RE = /\b(just\s+(show|give|tell|paste|write out)|don'?t\s+(edit|
  * log file. Without this, `npm test > out.log` satisfied "you must actually
  * change something".
  */
+/**
+ * A stable signature for a shell command, so that harmless rephrasings of the
+ * SAME action collapse to one key.
+ *
+ * Observed: an agent ran `npm install --prefix . <pkgs> 2>&1`, then the same
+ * without `--prefix .`, then the same without the redirect. Three distinct
+ * strings, so the dedup Set credited each as new inspection, no-progress never
+ * accumulated, and thrash detection — which counts repeats of one signature —
+ * could not fire. The agent circled the same failing install three times.
+ *
+ * Deliberately conservative. It only removes things that cannot change what a
+ * command DOES to the workspace:
+ *   • output redirections (`2>&1`, `> file`, `| tee`) — plumbing, not action
+ *   • `npm/yarn/pnpm --prefix .` and `-C .` — an explicit no-op cwd
+ *   • whitespace runs, trailing separators, surrounding quotes
+ *   • flag ORDER for package managers, whose flags are order-independent
+ *
+ * It does NOT canonicalise paths, resolve variables, reorder arbitrary argv, or
+ * merge different subcommands: `npm install x` and `npm install y` stay
+ * distinct, and so do `npm test` and `npm run build`. Over-normalising would
+ * make genuinely different work look like a repeat, which is a worse failure
+ * than the one this fixes.
+ */
+export function commandSignature(command) {
+  let c = String(command ?? "").trim();
+  if (!c) return "";
+  // Strip output redirections and trailing pipes-to-pager, which never change
+  // what the command does to the tree.
+  c = c.replace(/\s+\d?>>?\s*&\s*\d?(?=\s|$)/g, " ")       // 2>&1, >&2 — must precede the file form
+       .replace(/\s+\d?>>?\s*\S+/g, " ")                      // > out.log, >> log
+       .replace(/\s*\|\s*(?:tee|cat|head|tail)\b[^|]*/g, " ") // | tee x
+       .replace(/\s*;\s*$/, "")
+       .replace(/\s+/g, " ")
+       .trim();
+
+  const tokens = c.split(" ").filter(Boolean);
+  const pm = /^(npm|yarn|pnpm|npx)$/.test(tokens[0] ?? "");
+  if (pm) {
+    const out = [];
+    for (let i = 0; i < tokens.length; i++) {
+      const t = tokens[i];
+      // `--prefix .` / `-C .` name the directory we are already in.
+      if ((t === "--prefix" || t === "-C") && (tokens[i + 1] === "." || tokens[i + 1] === "./")) { i++; continue; }
+      if (t === "--prefix=." || t === "--prefix=./") continue;
+      out.push(t);
+    }
+    // Package-manager flags are order-independent; its positional arguments
+    // (the packages) are not meaningfully ordered either.
+    const head = out.slice(0, 2);              // e.g. ["npm", "install"]
+    const rest = out.slice(2).sort();
+    return [...head, ...rest].join(" ");
+  }
+  return c;
+}
+
 export function isMutatingCommand(command) {
   const c = String(command || "");
   if (!c.trim()) return false;
@@ -653,7 +708,13 @@ export function hashContent(text) {
 
 /** The repetition unit: which tool touched which file. */
 export function fixSignature(tool, args) {
-  const target = args?.path || args?.command || "";
+  // A command is normalised first: `npm install x 2>&1` and `npm install
+  // --prefix . x` are the same action, and thrash detection counts repeats of
+  // ONE signature. Without this, an agent that rephrases a failing command each
+  // time generates a fresh signature per attempt and can circle indefinitely —
+  // observed as three consecutive `npm install` variants in a single run.
+  const raw = args?.path || args?.command || "";
+  const target = args?.command ? commandSignature(String(args.command)) : String(raw);
   return `${tool}:${String(target).slice(0, 200)}`;
 }
 
@@ -929,7 +990,9 @@ export function createTaskController({
       // Keyed on the command, so re-issuing the identical one still earns
       // nothing. Verify commands are handled separately below.
       const cmd = String(args?.command || "");
-      if (cmd && !VERIFY_COMMAND_RE.test(cmd)) inspectedPaths.add(`bash:${cmd.slice(0, 200)}`);
+      // Keyed on the normalised signature, so re-issuing the same action with a
+      // different redirect or a redundant --prefix earns nothing. See commandSignature().
+      if (cmd && !VERIFY_COMMAND_RE.test(cmd)) inspectedPaths.add(`bash:${commandSignature(cmd).slice(0, 200)}`);
     }
 
     // A verification command is what moves the machine into `verify` — and so

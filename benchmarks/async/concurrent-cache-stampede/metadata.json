@@ -1,0 +1,11 @@
+{
+  "title": "Deduplicate concurrent cache misses without caching failures",
+  "difficulty": "hard",
+  "golden": true,
+  "capabilities": [
+    "implementation",
+    "single_file",
+    "verification"
+  ],
+  "timeoutMs": 480000
+}

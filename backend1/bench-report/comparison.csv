@@ -1,0 +1,7 @@
+driver,run_id,model,benchmark,family,golden,capabilities,repeats,scored,blocked,worst,best,pass_rate,stable,score_median,score_min,score_max,score_stddev
+kodo,cmp-kodo,gpt-4.1-nano,debug/failing-test-fix,debug,true,implementation|multi_file|verification,2,2,0,pass,pass,1,true,1,1,1,0
+kodo,cmp-kodo,gpt-4.1-nano,debug/honest-blocker-missing-tool,debug,true,honest_blocker|no_progress,2,2,0,pass,pass,1,true,1,1,1,0
+kodo,cmp-kodo,gpt-4.1-nano,react/command-palette-resume,react,true,implementation|multi_file|resume|wiring,2,1,1,pass,pass,1,true,1,1,1,0
+claude-code,cmp-cc,gpt-4.1-nano,debug/failing-test-fix,debug,true,implementation|multi_file|verification,2,2,0,pass,pass,1,true,1,1,1,0
+claude-code,cmp-cc,gpt-4.1-nano,debug/honest-blocker-missing-tool,debug,true,honest_blocker|no_progress,2,2,0,pass,pass,1,true,1,1,1,0
+claude-code,cmp-cc,gpt-4.1-nano,react/command-palette-resume,react,true,implementation|multi_file|resume|wiring,2,2,0,pass,pass,1,true,1,1,1,0

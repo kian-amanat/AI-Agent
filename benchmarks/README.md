@@ -28,6 +28,98 @@ works offline against stored artifacts.
 Exit codes: `0` everything passed · `1` failures or regressions · `2` something
 was **blocked** and therefore never evaluated.
 
+## Comparing agents
+
+The same corpus runs against any agent. Only the driver changes — fixtures,
+validators and scoring are reached identically, which is what makes a
+cross-agent number mean anything.
+
+```bash
+npm run bench -- drivers                              # who is actually usable
+npm run bench -- run --golden --driver kodo        --run kodo-v1
+npm run bench -- run --golden --driver claude-code --run cc-v1
+npm run bench -- compare-agents kodo-v1 cc-v1         # side by side
+```
+
+### `ready` means executable **and authenticated**, not merely installed
+
+`bench drivers` does not just look for the binary on `PATH`. It sends each
+external agent a one-word prompt and requires a real answer:
+
+```
+  claude-code:
+    🚧 blocked: authentication required
+       claude-code requires login — Not logged in · Please run /login
+  codex:
+    ✅ authenticated
+  kodo:
+    ✅ authenticated
+```
+
+Checking `PATH` alone was actively misleading. Both CLIs install cleanly and
+then answer every prompt with `Not logged in` or a 401 on a stale refresh
+token — so the old output read `claude-code ✅ ready` for an agent that could
+not complete a single benchmark, and the problem only surfaced after an
+operator had committed to a full comparison run.
+
+Preflight now reports a structured reason, and each is a different remedy:
+
+| reason | meaning |
+| --- | --- |
+| `not_installed` | the binary is not on `PATH` |
+| `authentication` | installed, but not logged in / token expired |
+| `timeout` | installed and authenticated, but its provider is not answering |
+| `malformed_output` | exits 0 yet returns nothing usable |
+| `probe_failed` | exits non-zero for some other reason |
+
+`bench run --driver <name>` performs the same check **before** running anything
+and exits `2` without touching a benchmark if the agent is blocked. A blocked
+agent is never scored `fail` — an agent that never authenticated has not lost
+at the tasks.
+
+The probe is a real round-trip, so it costs a token or two when the agent *is*
+authenticated. It is cached per process, so a suite pays for it once.
+
+Authenticate with:
+
+```bash
+claude          # then /login   — or export ANTHROPIC_API_KEY=...
+codex login
+```
+
+A driver added via `externalCliDriver` should declare `authProbeArgs` in its own
+dialect; the default is `["-p", prompt]`.
+
+### Adding an agent
+
+Most CLI agents need only a config, no new code:
+
+```js
+import { externalCliDriver, registerDriver } from "./bench/drivers.mjs";
+
+registerDriver(externalCliDriver({
+  name: "my-agent",
+  command: "my-agent",
+  args: (prompt) => ["run", "--yes", prompt],   // or promptOnStdin: true
+  installHint: "Install with `npm i -g my-agent`.",
+}));
+```
+
+Anything else implements the contract directly — `{ name, run, preflight?,
+creds?, reportsEditedFiles? }` — documented in [`bench/drivers.mjs`](../backend1/bench/drivers.mjs).
+
+**Report what you don't know as unknown, not as zero.** An external CLI exposes
+no iteration count or token usage, so it returns `null` for them and sets
+`reportsEditedFiles: false`. The comparison prints `—` for those columns rather
+than `0`, and the runner records `reportMatchesDisk: null` instead of accusing
+the agent of a false claim. Zeros there would make a CLI agent look free and
+dishonest at the same time.
+
+The comparison measures, per agent: outcome counts, success/partial/failure/
+blocked rates, verification honesty, false-positive success claims, per-capability
+pass rates (resume completeness, blocker handling, …) derived from the corpus's
+own tags, and iterations/tokens/tool-calls/duration.
+
 ## Outcomes
 
 | Outcome | Meaning |

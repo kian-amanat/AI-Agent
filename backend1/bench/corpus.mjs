@@ -91,6 +91,9 @@ function validateMetadata(meta, id) {
   if (meta.askUserAnswer !== undefined && typeof meta.askUserAnswer !== "string") {
     problems.push("metadata.askUserAnswer must be a string");
   }
+  if (meta.verifyCommand !== undefined && (typeof meta.verifyCommand !== "string" || !meta.verifyCommand.trim())) {
+    problems.push("metadata.verifyCommand must be a non-empty shell command");
+  }
   if (meta.id !== undefined && meta.id !== id) {
     problems.push(`metadata.id ${JSON.stringify(meta.id)} does not match its directory-derived id ${JSON.stringify(id)}`);
   }
@@ -154,6 +157,11 @@ async function loadOne(family, name, dir) {
       // "no human is here"; a benchmark about ambiguity wants something
       // stricter, so it can state it.
       askUserAnswer: metadata.askUserAnswer ?? null,
+      // The project's own check, run by the FRAMEWORK after the agent stops —
+      // identically for every driver. This is what makes "did it really work"
+      // comparable between agents that report their internals and agents that
+      // do not. See independentVerification() in metrics.mjs.
+      verifyCommand: metadata.verifyCommand ?? null,
       notes: typeof metadata.notes === "string" ? metadata.notes : "",
     },
     validatorPath,

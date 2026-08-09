@@ -24,8 +24,9 @@ import path from "path";
 
 import { loadCorpus, selectBenchmarks } from "./corpus.mjs";
 import { runSuite, newRunId } from "./runner.mjs";
-import { kodoDriver } from "./drivers.mjs";
-import { loadReport, compareReports, formatReport, formatComparison } from "./compare.mjs";
+import { getDriver, listDrivers, formatDriverStatusReport } from "./drivers.mjs";
+import { loadReport, compareReports, compareAgents, buildAggregate, formatReport, formatComparison, formatAgentComparison } from "./compare.mjs";
+import { toJson, toCsv, toMarkdown } from "./reporters.mjs";
 import { loadReplay, formatReplay, replayPath } from "./replay.mjs";
 import { benchRunsRoot, runDir, benchmarksRoot } from "./paths.mjs";
 
@@ -99,14 +100,27 @@ async function cmdRun(flags, positional) {
     return 1;
   }
 
+  // One corpus, many agents: --driver picks which one is measured. Everything
+  // downstream (fixtures, validators, scoring) is identical whichever is chosen.
+  const driver = getDriver(typeof flags.driver === "string" ? flags.driver : "kodo");
   const runId = typeof flags.run === "string" ? flags.run : newRunId();
   const repeat = flags.repeat === undefined ? 1 : Math.max(1, parseInt(flags.repeat, 10) || 1);
 
-  console.log(`\nRunning ${selected.length} benchmark(s)${repeat > 1 ? ` × ${repeat} repeat(s)` : ""} as ${runId}`);
+  // Fail fast. Discovering a logged-out agent one benchmark at a time wastes
+  // the operator's time and, for the agents that DO work, real money.
+  const preBlock = await driver.preflight?.({ benchmark: selected[0] });
+  if (preBlock) {
+    console.error(`\n🚧 driver "${driver.name}" is blocked: ${preBlock.reason ?? preBlock.stage}`);
+    console.error(`   ${preBlock.message}`);
+    console.error("\n   Nothing was run. Resolve this and rerun.\n");
+    return 2;
+  }
+
+  console.log(`\nRunning ${selected.length} benchmark(s)${repeat > 1 ? ` × ${repeat} repeat(s)` : ""} as ${runId} [driver: ${driver.name}]`);
   console.log("This drives the real agent loop against a real model — real API calls, real cost.\n");
 
   const report = await runSuite(selected, {
-    driver: kodoDriver,
+    driver,
     runId,
     label: typeof flags.label === "string" ? flags.label : "",
     repeat,
@@ -184,13 +198,97 @@ async function cmdBaseline(positional) {
   return 0;
 }
 
+/**
+ * "ready" means executable AND authenticated.
+ *
+ * The previous version checked only PATH, so an installed-but-logged-out CLI
+ * read as ready and an operator could commit to a comparison that could only
+ * ever produce blocked runs. Preflight now actually talks to each agent.
+ */
+async function cmdDrivers() {
+  // Probe every registered driver, then render. Collecting first means one
+  // driver's failure cannot truncate the listing for the rest.
+  const statuses = [];
+  for (const name of listDrivers()) {
+    let blocker = null;
+    try {
+      blocker = (await getDriver(name).preflight?.({})) ?? null;
+    } catch (err) {
+      // A preflight that THROWS must still appear, or the driver vanishes from
+      // the listing entirely and looks like it was never registered.
+      blocker = { status: "blocked", reason: "preflight_error", stage: "preflight", message: String(err?.message ?? err) };
+    }
+    statuses.push({ name, blocker });
+  }
+  console.log(formatDriverStatusReport(statuses));
+  return statuses.some((s) => s.blocker) ? 2 : 0;
+}
+
+/**
+ * Grade the validators themselves: apply realistic wrong answers to each covered
+ * benchmark and require the validator to notice. A validator that survives a
+ * mutation is measuring less than it claims.
+ */
+async function cmdQuality(flags) {
+  const { gradeAll, formatQualityReport } = await import("./mutation/index.mjs");
+  const { specsFor } = await import("./mutation/specs.mjs");
+
+  const corpus = await loadCorpus();
+  let specs = specsFor(corpus);
+  if (typeof flags.id === "string") {
+    const wanted = new Set(list(flags.id));
+    specs = specs.filter((s) => wanted.has(s.benchmark.id));
+  }
+  if (!specs.length) { console.error("No mutation specs matched."); return 1; }
+
+  console.log(`\nGrading ${specs.length} validator(s) against ${specs.reduce((n, s) => n + s.mutations.length, 0)} mutation(s)…`);
+  const report = await gradeAll(specs);
+  console.log(formatQualityReport(report, {
+    coveredIds: specs.map((s) => s.benchmark.id),
+    allIds: corpus.filter((b) => b.valid).map((b) => b.id),
+  }));
+  if (flags.json) console.log(JSON.stringify(report, null, 2));
+  // A surviving mutation is a hole in the suite, and the exit code says so.
+  return report.holes.length ? 1 : 0;
+}
+
+async function cmdCompareAgents(positional, flags) {
+  if (positional.length < 2) {
+    console.error("usage: bench compare-agents <runId|path> <runId|path> [more…]");
+    return 1;
+  }
+  const reports = [];
+  for (const ref of positional) reports.push(await loadReport(await resolveReportPath(ref)));
+  const cmp = compareAgents(reports);
+  const aggregate = buildAggregate(reports);
+
+  // --out writes every machine format beside the human one, so a report can be
+  // diffed, charted and read without re-running anything.
+  if (typeof flags.out === "string") {
+    await fs.mkdir(flags.out, { recursive: true });
+    await fs.writeFile(path.join(flags.out, "comparison.md"), toMarkdown(aggregate), "utf-8");
+    await fs.writeFile(path.join(flags.out, "comparison.json"), toJson(aggregate), "utf-8");
+    await fs.writeFile(path.join(flags.out, "comparison.csv"), toCsv(aggregate), "utf-8");
+    console.log(`Wrote comparison.md / .json / .csv to ${flags.out}`);
+  }
+  if (flags.format === "markdown") { console.log(toMarkdown(aggregate)); return 0; }
+  if (flags.format === "csv") { console.log(toCsv(aggregate)); return 0; }
+  if (flags.format === "json" || flags.json) { console.log(toJson(aggregate)); return 0; }
+
+  console.log(formatAgentComparison(cmp));
+  return 0;
+}
+
 const USAGE = `
 Kodo benchmark suite
 
   npm run bench -- list [--golden] [--family <f,…>] [--capability <c,…>] [--difficulty easy|hard]
-  npm run bench -- run  [<benchmarkId>…] [filters…] [--repeat N] [--label "..."] [--fail-on-regression] [--keep-workspace]
+  npm run bench -- drivers
+  npm run bench -- quality [--id <benchmarkId,…>] [--json]
+  npm run bench -- run  [<benchmarkId>…] [filters…] [--driver kodo|claude-code|codex] [--repeat N] [--label "..."] [--fail-on-regression] [--keep-workspace]
   npm run bench -- report  <runId|path|baseline>
   npm run bench -- compare <baseline|runId|path> <runId|path> [--fail-on-regression] [--json]
+  npm run bench -- compare-agents <runId|path> <runId|path> [more…] [--format markdown|csv|json] [--out DIR]
   npm run bench -- replay  <runId> <benchmarkId> [--verbose]
   npm run bench -- baseline <runId|path>
 
@@ -202,6 +300,9 @@ async function main() {
   const cmd = positional.shift() ?? "help";
   switch (cmd) {
     case "list":     return cmdList(flags);
+    case "drivers":  return cmdDrivers();
+    case "quality":  return cmdQuality(flags);
+    case "compare-agents": return cmdCompareAgents(positional, flags);
     case "run":      return cmdRun(flags, positional);
     case "report":   return cmdReport(positional);
     case "compare":  return cmdCompare(positional, flags);

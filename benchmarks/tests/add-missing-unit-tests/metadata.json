@@ -7,5 +7,6 @@
     "verification",
     "single_file"
   ],
-  "timeoutMs": 420000
+  "timeoutMs": 420000,
+  "verifyCommand": "node --test"
 }

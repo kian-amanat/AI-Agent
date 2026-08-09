@@ -137,8 +137,20 @@ export function summarize(results) {
   const evaluated = results.filter((r) => r.outcome !== "blocked");
   const withMetrics = evaluated.filter((r) => r.metrics);
 
+  // NOTE — agent-specific, and therefore NOT comparable across agents.
+  // `metrics.controller` is Kodo's task-controller snapshot; no other driver
+  // produces it, so for Claude Code or Codex these two counts are always zero
+  // and the rate below is meaningless. They are retained because single-agent
+  // Kodo reports and their tests depend on them, and they are deliberately NOT
+  // used by the cross-agent comparison, which reads the driver-independent
+  // `result.quality.*` metrics instead. See bench/metrics.mjs.
   const verificationRuns = withMetrics.filter((r) => r.metrics.controller?.verificationRan);
   const verificationOk = verificationRuns.filter((r) => r.metrics.controller?.verificationCurrent);
+
+  // The fair counterpart: a check the FRAMEWORK ran itself, after the agent
+  // stopped, with the same command in the same workspace for every agent.
+  const verifiable = evaluated.filter((r) => r.quality?.verificationAvailable);
+  const verified = verifiable.filter((r) => r.quality?.verificationPassed === true);
 
   const claimedRuns = evaluated.filter((r) => r.claimedSuccess);
   const falsePositives = claimedRuns.filter((r) => r.falsePositive);
@@ -163,6 +175,9 @@ export function summarize(results) {
     // both passing AND still describing what is on disk.
     verificationSuccessRate: rate(verificationOk.length, verificationRuns.length),
     verificationRunCount: verificationRuns.length,
+    // Driver-independent; safe to compare across agents.
+    independentVerificationRate: rate(verified.length, verifiable.length),
+    independentlyVerifiableCount: verifiable.length,
     // Of the runs that claimed success, how many were lying. The metric the
     // whole "score from the workspace" design exists to make measurable.
     falsePositiveSuccessRate: rate(falsePositives.length, claimedRuns.length),

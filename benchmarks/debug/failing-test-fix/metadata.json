@@ -7,5 +7,6 @@
     "verification",
     "multi_file"
   ],
-  "timeoutMs": 600000
+  "timeoutMs": 600000,
+  "verifyCommand": "node --test test/"
 }

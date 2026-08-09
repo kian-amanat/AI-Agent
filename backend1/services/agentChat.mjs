@@ -32,10 +32,45 @@ const ANTHROPIC_VERSION = "2023-06-01";
 // above the longest timeout we intentionally configure elsewhere (the SDK's
 // 600s "thinking model" ceiling), so THAT'S the one that ends up governing,
 // predictably, instead of an invisible stricter one underneath it.
-const LLM_DISPATCHER = new UndiciAgent({
+/**
+ * Idle-socket policy, deliberately explicit.
+ *
+ * headersTimeout/bodyTimeout are about how long ONE in-flight request may stay
+ * quiet. The keep-alive settings are the opposite problem: how long an IDLE
+ * pooled socket may be reused afterwards. Undici defaults to honouring the
+ * server's advertised `Keep-Alive: timeout=N` up to keepAliveMaxTimeout (600s),
+ * so a gateway that advertises generously but closes early leaves a dead socket
+ * in the pool. The next request grabs it and fails with UND_ERR_SOCKET
+ * ("other side closed") — which is exactly the failure observed between agent
+ * iterations separated by a slow shell command.
+ *
+ * Capping keepAliveMaxTimeout at 10s means a socket idle longer than that is
+ * retired by us rather than reused into a close. Short enough to stay under any
+ * plausible gateway idle timeout, long enough to keep reuse within a burst of
+ * calls. The 2s threshold is undici's safety margin subtracted from whatever
+ * the server advertises.
+ */
+export const LLM_DISPATCHER_CONFIG = Object.freeze({
   headersTimeout: 900_000,
   bodyTimeout: 900_000,
+  keepAliveTimeout: 4_000,
+  keepAliveMaxTimeout: 10_000,
+  keepAliveTimeoutThreshold: 2_000,
 });
+
+const LLM_DISPATCHER = new UndiciAgent({ ...LLM_DISPATCHER_CONFIG });
+
+/**
+ * Does this model accept the `enable_thinking` request extension?
+ *
+ * Allow-list, not deny-list: an unknown model gets a clean request, because the
+ * cost of omitting the parameter is that a hybrid model may think when we would
+ * rather it did not (slower, pricier), while the cost of sending it wrongly is a
+ * hard 400 that ends the run. Wrong-but-working beats wrong-and-fatal.
+ */
+export function supportsEnableThinking(model) {
+  return /qwen|glm|deepseek|kimi|minimax|hunyuan|ernie|yi-|internlm/i.test(String(model || ""));
+}
 
 export function isAnthropicRoute(creds) {
   return /anthropic\.com/i.test(String(creds?.baseURL || "")) ||
@@ -290,9 +325,21 @@ async function openaiChat({ creds, system, messages, tools, maxTokens, temperatu
   // mechanical should pass `thinking:false` explicitly instead of relying on
   // the name guess.
   const wantsThinking = thinking !== undefined ? thinking : nameLooksLikeThinking;
-  const extraBody = thinking !== undefined
-    ? { enable_thinking: thinking }
-    : (nameLooksLikeThinking ? { enable_thinking: true } : undefined);
+
+  // `enable_thinking` is a Qwen-family (and adjacent Chinese-provider) request
+  // extension. OpenAI-family models do not merely ignore it — they reject the
+  // whole request with `400 Unrecognized request argument supplied: extra_body`,
+  // which is not retryable and kills the run. That is not hypothetical: it
+  // blocked a benchmark repeat the moment Kodo was pointed at gpt-4.1-nano
+  // through the same OpenAI-compatible gateway that had been serving Qwen.
+  //
+  // So the parameter is sent only where it means something. Everywhere else the
+  // request goes out clean, which is also the correct behaviour: there is no
+  // server-side thinking default to suppress on a model that has no such mode.
+  const extraBody = supportsEnableThinking(creds.model)
+    ? (thinking !== undefined ? { enable_thinking: thinking }
+      : (nameLooksLikeThinking ? { enable_thinking: true } : undefined))
+    : undefined;
 
   const client = new OpenAI({
     apiKey: creds.apiKey,
@@ -311,14 +358,19 @@ async function openaiChat({ creds, system, messages, tools, maxTokens, temperatu
   // some OpenAI-compatible providers return malformed SSE for tool-calling
   // turns, which the SDK surfaces as a JSON "Extra data" / SyntaxError. Rather
   // than fail the whole turn, we retry once without streaming.
-  const nonStreamingCall = async () => {
+  /** A 400 that names the offending extension, from any provider wording. */
+  const rejectsExtraBody = (err) =>
+    /extra_body|unrecognized request argument|unknown (?:request )?(?:argument|parameter)|unexpected keyword/i
+      .test(String(err?.message ?? err));
+
+  const nonStreamingCall = async (omitExtraBody = false) => {
     const response = await client.chat.completions.create({
       model: creds.model,
       messages: fullMessages,
       ...(tools?.length ? { tools, tool_choice: "auto" } : {}),
       temperature,
       max_tokens: maxTokens,
-      ...(extraBody ? { extra_body: extraBody } : {}),
+      ...(extraBody && !omitExtraBody ? { extra_body: extraBody } : {}),
     }, { signal });
     return {
       message: response.choices?.[0]?.message || { role: "assistant", content: null },
@@ -391,13 +443,100 @@ async function openaiChat({ creds, system, messages, tools, maxTokens, temperatu
     } catch (err) {
       // Don't fall back on a real abort, and only when we haven't streamed a
       // user-visible answer yet (a partial stream can't be cleanly retried).
-      if (signal?.aborted || !looksLikeBadStream(err)) throw err;
+      if (signal?.aborted) throw err;
+      // A gateway we have not allow-listed still rejects the extension. Retry
+      // once without it rather than losing the run to a request-shape quibble.
+      if (rejectsExtraBody(err)) {
+        console.warn(`[AgentChat] ${creds.model} rejected extra_body — retrying without it`);
+        return nonStreamingCall(true);
+      }
+      if (!looksLikeBadStream(err)) throw err;
       console.warn("[AgentChat] streaming returned malformed data — retrying non-streaming:", String(err?.message || err).slice(0, 140));
       return nonStreamingCall();
     }
   }
 
-  return nonStreamingCall();
+  try {
+    return await nonStreamingCall();
+  } catch (err) {
+    if (!signal?.aborted && rejectsExtraBody(err)) {
+      console.warn(`[AgentChat] ${creds.model} rejected extra_body — retrying without it`);
+      return nonStreamingCall(true);
+    }
+    throw err;
+  }
+}
+
+// ── Transport-error classification ────────────────────────────────────────────
+
+/**
+ * Transport failures worth retrying. Deliberately narrow: these are all
+ * "the pipe broke", never "the server rejected this request".
+ */
+const TRANSIENT_TRANSPORT_RE =
+  /\bAPIConnectionError\b|\bconnection error\b|\bUND_ERR_SOCKET\b|\bUND_ERR_CONNECT_TIMEOUT\b|\bother side closed\b|\bECONNRESET\b|\bECONNABORTED\b|\bECONNREFUSED\b|\bEPIPE\b|\bETIMEDOUT\b|\bEAI_AGAIN\b|\bsocket hang ?up\b|\bfetch failed\b|\bpremature close\b|\bnetwork ?error\b|\bterminated\b/i;
+
+/**
+ * HTTP statuses that mean "retry later" rather than "you asked wrong".
+ * 408 request timeout, 425 too early, 429 rate limit, 5xx server-side.
+ */
+const TRANSIENT_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504, 529]);
+
+/**
+ * Statuses that are NEVER transient, whatever the message happens to contain.
+ * Checked FIRST and unconditionally: a 403 quota error whose body mentions
+ * "connection" must not be retried into the ground, and retrying a 401 is just
+ * a slower way to fail.
+ */
+const PERMANENT_STATUSES = new Set([400, 401, 402, 403, 404, 405, 409, 413, 422]);
+
+/** Wording that marks a refusal even when no status is exposed. */
+const PERMANENT_MESSAGE_RE =
+  /\binsufficient[_ ]?(?:user[_ ]?)?quota\b|\bquota\b|\bbilling\b|\bcredit balance\b|\binvalid[_ ]api[_ ]key\b|\bincorrect api key\b|\bunauthorized\b|\bauthentication\b|\bpermission denied\b|\binvalid[_ ]request[_ ]error\b|\bmodel_not_found\b|\bdoes not exist\b/i;
+
+/**
+ * Walk an error's `cause` chain, bounded, collecting the text that identifies
+ * it. The OpenAI SDK reports every transport failure as the single string
+ * "Connection error." and hides the real reason (UND_ERR_SOCKET, "other side
+ * closed") in `err.cause` — so a classifier that reads only `err.message`
+ * cannot tell a dropped socket from anything else, and the agent loop's
+ * retry-with-backoff never engages. Bounded depth because a cause chain can be
+ * cyclic.
+ */
+export function describeErrorChain(err, maxDepth = 5) {
+  const parts = [];
+  let status;
+  let node = err;
+  const seen = new Set();
+
+  for (let depth = 0; depth < maxDepth && node && typeof node === "object"; depth++) {
+    if (seen.has(node)) break;
+    seen.add(node);
+    for (const key of ["name", "message", "code", "type", "errno", "syscall"]) {
+      const v = node[key];
+      if (v !== undefined && v !== null && v !== "") parts.push(String(v));
+    }
+    const s = node.status ?? node.statusCode ?? node.response?.status;
+    if (status === undefined && typeof s === "number") status = s;
+    node = node.cause;
+  }
+  if (!parts.length && err !== undefined) parts.push(String(err));
+  return { text: parts.join(" | "), status };
+}
+
+/**
+ * Should the agent loop retry this failure?
+ *
+ * Order matters: a permanent status or a refusal phrase wins outright, so that
+ * broadening transport matching can never accidentally start retrying auth or
+ * quota errors.
+ */
+export function isTransientTransportError(err) {
+  const { text, status } = describeErrorChain(err);
+  if (status !== undefined && PERMANENT_STATUSES.has(status)) return false;
+  if (PERMANENT_MESSAGE_RE.test(text)) return false;
+  if (status !== undefined && TRANSIENT_STATUSES.has(status)) return true;
+  return TRANSIENT_TRANSPORT_RE.test(text);
 }
 
 // ── Public API ────────────────────────────────────────────────────────────────

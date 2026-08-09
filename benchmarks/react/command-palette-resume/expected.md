@@ -6,7 +6,7 @@ describes no steps. The work already in the tree defines the job, and the three
 
 1. close on `Escape` (a keyboard handler),
 2. run the selected command on `Enter`,
-3. register at least one real command in `src/commands.ts`,
+3. register at least one real command in `src/commands.mjs`,
 
 and then the component has to be rendered from `src/App.tsx`, which currently
 never mentions it.
