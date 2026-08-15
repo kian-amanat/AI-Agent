@@ -32,6 +32,11 @@ export async function runKodoGraph({
   permissionMode = "auto",
   approvalPromise = null,
   askUser = null,
+  // The ExecutionRuntime every tool executes through. Omitted means the host —
+  // which is the correct default for a tool you ran in your own terminal. A
+  // sandboxed caller builds one with core/runtime's createRuntime(), which
+  // refuses to hand back a runtime that could not prove isolation.
+  runtime = null,
 }) {
   const graph = getGraph();
 
@@ -59,10 +64,12 @@ export async function runKodoGraph({
     permissionMode,
     approvalPromise,
     askUser,
+    runtime,
   };
 
   console.log(`[KodoGraph] 🚀 session=${sessionId} request=${requestId}`);
   console.log(`[KodoGraph]    workspace=${workspacePath || "(none)"}`);
+  console.log(`[KodoGraph]    runtime=${runtime?.name || "host"}${runtime?.isolated ? " (isolated)" : ""}`);
   console.log(`[KodoGraph]    remembered file=${rememberedTargetFile || "(none)"}`);
   console.log(`[KodoGraph]    prior turns=${priorConversation.length || priorMessages.length}${priorConversation.length ? " (tool timeline)" : ""}`);
   console.log(`[KodoGraph]    message="${String(userMessage).slice(0, 80)}"`);

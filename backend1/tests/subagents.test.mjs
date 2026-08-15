@@ -12,6 +12,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
@@ -259,6 +260,7 @@ function spawnCtx(workspacePath, { permissions = { allow: [], ask: [], deny: [] 
   return {
     ctx: {
       root: workspacePath, emit: null, sessionId: "parent-s", requestId: "parent-r",
+      runtime: new HostRuntime({ root: workspacePath }),
       hooks: {}, permissions, editedFiles: new Map(), readFiles: new Set(),
       todosRef: { current: [] }, workspaceSnapshot: [], permissionMode: "auto",
       mcpClients: new Map(), mcpRoutes: new Map(), creds: DEAD_CREDS,

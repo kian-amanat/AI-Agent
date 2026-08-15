@@ -170,7 +170,31 @@ function truncate(s) {
 
 // ── Handler execution ────────────────────────────────────────────────────────
 
-function runCommand(handler, { cwd, payload, signal }) {
+/**
+ * Run a `command` hook handler.
+ *
+ * `runtime` decides WHERE. A project's hooks are the project's own shell
+ * commands, and under `--sandbox` they must run wherever the agent's other
+ * commands run: PreToolUse/PostToolUse fire inside every tool call, so a
+ * host-side spawn here meant a confined run was executing project shell on the
+ * host hundreds of times per task — one of the widest escapes in the surface.
+ *
+ * Session-level hooks (Setup, SessionStart, SessionEnd) fire outside any run,
+ * before a runtime exists, and stay host-side by necessity. See docs/mcp.md and
+ * docs/sandboxing.md for the boundary.
+ */
+function runCommand(handler, { cwd, payload, signal, runtime = null }) {
+  if (runtime) {
+    // Bounded the same way the host path is, and cancelled by the same signal.
+    const timeoutMs = (handler.timeout || 60) * 1000;
+    return runtime.exec(handler.command, { timeoutMs }).then((res) => ({
+      ok: res.exit_code === 0,
+      exitCode: res.exit_code,
+      stdout: String(res.stdout || "").slice(0, OUTPUT_MAX),
+      stderr: String(res.stderr || "").slice(0, OUTPUT_MAX),
+    })).catch((err) => ({ ok: false, exitCode: null, stdout: "", stderr: String(err?.message || err) }));
+  }
+
   // {placeholders} let a hook receive context without parsing JSON, e.g.
   // "prettier --write {file}". The full payload is also on stdin.
   const command = String(handler.command).replace(/\{(\w+)\}/g, (whole, key) =>
@@ -316,6 +340,9 @@ export function parseHookOutput(stdout) {
  */
 export async function fireHookEvent(event, payload, {
   config, cwd, subject = null, signal = null, deps = {}, emit = null,
+  // When present, `command` handlers execute HERE rather than on the host.
+  // Threaded from ctx.runtime by the agent loop's fireHook wrapper.
+  runtime = null,
 } = {}) {
   const groups = config?.[event] || [];
   if (!groups.length) return { fired: false, decision: "continue", reason: "", context: [], results: [] };
@@ -336,7 +363,7 @@ export async function fireHookEvent(event, payload, {
   const fullPayload = { event, ...(payload || {}) };
   const settled = await Promise.all(selected.map(async (handler) => {
     const started = Date.now();
-    const raw = await RUNNERS[handler.type](handler, { cwd, payload: fullPayload, signal, deps });
+    const raw = await RUNNERS[handler.type](handler, { cwd, payload: fullPayload, signal, deps, runtime });
     return { handler, durationMs: Date.now() - started, ...raw };
   }));
 

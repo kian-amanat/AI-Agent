@@ -10,6 +10,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
@@ -68,7 +69,7 @@ async function makeRepo(files = { "app.js": "export const value = 1;\n" }) {
 async function isolatedEdit(repo, edit) {
   const { worktree } = await createWorktree({ workspacePath: repo, subagentId: "sub" });
   await edit(worktree.path);
-  const diff = await extractWorktreeDiff(worktree.path);
+  const diff = await extractWorktreeDiff(new HostRuntime({ root: worktree.path }), worktree.path);
   const summary = diff.ok && !diff.empty ? summarizeDiff(diff, repo) : null;
   const patchId = summary ? storePatch({ subagentId: "sub", agentType: "fixer", sessionId: "sess", workspaceRoot: repo, diff, summary }) : null;
   await removeWorktree(worktree.worktreeId); // cleanup BEFORE apply — the patch must survive
@@ -203,7 +204,7 @@ await test("applying a patch with a protected path is BLOCKED and changes nothin
   const { patchId } = await isolatedEdit(repo, async (wt) => {
     await fs.writeFile(path.join(wt, ".env"), "SECRET=stolen\n");
   });
-  const res = await applyPatch(patchId, { workspaceRoot: repo });
+  const res = await applyPatch(patchId, { workspaceRoot: repo, runtime: new HostRuntime({ root: repo }) });
   assert.strictEqual(res.ok, false);
   assert.strictEqual(res.blocked, true);
   assert.strictEqual(await fs.readFile(path.join(repo, ".env"), "utf-8"), "SECRET=1\n", "the secret file must be untouched");
@@ -231,7 +232,7 @@ await test("an APPROVED patch is applied to the parent workspace", async () => {
     await fs.writeFile(path.join(wt, "app.js"), "export const value = 42;\n");
     await fs.writeFile(path.join(wt, "extra.js"), "export const e = true;\n");
   });
-  const res = await applyPatch(patchId, { workspaceRoot: repo });
+  const res = await applyPatch(patchId, { workspaceRoot: repo, runtime: new HostRuntime({ root: repo }) });
   assert.strictEqual(res.ok, true, res.error);
   assert.match(await fs.readFile(path.join(repo, "app.js"), "utf-8"), /value = 42/);
   await fs.access(path.join(repo, "extra.js"));
@@ -255,8 +256,8 @@ await test("a patch cannot be decided twice", async () => {
   _resetPatches();
   const repo = await makeRepo();
   const { patchId } = await isolatedEdit(repo, async (wt) => { await fs.writeFile(path.join(wt, "app.js"), "x\n"); });
-  await applyPatch(patchId, { workspaceRoot: repo });
-  const again = await applyPatch(patchId, { workspaceRoot: repo });
+  await applyPatch(patchId, { workspaceRoot: repo, runtime: new HostRuntime({ root: repo }) });
+  const again = await applyPatch(patchId, { workspaceRoot: repo, runtime: new HostRuntime({ root: repo }) });
   assert.strictEqual(again.ok, false);
   assert.match(again.error, /already applied/);
   assert.strictEqual(rejectPatch(patchId).ok, false);
@@ -271,7 +272,7 @@ await test("a patch that no longer applies FAILS safely, leaving the workspace i
   });
   // The parent moved on underneath the patch.
   await fs.writeFile(path.join(repo, "app.js"), "completely different content\n");
-  const res = await applyPatch(patchId, { workspaceRoot: repo });
+  const res = await applyPatch(patchId, { workspaceRoot: repo, runtime: new HostRuntime({ root: repo }) });
   assert.strictEqual(res.ok, false);
   assert.strictEqual(res.applied, false);
   assert.strictEqual(await fs.readFile(path.join(repo, "app.js"), "utf-8"), "completely different content\n",
@@ -284,7 +285,7 @@ await test("no temp patch file is left behind", async () => {
   _resetPatches();
   const repo = await makeRepo();
   const { patchId } = await isolatedEdit(repo, async (wt) => { await fs.writeFile(path.join(wt, "app.js"), "y\n"); });
-  await applyPatch(patchId, { workspaceRoot: repo });
+  await applyPatch(patchId, { workspaceRoot: repo, runtime: new HostRuntime({ root: repo }) });
   const left = (await fs.readdir(repo)).filter((f) => f.startsWith(".kodo-patch-"));
   assert.deepStrictEqual(left, []);
   await fs.rm(repo, { recursive: true, force: true });
@@ -318,6 +319,7 @@ function ctxFor(root, permissionMode = "auto") {
   return {
     ctx: {
       root, emit: null, sessionId: "sess", requestId: "req", hooks: {},
+      runtime: new HostRuntime({ root }),
       permissions: { allow: [], ask: [], deny: [] }, editedFiles: new Map(), readFiles: new Set(),
       todosRef: { current: [] }, workspaceSnapshot: [], permissionMode,
       mcpClients: new Map(), mcpRoutes: new Map(), creds: DEAD, isSubAgent: false,
@@ -483,7 +485,7 @@ await test("STRESS: concurrent diff extraction stays correct per worktree", asyn
     // Offset so no value collides with the base file ("value = 1"), which
     // would legitimately produce an empty diff.
     await fs.writeFile(path.join(worktree.path, "app.js"), `export const value = ${i}00;\n`);
-    const diff = await extractWorktreeDiff(worktree.path);
+    const diff = await extractWorktreeDiff(new HostRuntime({ root: worktree.path }), worktree.path);
     await removeWorktree(worktree.worktreeId);
     return { i, diff };
   }));
@@ -502,7 +504,7 @@ await test("STRESS: repeated apply/reject cycles keep state consistent", async (
       await fs.writeFile(path.join(wt, "app.js"), `export const value = ${i};\n`);
     });
     if (i % 2 === 0) {
-      const res = await applyPatch(patchId, { workspaceRoot: repo });
+      const res = await applyPatch(patchId, { workspaceRoot: repo, runtime: new HostRuntime({ root: repo }) });
       assert.strictEqual(res.ok, true, `cycle ${i}: ${res.error}`);
       assert.match(await fs.readFile(path.join(repo, "app.js"), "utf-8"), new RegExp(`value = ${i}`));
       await sh(["git", "add", "."], repo);

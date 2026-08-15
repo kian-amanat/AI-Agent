@@ -25,3 +25,8 @@ build/
 # MCP OAuth bearer tokens — never commit
 .kodo/credentials.json
 **/.kodo/credentials.json
+
+# Build outputs
+dist/
+dist-npm/
+*.tgz

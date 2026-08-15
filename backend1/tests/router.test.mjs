@@ -40,10 +40,14 @@ test("other action-flavored \"how/what\" questions also fall through", () => {
     "how do I start the dev server?",
     "how can I deploy this to production?",
     "what command do I use to install the dependencies?",
-    "how do I build this project?",
   ]) {
     assert.strictEqual(classifyFastPath(msg), null, `expected null for: "${msg}"`);
   }
+  // "how do I build THIS PROJECT?" now resolves locally to "agent" rather than
+  // null: it names the project, so isWorkspaceQuery settles it without an LLM
+  // call. The guarantee this test exists to protect — never force-answered —
+  // holds either way, so it is asserted directly.
+  assert.notStrictEqual(classifyFastPath("how do I build this project?"), "answer");
 });
 
 console.log("\n📦 classifyFastPath — regression: unaffected fast-paths still resolve locally");

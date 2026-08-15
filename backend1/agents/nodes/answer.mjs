@@ -57,15 +57,47 @@ RULES
 - Do not mention inability to edit files here; if the user actually wants files changed, the agent pipeline handles it in a separate mode.
 
 ESCALATION (important)
-- You can only talk — you cannot edit files, create files, run commands, or install anything, and you have NO live view of the project's actual files, package.json, config, or running processes. web_search/fetch_url only reach the public internet, never the user's own workspace.
+- In THIS mode you can only talk — no editing, running, or installing — and the tools you hold here (web_search/fetch_url) reach the internet, not the workspace.
+- Kodo AS A WHOLE *does* have full workspace access (read_file, grep, glob, list_files, bash) in its agent mode. So NEVER tell the user you "can't see their files", "have no visibility into their project", "can't access their workspace", or "can only access the public internet" — those statements are FALSE about Kodo and are forbidden. If you need workspace facts, escalate (below); the agent that has the file tools will take over.
 - If actually fulfilling the user's request would require any workspace action (editing, running, installing), do NOT try to answer or describe the change. Reply with EXACTLY this token and nothing else: __ESCALATE__
-- Also escalate — even though it's phrased as a question — when answering ACCURATELY depends on this project's real, current state rather than general knowledge: "how do I run/start/build MY app", "what port does my server use", "why is my build failing", "what's in my package.json", "is X already installed here". Guessing with a generic, framework-agnostic answer to a question that's really about THIS specific project is worse than admitting you need to look — escalate instead.
+- Also escalate — even though it's phrased as a question — when answering ACCURATELY depends on this project's real, current state rather than general knowledge: "where is the CLI stored", "which file contains X", "where is auth implemented", "what files are in this project", "show me the project structure", "how do I run/start/build MY app", "what port does my server use", "why is my build failing", "what's in my package.json", "is X already installed here". Guessing with a generic, framework-agnostic answer to a question that's really about THIS specific project is worse than admitting you need to look — escalate instead.
+- Rule of thumb: if you catch yourself about to write a sentence about NOT being able to see the user's files, that is exactly the case where you must emit __ESCALATE__ instead.
 - The system will then hand the request to the agent that can actually inspect the project and do the work — so escalate instead of explaining what you "would" do or listing every possible framework's command.
 - Skip escalation only for genuinely general questions that don't depend on this specific project: language/framework concepts, general best practices, debugging strategy in the abstract, or read-only discussion that doesn't need live file access.`;
 
 // Sentinel the answer LLM emits when a request actually needs workspace tools.
 // The node suppresses it from the stream and routes to agent_loop instead.
 const ESCALATE_SENTINEL = "__ESCALATE__";
+
+/**
+ * Backstop for the honest-fallback contract.
+ *
+ * Kodo is a local coding agent: its agent mode holds read_file/grep/glob/bash.
+ * "I can't see your files" / "I only have access to the public internet" is
+ * therefore never a true statement about Kodo, only about this one node's tool
+ * set — and the user experiences it as Kodo lying about its own capabilities.
+ * The system prompt forbids it; this catches the model saying it anyway, and
+ * converts the false claim into an escalation to the node that CAN look.
+ *
+ * Deliberately narrow: it matches claims of *no workspace/file access*, not
+ * honest reports like "I searched the workspace and found no match" or a real
+ * tool error, both of which must still reach the user unchanged.
+ */
+export function claimsNoWorkspaceAccess(text) {
+  const t = String(text || "");
+  if (!t) return false;
+  const NEG = "(?:don'?t|do not|cannot|can'?t|am not able to|unable to|have no|haven'?t got|lack)";
+  const SEE = "(?:have )?(?:visibility into|access(?: to)?|see|view|read|inspect|look at|browse)";
+  const TARGET = "(?:your|the user'?s|this)?\\s*(?:actual\\s+)?(?:project|workspace|repo|repository|codebase|local|file system|filesystem)?\\s*(?:files?|directories|folders?|file system|filesystem|workspace|project|codebase|repository)";
+  const patterns = [
+    new RegExp(`\\bI\\s+${NEG}\\s+${SEE}\\s+${TARGET}`, "i"),
+    // "I can only reason about / access the public internet"
+    /\bI\s+can\s+only\s+(?:reason about|access|read|reach|search)\b[^.]*\bpublic internet\b/i,
+    /\bonly\s+(?:have\s+)?access\s+to\s+the\s+public\s+internet\b/i,
+    /\bno\s+(?:live\s+)?(?:view|visibility|access|window)\s+(?:into|to|of|on)\s+(?:your|the|this)\s+(?:actual\s+)?(?:project|workspace|files?|codebase|repo)/i,
+  ];
+  return patterns.some((re) => re.test(t));
+}
 
 // Detect explicit memory-management commands (not general questions about memory)
 function isForgetCommand(msg) {
@@ -289,6 +321,13 @@ export async function answerNode(state) {
     }
 
     if (escalated) return escalate();
+
+    // Honest-fallback backstop: the model produced a false "I can't see your
+    // workspace" answer despite the prompt. Hand it to the agent that can.
+    if (claimsNoWorkspaceAccess(answerText)) {
+      console.warn("[Answer] suppressed false workspace-access claim — escalating to agent_loop");
+      return escalate();
+    }
 
     const finalAnswer = answerText.trim() || "I couldn't generate a response.";
     if (!answerText.trim()) emit?.({ type: "content", content: finalAnswer });

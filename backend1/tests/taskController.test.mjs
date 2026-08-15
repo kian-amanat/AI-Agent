@@ -13,6 +13,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import path from "path";
 import os from "os";
 import fs from "fs/promises";
@@ -1083,6 +1084,7 @@ await test("executeToolCallsBatch records real executed calls into the controlle
   const controller = createTaskController();
   const ctx = {
     root, emit: null, sessionId: "s", requestId: "r", hooks: {},
+    runtime: new HostRuntime({ root }),
     editedFiles: new Map(), readFiles: new Set(), todosRef: { current: [] },
     workspaceSnapshot: [], permissionMode: "auto",
     taskController: controller,
@@ -1110,6 +1112,7 @@ await test("a controller-less ctx (sub-agent path) still executes tools fine", a
   await fs.writeFile(path.join(root, "a.txt"), "hi");
   const ctx = {
     root, emit: null, sessionId: "s", requestId: "r", hooks: {},
+    runtime: new HostRuntime({ root }),
     editedFiles: new Map(), readFiles: new Set(), todosRef: { current: [] },
     workspaceSnapshot: [], permissionMode: "auto",
     // no taskController — must not throw

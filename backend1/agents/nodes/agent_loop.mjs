@@ -79,7 +79,9 @@ import OpenAI from "openai";
 
 import { chatWithTools, isTransientTransportError } from "../../services/agentChat.mjs";
 import { readMemoryTopic, listMemoryTopics, loadMemoryIndex } from "../../services/agentMemory.mjs";
-import { validateSyntax, writeFileAtomic } from "../../utils/syntax.util.mjs";
+import { validateSyntax } from "../../utils/syntax.util.mjs";
+import { HostRuntime, shellQuote, IGNORE_DIRS, CODE_EXTENSIONS } from "../../core/runtime/host.mjs";
+import { assertRuntime } from "../../core/runtime/contract.mjs";
 import { isSensitiveFilePath } from "../../utils/path.util.mjs";
 import { sanitizedChildEnv } from "../../utils/process.util.mjs";
 import { spawnMcpServer } from "../../services/mcpClient.mjs";
@@ -94,7 +96,9 @@ import { getAnsweredQuestion, recordAnsweredQuestion } from "../../services/sess
 import {
   loadSubagentRegistry, composeSubagentTools, resolveSubagentModel, describeAgents,
 } from "../../services/subagentRegistry.mjs";
-import { createWorktree, removeWorktree } from "../../services/worktreeManager.mjs";
+// Worktrees are created and removed THROUGH ctx.runtime (see the spawn_agent
+// case), so this module no longer imports the host worktree manager directly.
+// The runtime decides where a worktree can safely live.
 import { createTaskController, VERIFY_COMMAND_RE } from "../../services/taskController.mjs";
 import {
   extractWorktreeDiff, summarizeDiff, storePatch, getPatch, getPatchDiff,
@@ -259,22 +263,23 @@ export function buildPriorTurns(messages, {
   return picked.reverse();
 }
 
-const IGNORE_DIRS = new Set([
-  "node_modules", ".git", ".next", "dist", "build", "coverage", ".turbo",
-  ".cache", "out", ".agent-history", ".kodo", "uploads", "temp_audio",
-  ".claude", ".vscode", ".idea",
-]);
-
-const CODE_EXTENSIONS = new Set([
-  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
-  ".css", ".scss", ".json", ".md", ".yaml", ".yml", ".py", ".html", ".txt",
-]);
+// IGNORE_DIRS and CODE_EXTENSIONS are imported from core/runtime/host.mjs —
+// the traversal that uses them lives there now, and two copies of "which
+// directories are noise" would drift the moment one of them gained an entry.
 
 // ── Filesystem helpers ────────────────────────────────────────────────────────
-
-async function safeStat(p) {
-  try { return await fs.stat(p); } catch { return null; }
-}
+//
+// These no longer touch `fs` themselves. Every workspace read, write and
+// process launch goes through ctx.runtime (core/runtime/) so that selecting a
+// DockerRuntime or IncusRuntime actually moves ALL of it, not just bash. See
+// core/runtime/contract.mjs for what is inside the boundary and what is
+// deliberately outside it.
+//
+// safeResolve stays here and stays host-side on purpose: it is the CONFINEMENT
+// check ("does this path escape the workspace?"), which must happen before a
+// path is handed to any runtime. A runtime decides where an operation executes;
+// it is not responsible for deciding whether the agent was allowed to name that
+// path in the first place.
 
 function safeResolve(root, relPath) {
   const abs = path.resolve(root, String(relPath || "").trim());
@@ -284,16 +289,28 @@ function safeResolve(root, relPath) {
   return abs;
 }
 
-async function readFileSafe(absPath, maxBytes = MAX_FILE_BYTES) {
+/** Workspace-relative, POSIX form — the only shape allowed across the runtime boundary. */
+function toRel(root, absOrRel) {
+  const s = String(absOrRel || "");
+  const rel = path.isAbsolute(s) ? path.relative(root, s) : s;
+  return rel.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
+/**
+ * Host-side file read for paths OUTSIDE the workspace — built-in skill packs
+ * shipped with Kodo, and Kodo's own control-plane files. Workspace content must
+ * never come through here; it goes through the runtime.
+ */
+async function readHostFile(absPath, maxBytes = MAX_FILE_BYTES) {
   try {
-    const stat = await safeStat(absPath);
+    const stat = await fs.stat(absPath).catch(() => null);
     if (!stat?.isFile()) return null;
     if (stat.size > maxBytes) {
       const fd = await fs.open(absPath, "r");
       const buf = Buffer.alloc(maxBytes);
       await fd.read(buf, 0, maxBytes, 0);
       await fd.close();
-      return buf.toString("utf-8") + `\n\n... [truncated at ${maxBytes} bytes — use start_line/end_line to read more]`;
+      return `${buf.toString("utf-8")}\n\n... [truncated at ${maxBytes} bytes — use start_line/end_line to read more]`;
     }
     return await fs.readFile(absPath, "utf-8");
   } catch { return null; }
@@ -314,28 +331,17 @@ function looksBinary(str) {
   return bad / Math.max(1, sample.length) > 0.1;
 }
 
-export async function walkWorkspace(root, maxDepth = 8, currentDepth = 0) {
-  const results = [];
-  if (currentDepth > maxDepth) return results;
-  let entries;
-  try { entries = await fs.readdir(root, { withFileTypes: true }); }
-  catch { return results; }
-
-  for (const entry of entries) {
-    if (IGNORE_DIRS.has(entry.name)) continue;
-    const abs = path.join(root, entry.name);
-    const rel = entry.name;
-    const ext = path.extname(entry.name).toLowerCase();
-
-    if (entry.isDirectory()) {
-      results.push({ path: rel, isDir: true });
-      const children = await walkWorkspace(abs, maxDepth, currentDepth + 1);
-      results.push(...children.map((c) => ({ ...c, path: `${rel}/${c.path}` })));
-    } else if (CODE_EXTENSIONS.has(ext)) {
-      results.push({ path: rel, isDir: false });
-    }
-  }
-  return results;
+/**
+ * Project file tree.
+ *
+ * Kept as a standalone export because it is also used OUTSIDE an agent run —
+ * `/init` and `kodo init` inspect a repository on the host before any runtime
+ * exists. Inside a run the loop uses `ctx.runtime.walk()` instead, which is the
+ * same traversal executed wherever the runtime lives; both share HostRuntime's
+ * implementation so the two can never drift apart.
+ */
+export async function walkWorkspace(root, maxDepth = 8) {
+  return new HostRuntime({ root }).walk("", maxDepth);
 }
 
 function langFromExt(p) {
@@ -680,55 +686,21 @@ export function validateBashCommand(command, permissions = {}) {
   return null;
 }
 
-// Portable shell resolution: a hardcoded "/bin/zsh" only exists on macOS by
-// default and breaks every Linux/CI/Docker/Windows deployment outright. Prefer
-// the user's actual login shell, fall back to bash (near-universal on POSIX),
-// and use cmd.exe on Windows via its own argument convention.
-function resolveShell() {
-  if (process.platform === "win32") {
-    return { bin: process.env.ComSpec || "cmd.exe", flag: "/c" };
+/**
+ * Run a command through a runtime.
+ *
+ * `runtime` is required and comes first. That ordering is deliberate: this used
+ * to be `runBash(command, cwd, timeout)` executing directly on the host, and
+ * making the runtime an optional trailing argument would have let a forgotten
+ * call site keep running on the host under a sandbox flag — silently, and
+ * exactly where it matters most. A missing runtime is now a TypeError at the
+ * call site, in tests, rather than a security hole in production.
+ */
+function runBash(runtime, command, { cwd = null, timeoutMs = 120_000 } = {}) {
+  if (!runtime || typeof runtime.exec !== "function") {
+    throw new TypeError("runBash requires an ExecutionRuntime — see core/runtime/contract.mjs");
   }
-  return { bin: process.env.SHELL || "/bin/bash", flag: "-c" };
-}
-
-// Child processes must not inherit the server's secrets. An allowlisted `npm`
-// script / postinstall hook / `env`-reading tool would otherwise see
-// OPENAI_API_KEY and every other credential in process.env and could exfiltrate
-// it. Strip anything that looks like a secret; keep PATH/HOME/SHELL so tooling
-// still works.
-function runBash(command, cwd, timeoutMs = 120_000) {
-  return new Promise((resolve) => {
-    const { bin, flag } = resolveShell();
-    const child = spawn(bin, [flag, command], {
-      cwd,
-      stdio: ["ignore", "pipe", "pipe"],
-      env: sanitizedChildEnv(),
-    });
-
-    let stdout = "";
-    let stderr = "";
-    child.stdout.on("data", (d) => { if (stdout.length < 200_000) stdout += d.toString(); });
-    child.stderr.on("data", (d) => { if (stderr.length < 200_000) stderr += d.toString(); });
-
-    const timer = setTimeout(() => {
-      child.kill("SIGTERM");
-      setTimeout(() => { if (!child.killed) child.kill("SIGKILL"); }, 3000);
-    }, timeoutMs);
-
-    child.on("close", (code, signal) => {
-      clearTimeout(timer);
-      resolve({
-        exit_code: code,
-        timed_out: signal === "SIGTERM" || signal === "SIGKILL",
-        stdout: stdout.slice(0, MAX_TOOL_OUTPUT_CHARS / 2),
-        stderr: stderr.slice(0, MAX_TOOL_OUTPUT_CHARS / 2),
-      });
-    });
-    child.on("error", (err) => {
-      clearTimeout(timer);
-      resolve({ exit_code: null, stdout, stderr: `${stderr}\n${err.message}`.trim() });
-    });
-  });
+  return runtime.exec(command, { cwd, timeoutMs });
 }
 
 // ── Background bash tasks (Claude Code-style run_in_background) ──────────────
@@ -744,111 +716,43 @@ function runBash(command, cwd, timeoutMs = 120_000) {
 // different port). Tasks live for the life of the server process — an
 // in-memory registry is enough for a dev tool, no persistence needed.
 
-const BACKGROUND_TASKS = new Map(); // task_id -> { id, command, cwd, child, startedAt, outputFile, status, exitCode }
-const MAX_TRACKED_TASKS = 20;
-let _taskCounter = 0;
+// Background tasks now live in the runtime that owns them (see
+// core/runtime/host.mjs). That is not bookkeeping tidiness: a background
+// process started inside a container must be tracked, polled and killed inside
+// that container, and a module-level registry here would have been a host-side
+// map of host-side PIDs — which is precisely how "run_in_background is
+// sandboxed" turns out to be false.
 
-function nextTaskId() {
-  _taskCounter++;
-  return `bg_${Date.now().toString(36)}_${_taskCounter}`;
-}
-
-// Bound the registry: once it's full, evict the oldest EXITED task (never a
-// still-running one) to make room. A long-lived server process would
-// otherwise accumulate an unbounded number of dead entries.
-function pruneBackgroundTasks() {
-  if (BACKGROUND_TASKS.size < MAX_TRACKED_TASKS) return;
-  for (const [id, task] of BACKGROUND_TASKS) {
-    if (task.status === "exited") { BACKGROUND_TASKS.delete(id); return; }
+async function runBashBackground(runtime, command, { cwd = null } = {}) {
+  if (!runtime || typeof runtime.execBackground !== "function") {
+    throw new TypeError("runBashBackground requires an ExecutionRuntime");
   }
+  return runtime.execBackground(command, { cwd });
 }
 
-async function runBashBackground(command, root, cwd) {
-  const tasksDir = path.join(root, ".kodo", "tasks");
-  await fs.mkdir(tasksDir, { recursive: true });
-  const id = nextTaskId();
-  const outputFile = path.join(tasksDir, `${id}.output`);
-  await fs.writeFile(outputFile, "");
-
-  const { bin, flag } = resolveShell();
-  const child = spawn(bin, [flag, command], {
-    cwd,
-    stdio: ["ignore", "pipe", "pipe"],
-    env: sanitizedChildEnv(),
-    detached: process.platform !== "win32", // own process group, so kill_shell can stop the whole tree (e.g. npm + the vite it spawns)
-  });
-  child.unref();
-
-  const appendOutput = (buf) => { fs.appendFile(outputFile, buf.toString()).catch(() => {}); };
-  child.stdout.on("data", appendOutput);
-  child.stderr.on("data", appendOutput);
-
-  pruneBackgroundTasks();
-  const task = { id, command, cwd, child, startedAt: Date.now(), outputFile, status: "running", exitCode: null };
-  child.on("close", (code) => { task.status = "exited"; task.exitCode = code; });
-  child.on("error", (err) => { task.status = "exited"; appendOutput(`\n[process error: ${err.message}]\n`); });
-  BACKGROUND_TASKS.set(id, task);
-
-  return { id, outputFile: path.relative(root, outputFile) };
-}
-
-function killBackgroundTask(id) {
-  const task = BACKGROUND_TASKS.get(id);
-  if (!task) return { success: false, error: `No background task "${id}" — check the id, or it may have already exited and been cleaned up.` };
-  if (task.status === "exited") return { success: true, message: `Task ${id} (${task.command.slice(0, 80)}) had already exited (exit code ${task.exitCode}).` };
-  try {
-    if (process.platform === "win32") task.child.kill();
-    else process.kill(-task.child.pid, "SIGTERM"); // negative pid: whole process group
-  } catch {
-    try { task.child.kill("SIGTERM"); } catch { /* already gone */ }
+function killBackgroundTask(runtime, id) {
+  if (!runtime || typeof runtime.killBackground !== "function") {
+    throw new TypeError("killBackgroundTask requires an ExecutionRuntime");
   }
-  return { success: true, message: `Sent a stop signal to task ${id} (${task.command.slice(0, 80)}).` };
+  return runtime.killBackground(id);
 }
 
-async function readBackgroundTaskOutput(id) {
-  const task = BACKGROUND_TASKS.get(id);
-  if (!task) return { success: false, error: `No background task "${id}" — check the id, or it may have already exited and been cleaned up.` };
-  let output = "";
-  try { output = await fs.readFile(task.outputFile, "utf-8"); } catch { /* not written yet */ }
-  return {
-    success: true,
-    task_id: id,
-    command: task.command,
-    status: task.status,
-    exit_code: task.exitCode,
-    output: output.slice(-MAX_TOOL_OUTPUT_CHARS),
-  };
-}
-
-// ── grep (ripgrep-backed, grep fallback) ─────────────────────────────────────
-
-let _grepTool = null; // "rg" | "grep"
-async function detectGrepTool() {
-  if (_grepTool) return _grepTool;
-  const probeCmd = process.platform === "win32" ? "where rg" : "which rg";
-  const probe = await runBash(probeCmd, PROJECT_ROOT, 5000);
-  _grepTool = probe.exit_code === 0 ? "rg" : "grep";
-  return _grepTool;
-}
-
-function shellQuote(s) {
-  return `'${String(s).replace(/'/g, `'\\''`)}'`;
-}
-
-async function grepWorkspace(root, pattern, fileGlob) {
-  const tool = await detectGrepTool();
-  const excludes = [...IGNORE_DIRS];
-  let cmd;
-  if (tool === "rg") {
-    const globArg = fileGlob ? ` -g ${shellQuote(fileGlob)}` : "";
-    cmd = `rg -n --no-heading -S -m 200 --max-columns 240 ${excludes.map((d) => `-g '!${d}'`).join(" ")}${globArg} ${shellQuote(pattern)} .`;
-  } else {
-    const includeArg = fileGlob ? ` --include=${shellQuote(fileGlob)}` : "";
-    cmd = `grep -rn -i ${excludes.map((d) => `--exclude-dir=${d}`).join(" ")}${includeArg} ${shellQuote(pattern)} . | head -200`;
+async function readBackgroundTaskOutput(runtime, id) {
+  if (!runtime || typeof runtime.readBackgroundOutput !== "function") {
+    throw new TypeError("readBackgroundTaskOutput requires an ExecutionRuntime");
   }
-  const res = await runBash(cmd, root, 20_000);
-  const lines = (res.stdout || "").split("\n").filter(Boolean).slice(0, 120);
-  return { matches: lines, count: lines.length };
+  return runtime.readBackgroundOutput(id);
+}
+
+// ── grep ─────────────────────────────────────────────────────────────────────
+// The ripgrep/grep strategy lives in the runtime too, because "search the
+// workspace" has to mean "search wherever the workspace actually is".
+
+async function grepWorkspace(runtime, pattern, fileGlob) {
+  if (!runtime || typeof runtime.grep !== "function") {
+    throw new TypeError("grepWorkspace requires an ExecutionRuntime");
+  }
+  return runtime.grep(pattern, fileGlob);
 }
 
 // ── glob ──────────────────────────────────────────────────────────────────────
@@ -1078,7 +982,36 @@ async function analyzeScreenshotWithVision(visionCreds, { imagePath, promptConte
 }
 
 export async function verifyUi(args, ctx) {
-  const { root, mcpServers, mcpClients, visionCreds } = ctx;
+  const { root, mcpServers, mcpClients, visionCreds, runtime } = ctx;
+
+  // REFUSED UNDER A SANDBOX, for two independent reasons — either alone would
+  // be disqualifying:
+  //
+  //  1. It spawns a HOST Playwright MCP process (this is the one path that
+  //     reaches spawnMcpServer without going through discoverMcpTools, so the
+  //     sandbox gate there does not cover it), and it writes its screenshot to
+  //     the workspace with host `fs` rather than through the runtime. Both are
+  //     straightforward escapes from a confined run.
+  //
+  //  2. Even if those were fixed, it would be WRONG: verify_ui only accepts
+  //     loopback URLs, and a host browser's "localhost" is the host's, not the
+  //     container's. The dev server a sandboxed agent started lives inside the
+  //     sandbox — with `--network none` it is unreachable from the host at all.
+  //     The tool would confidently verify the wrong thing, or nothing.
+  //
+  // Failing closed says so instead. A runtime-aware browser (a browser inside
+  // the sandbox) is the real fix and is not implemented.
+  if (runtime?.isolated) {
+    return {
+      success: false,
+      error:
+        `verify_ui is not available under the ${runtime.name} sandbox. It drives a browser on the HOST, ` +
+        "so it would both escape the sandbox and check the host's localhost rather than the sandboxed " +
+        "dev server your commands actually started. Verify by running the project's own tests with bash, " +
+        "or re-run without --sandbox if you specifically need a browser check.",
+    };
+  }
+
   let url;
   try { url = new URL(String(args?.url || "").trim()); } catch { return { success: false, error: `Invalid URL: ${args?.url}` }; }
   if (!/^https?:$/.test(url.protocol)) return { success: false, error: "Only http/https URLs are allowed" };
@@ -1325,14 +1258,14 @@ function closeMcpClients(ctx) {
   }
 }
 
-async function runPostEditHook(root, relPath, hooks, emit) {
+async function runPostEditHook(runtime, relPath, hooks, emit) {
   const cmd = hooks?.postEdit;
   if (!cmd || typeof cmd !== "string") return;
   const finalCmd = cmd.replaceAll("{file}", shellQuote(relPath));
   const invalid = validateBashCommand(finalCmd);
   if (invalid) { console.warn(`[AgentLoop] postEdit hook rejected: ${invalid}`); return; }
   emit?.({ type: "progress", stage: "executing", message: `hook: ${finalCmd.slice(0, 80)}` });
-  const res = await runBash(finalCmd, root, 30_000);
+  const res = await runBash(runtime, finalCmd, { timeoutMs: 30_000 });
   if (res.exit_code !== 0) console.warn(`[AgentLoop] postEdit hook failed (${res.exit_code}): ${String(res.stderr).slice(0, 200)}`);
 }
 
@@ -1380,13 +1313,13 @@ function hasUnhedgedVerificationClaim(text) {
   return false;
 }
 
-export async function runStopHook(root, hooks, emit) {
+export async function runStopHook(runtime, hooks, emit) {
   const cmd = hooks?.stop;
   if (!cmd || typeof cmd !== "string") return { ran: false, passed: true, output: "" };
   const invalid = validateBashCommand(cmd);
   if (invalid) { console.warn(`[AgentLoop] stop hook rejected: ${invalid}`); return { ran: false, passed: true, output: "" }; }
   emit?.({ type: "progress", stage: "executing", message: `🔍 verify: ${cmd.slice(0, 80)}` });
-  const res = await runBash(cmd, root, 120_000);
+  const res = await runBash(runtime, cmd, { timeoutMs: 120_000 });
   return { ran: true, passed: res.exit_code === 0, output: `${res.stdout}\n${res.stderr}`.trim().slice(0, 3000) };
 }
 
@@ -2169,7 +2102,7 @@ async function runSubAgent(opts) {
   }
 }
 
-async function runSubAgentBody({ creds, root, description, task, workspaceSnapshot, hooks, permissions, emit, abortSignal, agent, tools, maxTurns, skillBlock }) {
+async function runSubAgentBody({ creds, root, runtime, description, task, workspaceSnapshot, hooks, permissions, emit, abortSignal, agent, tools, maxTurns, skillBlock }) {
   const label = String(description || "investigating").slice(0, 60);
   emit?.({ type: "progress", stage: "exploring", message: `🔍 sub-agent: ${label}` });
 
@@ -2199,6 +2132,12 @@ async function runSubAgentBody({ creds, root, description, task, workspaceSnapsh
     askUser: null,
     isSubAgent: true,
     creds,
+    // Sub-agents execute through the SAME runtime as their parent — a
+    // sub-agent that ran on the host while the parent was sandboxed would be a
+    // trivial escape. A worktree-isolated sub-agent gets a runtime derived for
+    // that checkout; a confined runtime that cannot reach the worktree refuses
+    // there rather than silently falling back (see derive()).
+    runtime,
   };
 
   // Precedence, lowest to highest: the agent's base prompt, then its skills,
@@ -2339,6 +2278,23 @@ Same rule for RUNNING something — "run the server", "start the frontend", "how
 - For UI/design/animation work: load the matching skill first (see list), respect the project's design tokens, and keep accessibility (contrast, reduced-motion) intact.
 - Never touch .env, secrets, lockfiles, or files outside the workspace.
 
+# Workspace questions — answer from evidence, never from assumption
+Some requests are questions, not edits: "where is the CLI stored", "which file contains the router", "where is auth implemented", "what files are in this project", "what framework does this project use". They still belong to you, because only you can look. Handle them as a SHORT, targeted inspection, not a full build loop:
+1. list_files at the relevant level (start at the root) to see what actually exists.
+2. Read the package manifest(s) when the question is about entry points, scripts, dependencies, or tooling — a \`bin\` field answers "where is the CLI" directly and exactly.
+3. grep/glob only to narrow further, with a DIFFERENT query each time — if two searches return nothing useful, change strategy (list the directory, read the manifest) instead of rephrasing the same search a third time.
+4. Answer in plain text with the real paths you just saw — state them, don't hedge ("likely", "probably", "typically" about a path in a workspace you can read is a non-answer), and don't ask the user for permission to look further: if confirming the answer needs one more read_file or list_files, just make the call. Then stop — don't edit anything, and don't keep exploring past the answer.
+Ground every path you name in real evidence: a tool result from this turn, or the workspace-layout listing below (that listing is this workspace, read at the start of this turn — but it is PARTIAL and depth-limited, so anything you can't actually see in it must be confirmed with a tool). Never state a path because memory, KODO.md, or the project's conventions imply it. A confidently wrong path is the worst possible answer to "where is X".
+Search broadly before you conclude, and never guess a full path in a glob — glob a BASENAME pattern (\`**/kodo_graph.mjs\`, \`**/*router*\`) or grep the symbol, so the answer doesn't depend on guessing the directory right. A guessed path that misses is not evidence the file is absent. If your first search misses, widen it or list the likely parent directory — and finish the search yourself rather than reporting failure or asking the user whether to keep looking. Only report "not found" after a genuinely broad search (basename glob AND grep) came back empty.
+
+# Honest failure — never fake a capability limit
+You HAVE workspace access: read_file, list_files, glob, grep, bash. So these statements are FORBIDDEN, because they are false:
+  "I can't access your workspace" / "I don't have visibility into your files" / "I can only reason about the public internet".
+When inspection doesn't produce an answer, say which of these actually happened:
+- A tool errored → report the real cause verbatim: "couldn't inspect the workspace — grep failed: ENOENT: no such file or directory". Never flatten a concrete error (ENOENT, permission denied, timeout, invalid path) into a vague access complaint.
+- The search ran fine but matched nothing → "searched the workspace and found no CLI entry point" — that is a finding about the PROJECT, not about your abilities.
+- You need something only the user has → ask with ask_user.
+
 # Don't work blind — ask when it matters
 Use ask_user before committing to a consequential guess: an ambiguous requirement with materially different implementations, a destructive/hard-to-reverse choice (deleting data, overwriting config, picking an irreversible approach), or missing information only the user has (which of several plausible targets, a credential/URL you don't have, a design preference with no existing convention to follow). Do NOT ask about anything discoverable by reading the code, grepping, or checking docs — do that instead. Do NOT ask about low-stakes details — just make a reasonable choice and mention it in your final summary. On your own initiative keep it to at most one or two questions per task, and never combine ask_user with other tool calls in the same turn.
 EXCEPTION — when the user EXPLICITLY asks to be prompted for several specific pieces of information ("ask me for the target environment, branch and region first"), that instruction overrides the limit above: ask for EVERY field they listed, one ask_user call per field, in the order they listed them, waiting for each answer before asking the next. Do not collapse them into a single combined question, do not skip fields, do not guess any of them, and do not answer with a plan instead of asking — the user asked to be prompted, so prompting IS the task. Only after every field is answered do you continue with the work.
@@ -2359,7 +2315,46 @@ ${snapshot}
 
 // ── Tool executor ─────────────────────────────────────────────────────────────
 
+/**
+ * Build a tool context with a runtime attached.
+ *
+ * Exported so callers that assemble a context by hand — tests, and any future
+ * embedder — get a real runtime explicitly rather than having executeTool
+ * quietly manufacture one. That distinction matters: a default-to-host fallback
+ * inside executeTool would mean a caller who forgot to pass a runtime still
+ * runs, on the host, under whatever sandbox flag the user thought they set.
+ * Here the choice is visible at the call site; there it would be invisible.
+ */
+export function createToolContext({ root, runtime = null, ...rest } = {}) {
+  if (!root) throw new Error("createToolContext requires a workspace root");
+  return {
+    root,
+    runtime: runtime || new HostRuntime({ root }),
+    emit: null,
+    sessionId: "ctx",
+    requestId: "ctx",
+    hooks: {},
+    permissions: undefined,
+    editedFiles: new Map(),
+    readFiles: new Set(),
+    bashCommands: [],
+    todosRef: { current: [] },
+    workspaceSnapshot: [],
+    permissionMode: "auto",
+    ...rest,
+  };
+}
+
 export async function executeTool(name, args, ctx) {
+  // A context without a runtime is a programming error, and it must surface as
+  // one. Substituting a host runtime here is the single change that would turn
+  // every sandbox guarantee in this file into a suggestion.
+  if (!ctx?.runtime) {
+    throw new TypeError(
+      "executeTool: ctx.runtime is required — build the context with createToolContext(). " +
+      "Tools must never fall back to direct host access.",
+    );
+  }
   const { root, emit, sessionId, requestId, hooks, permissions, editedFiles, todosRef, permissionMode, askUser, creds, isSubAgent, workspaceSnapshot, abortSignal } = ctx;
   if (args && typeof args === "object" && args.__kodo_parse_error__) {
     return {
@@ -2376,7 +2371,7 @@ export async function executeTool(name, args, ctx) {
           return { success: false, error: `Reading ${relPath} is blocked — it holds secrets/credentials. The agent is not allowed to load secret files into context.` };
         }
         const absPath = safeResolve(root, relPath);
-        const content = await readFileSafe(absPath);
+        const content = await ctx.runtime.readFile(relPath, MAX_FILE_BYTES);
         if (content === null) return { success: false, error: `File not found: ${relPath}` };
         // Never dump binary bytes into the conversation — it corrupts the
         // request and makes providers 400. PDFs/images are handled elsewhere
@@ -2411,7 +2406,7 @@ export async function executeTool(name, args, ctx) {
         if (oldString === newString) return { success: false, error: "old_string and new_string are identical" };
         if (isSensitiveFilePath(relPath)) return { success: false, error: `Editing ${relPath} is blocked — the agent may not modify secret/credential files.` };
         const absPath = safeResolve(root, relPath);
-        const original = await readFileSafe(absPath);
+        const original = await ctx.runtime.readFile(relPath, MAX_FILE_BYTES);
         if (original === null) return { success: false, error: `File not found: ${relPath}. Use write_file to create new files.` };
         if (!ctx.readFiles.has(relPath)) return { success: false, error: `Read ${relPath} first (read_file) before editing it.` };
 
@@ -2433,8 +2428,8 @@ export async function executeTool(name, args, ctx) {
         }
 
         await snapshotForUndo(root, sessionId, requestId, relPath, absPath);
-        await writeFileAtomic(absPath, updated);
-        await runPostEditHook(root, relPath, hooks, emit);
+        await ctx.runtime.writeFile(relPath, updated);
+        await runPostEditHook(ctx.runtime, relPath, hooks, emit);
         editedFiles.set(relPath, editedFiles.get(relPath) || "edit");
         ctx.readFiles.add(relPath);
 
@@ -2457,7 +2452,7 @@ export async function executeTool(name, args, ctx) {
         if (!content.trim()) return { success: false, error: "content is empty — to create an empty file use bash `touch`" };
         if (isSensitiveFilePath(relPath)) return { success: false, error: `Writing ${relPath} is blocked — the agent may not create or overwrite secret/credential files.` };
         const absPath = safeResolve(root, relPath);
-        const existing = await readFileSafe(absPath);
+        const existing = await ctx.runtime.readFile(relPath, MAX_FILE_BYTES);
         if (existing !== null && !ctx.readFiles.has(relPath)) {
           return { success: false, error: `${relPath} already exists — read it first, then use edit_file for changes (or write_file after reading, for a deliberate full rewrite).` };
         }
@@ -2477,8 +2472,8 @@ export async function executeTool(name, args, ctx) {
         }
 
         await snapshotForUndo(root, sessionId, requestId, relPath, absPath);
-        await writeFileAtomic(absPath, content);
-        await runPostEditHook(root, relPath, hooks, emit);
+        await ctx.runtime.writeFile(relPath, content);
+        await runPostEditHook(ctx.runtime, relPath, hooks, emit);
         const action = existing === null ? "create" : "edit";
         editedFiles.set(relPath, action);
         ctx.readFiles.add(relPath);
@@ -2536,7 +2531,7 @@ export async function executeTool(name, args, ctx) {
         ctx.bashCommands?.push(command);
 
         if (args.run_in_background) {
-          const { id, outputFile } = await runBashBackground(command, root, root);
+          const { id, outputFile } = await runBashBackground(ctx.runtime, command);
           emit?.({ type: "progress", stage: "executing", message: `$ ${command.slice(0, 100)} (background: ${id})` });
           return {
             success: true,
@@ -2549,38 +2544,58 @@ export async function executeTool(name, args, ctx) {
 
         const timeout = Math.min(Number(args.timeout_ms) || 120_000, 300_000);
         emit?.({ type: "progress", stage: "executing", message: `$ ${command.slice(0, 100)}` });
-        const res = await runBash(command, root, timeout);
+        const res = await runBash(ctx.runtime, command, { timeoutMs: timeout });
         return { success: res.exit_code === 0, ...res };
       }
 
       case "bash_output": {
         const taskId = String(args.task_id || "").trim();
         if (!taskId) return { success: false, error: "task_id is required" };
-        return await readBackgroundTaskOutput(taskId);
+        return await readBackgroundTaskOutput(ctx.runtime, taskId);
       }
 
       case "kill_shell": {
         const taskId = String(args.task_id || "").trim();
         if (!taskId) return { success: false, error: "task_id is required" };
         emit?.({ type: "progress", stage: "executing", message: `⏹ stopping background task ${taskId}` });
-        return killBackgroundTask(taskId);
+        return killBackgroundTask(ctx.runtime, taskId);
       }
 
       case "grep": {
         const pattern = String(args.pattern || "").trim();
         if (!pattern) return { success: false, error: "pattern is required" };
         emit?.({ type: "progress", stage: "exploring", message: `grep "${pattern.slice(0, 60)}"` });
-        const { matches, count } = await grepWorkspace(root, pattern, args.glob ? String(args.glob) : null);
+        const { matches, count } = await grepWorkspace(ctx.runtime, pattern, args.glob ? String(args.glob) : null);
         return { success: true, pattern, count, matches };
       }
 
       case "glob": {
         const pattern = String(args.pattern || "").trim();
         if (!pattern) return { success: false, error: "pattern is required" };
-        const re = globToRegex(pattern.startsWith("**/") || pattern.includes("/") ? pattern : `**/${pattern}`);
-        const files = ctx.workspaceSnapshot.filter((f) => !f.isDir && re.test(f.path)).map((f) => f.path).slice(0, 100);
+        const match = (p) => {
+          const re = globToRegex(p);
+          return ctx.workspaceSnapshot.filter((f) => !f.isDir && re.test(f.path)).map((f) => f.path).slice(0, 100);
+        };
+        const anchored = pattern.startsWith("**/") || pattern.includes("/") ? pattern : `**/${pattern}`;
+        let files = match(anchored);
+
+        // A path-shaped pattern ("agents/kodo_graph.mjs") is anchored at the
+        // workspace root, so in a monorepo it silently misses the real file at
+        // backend1/agents/kodo_graph.mjs. The model then reports the file as
+        // absent — a wrong answer produced by a guessed directory, not by the
+        // file being missing. Retry the same pattern as a suffix before
+        // concluding nothing matched, and say so in the result.
+        let note;
+        if (!files.length && anchored.includes("/") && !anchored.startsWith("**/")) {
+          const suffix = `**/${anchored}`;
+          files = match(suffix);
+          if (files.length) note = `No match anchored at the workspace root; these matched "${suffix}" instead (the path you guessed was relative to a subproject, not the root).`;
+        }
+        if (!files.length) {
+          note = `No file matches "${pattern}". This does NOT mean it doesn't exist — a path-shaped pattern must match from the workspace root. Retry with just the basename ("**/${anchored.split("/").pop()}"), a wildcard on the name, or grep the symbol.`;
+        }
         emit?.({ type: "progress", stage: "exploring", message: `glob ${pattern} — ${files.length} file(s)` });
-        return { success: true, pattern, files };
+        return { success: true, pattern, files, ...(note ? { note } : {}) };
       }
 
       case "list_files": {
@@ -2692,7 +2707,13 @@ export async function executeTool(name, args, ctx) {
         // to running against the live workspace.
         let worktree = null;
         if (agent.isolation === "worktree") {
-          const created = await createWorktree({ workspacePath: root, subagentId, sessionId });
+          // THROUGH THE RUNTIME. This used to call the host worktree manager
+          // directly, which created a real git checkout in the host's /tmp even
+          // when the parent was sandboxed — a host filesystem write from a
+          // confined run, and a directory the agent could not then see. The
+          // runtime now decides where its worktrees live: a temp dir on the
+          // host, a path inside the container under a sandbox.
+          const created = await ctx.runtime.createWorktree({ subagentId, sessionId });
           if (!created.ok) return { success: false, error: created.error };
           worktree = created.worktree;
           emit?.({ type: "progress", stage: "exploring", message: `🌳 isolated worktree for ${agent.name}` });
@@ -2723,6 +2744,10 @@ export async function executeTool(name, args, ctx) {
           // THE isolation boundary: safeResolve() confines every path tool to
           // this root, so the subagent cannot escape its worktree.
           root: worktree ? worktree.path : root,
+          // Same runtime as the parent, re-rooted when the sub-agent has its
+          // own worktree. derive() is where a confined runtime refuses a root
+          // it cannot actually reach, instead of quietly returning a host one.
+          runtime: worktree ? ctx.runtime.derive(worktree.path) : ctx.runtime,
           description: String(args.description || "").trim() || agent.description,
           task,
           workspaceSnapshot: worktree ? [] : workspaceSnapshot,
@@ -2748,7 +2773,7 @@ export async function executeTool(name, args, ctx) {
         const capturePatch = async () => {
           if (!worktree || !agent.writeCapable) return null;
           try {
-            const diff = await extractWorktreeDiff(worktree.path);
+            const diff = await extractWorktreeDiff(ctx.runtime, worktree.path);
             if (!diff.ok) return { error: diff.error };
             if (diff.empty) return { empty: true };
             const summary = summarizeDiff(diff, root);
@@ -2762,7 +2787,7 @@ export async function executeTool(name, args, ctx) {
           }
         };
 
-        const cleanupWorktree = async () => (worktree ? removeWorktree(worktree.worktreeId) : null);
+        const cleanupWorktree = async () => (worktree ? ctx.runtime.removeWorktree(worktree.worktreeId) : null);
 
         // ── background: true ───────────────────────────────────────────────
         // Returns immediately with a task id; the subagent keeps running on
@@ -2858,7 +2883,7 @@ export async function executeTool(name, args, ctx) {
           if (permissionMode === "plan") {
             return { success: false, error: "Plan mode — patches cannot be applied. Present the review as text instead." };
           }
-          const res = await applyPatch(patchId, { workspaceRoot: root });
+          const res = await applyPatch(patchId, { workspaceRoot: root, runtime: ctx.runtime });
           if (!res.ok) return { success: false, error: res.error, blocked: !!res.blocked };
           for (const f of res.files) ctx.editedFiles.set(f, "edit");
           emit?.({ type: "progress", stage: "executing", message: `✅ applied patch ${patchId} (${res.files.length} file(s))` });
@@ -3033,15 +3058,23 @@ export const WEB_SEARCH_DIRECTIVE = webSearchDirective();
 const MARKER_RE = /(?:^|\s)(?:\/\/+|\/\*+|\*+|#+|<!--)\s*(TODO|FIXME|XXX|HACK)\b[:\s]?(.*)$/i;
 const MAX_MARKER_FILES = 24;
 
-export async function findUnresolvedMarkers(root, relPaths) {
+/**
+ * Scan files the agent just edited for TODO/FIXME markers it left behind.
+ *
+ * Takes a RUNTIME, not a root: these are workspace source files the agent wrote,
+ * so they must be read wherever the workspace actually lives. Reading them from
+ * the host while the agent had been writing inside a container would report
+ * markers from stale content — or none at all — and the completion check would
+ * silently pass on evidence it never actually saw.
+ */
+export async function findUnresolvedMarkers(runtime, relPaths) {
+  if (!runtime || typeof runtime.readFile !== "function") {
+    throw new TypeError("findUnresolvedMarkers requires an ExecutionRuntime");
+  }
   const out = [];
   for (const rel of relPaths.slice(0, MAX_MARKER_FILES)) {
-    let content;
-    try {
-      content = await fs.readFile(path.resolve(root, rel), "utf-8");
-    } catch {
-      continue; // deleted or unreadable — nothing to resolve
-    }
+    const content = await runtime.readFile(rel, 400_000);
+    if (content === null) continue; // deleted or unreadable — nothing to resolve
     if (content.length > 400_000) continue;
     const lines = content.split("\n");
     for (let i = 0; i < lines.length; i++) {
@@ -3067,6 +3100,7 @@ export async function agentLoopNode(state) {
     rememberedTargetFile = "", sessionId, requestId,
     permissionMode = "auto", approvalPromise = null, abortSignal = null,
     askUser = null, priorMessages = [], priorConversation = [], recordEvent = null,
+    runtime: providedRuntime = null,
   } = state;
 
   const runStartedAt = Date.now();
@@ -3084,12 +3118,37 @@ export async function agentLoopNode(state) {
     return { finalAnswer: msg, editedFiles: [], messages: [new AIMessage(msg)] };
   }
 
+  // The runtime is chosen by the caller (graph_runner → the CLI's --sandbox) and
+  // defaults to this machine. It is created and started BEFORE anything reads
+  // the workspace, because from here on every workspace read goes through it.
+  //
+  // loadKodoSettings/loadMemoryIndex/loadSkillIndex/loadSubagentRegistry stay
+  // host-side: they are the CONFIGURATION that decides what the runtime may do
+  // (permissions, hooks, which MCP servers may start), and consulting the
+  // sandbox about the rules governing the sandbox would be circular. Everything
+  // that is workspace CONTENT — the file tree, KODO.md, every file a tool
+  // touches — goes through the runtime.
+  const runtime = providedRuntime || new HostRuntime({ root });
+  assertRuntime(runtime);
+  await runtime.start();
+
+  // Honest-fallback contract, case 2: workspace query + no workspace. Saying
+  // "no workspace is connected" is only truthful when the root genuinely isn't
+  // there — so it's established here, once, from the runtime itself, instead of
+  // being guessed later by a model that failed a tool call.
+  const rootStat = await runtime.stat("");
+  if (!rootStat?.isDirectory) {
+    const msg = `No workspace is currently connected (${root} is not an accessible directory). Connect a workspace and I'll inspect it.`;
+    emit?.({ type: "content", content: msg });
+    return { finalAnswer: msg, editedFiles: [], messages: [new AIMessage(msg)] };
+  }
+
   const [workspaceSnapshot, memoryIndex, skillIndex, kodoSettings, kodoMd, subagentRegistry] = await Promise.all([
-    walkWorkspace(root, 8),
+    runtime.walk("", 8),
     loadMemoryIndex(root),
     loadSkillIndex(root),
     loadKodoSettings(root),
-    readFileSafe(path.join(root, "KODO.md"), 24_000),
+    runtime.readFile("KODO.md", 24_000),
     loadSubagentRegistry(root),
   ]);
   for (const err of subagentRegistry.errors) console.warn(`[Subagent] ${err}`);
@@ -3101,6 +3160,10 @@ export async function agentLoopNode(state) {
   const msgLower = cleanMessage.toLowerCase();
   const ctx = {
     root, emit, sessionId, requestId, hooks, permissions, mcpServers,
+    // Every workspace read/write and every process launch in executeTool goes
+    // through this. It is not optional and has no fallback: a tool that finds
+    // ctx.runtime missing must fail loudly, not quietly use the host.
+    runtime,
     editedFiles: new Map(),
     readFiles: new Set(),
     bashCommands: [], // every bash command actually run this turn — backs the anti-fabrication check below
@@ -3135,6 +3198,11 @@ export async function agentLoopNode(state) {
     cwd: root,
     signal: abortSignal,
     emit,
+    // A project's `command` hooks run wherever the agent's other commands run.
+    // PreToolUse/PostToolUse fire inside every tool call, so leaving these on
+    // the host meant a sandboxed run executed project shell on the host
+    // hundreds of times per task.
+    runtime: ctx.runtime,
     deps: {
       callMcpTool: (tool, toolArgs) => callMcpTool(tool, toolArgs, { routes: ctx.mcpRoutes, mcpClients: ctx.mcpClients }),
       // A `prompt` hook is a single-turn evaluation with no tools — the
@@ -3160,6 +3228,9 @@ export async function agentLoopNode(state) {
   // skipped, never fatal (see discoverMcpTools).
   const { tools: mcpTools, routes: mcpRoutes, servers: mcpServerStatus } = await discoverMcpTools({
     mcpServers, cwd: root, mcpClients: ctx.mcpClients, emit,
+    // Lets discovery refuse HOST stdio servers when this run is sandboxed —
+    // one such server would otherwise hand the agent a complete bypass.
+    runtime,
     // Lets a server ask US to run a completion (sampling/createMessage) using
     // the same model this run is on, capped inside makeSamplingHandler.
     sampling: { chat: chatWithTools, creds },
@@ -3189,7 +3260,8 @@ export async function agentLoopNode(state) {
     if (f.isDir || seedBlocks.length >= 3) continue;
     if (isSensitiveFilePath(f.path)) continue; // never auto-preload a secret file
     if (msgLower.includes(f.path.toLowerCase())) {
-      const content = await readFileSafe(safeResolve(root, f.path));
+      safeResolve(root, f.path); // confinement check before it crosses the boundary
+      const content = await ctx.runtime.readFile(f.path, MAX_FILE_BYTES);
       if (content && content.length < 60_000) {
         ctx.readFiles.add(f.path);
         seedBlocks.push(`<file path="${f.path}">\n${content}\n</file>`);
@@ -3455,7 +3527,7 @@ export async function agentLoopNode(state) {
           // computed for resume tasks — see the leftover-marker gate in
           // taskController for why the check is scoped that narrowly.
           unresolvedMarkers: ctx.taskController.shape === "resume"
-            ? await findUnresolvedMarkers(root, [...ctx.editedFiles.keys()])
+            ? await findUnresolvedMarkers(ctx.runtime, [...ctx.editedFiles.keys()])
             : [],
         });
         if (!gate.allowed) {
@@ -3762,7 +3834,7 @@ export async function agentLoopNode(state) {
   let stopHookPassed = false;
   let stopHookRan = false;
   if (!abortSignal?.aborted && ctx.editedFiles.size > 0) {
-    let result = await runStopHook(root, hooks, emit);
+    let result = await runStopHook(ctx.runtime, hooks, emit);
     let attempt = 0;
 
     // The hook still RUNS after an early stop — the user deserves to know the
@@ -3779,7 +3851,7 @@ export async function agentLoopNode(state) {
       });
       await runToolLoop({ iterationBudget: 8, approvalState: null });
       // The fix pass streamed its own narration live; re-check the real state.
-      result = await runStopHook(root, hooks, null);
+      result = await runStopHook(ctx.runtime, hooks, null);
     }
 
     const note = !result.ran

@@ -12,6 +12,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import http from "http";
 import path from "path";
 import fs from "fs/promises";
@@ -364,6 +365,7 @@ function loopCtx(hookRaw, overrides = {}) {
   const config = cfg(hookRaw);
   return {
     root: tmp, emit: null, sessionId: "s", requestId: "r",
+    runtime: new HostRuntime({ root: tmp }),
     hooks: {}, editedFiles: new Map(), readFiles: new Set(),
     todosRef: { current: [] }, workspaceSnapshot: [], permissionMode: "auto",
     mcpClients: new Map(), mcpRoutes: new Map(),

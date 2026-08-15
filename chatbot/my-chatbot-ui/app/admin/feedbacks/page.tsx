@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { KODO_API_ORIGIN } from "../../lib/api";
 
 /* ── Types ─────────────────────────────────────────────────── */
 
@@ -292,7 +293,7 @@ function FeedbackCard({
     setDeleting(true);
     try {
       await fetch(
-        `http://localhost:9000/api/feedback/${fb.id}?email=${encodeURIComponent(OWNER_EMAIL)}`,
+        `${KODO_API_ORIGIN}/api/feedback/${fb.id}?email=${encodeURIComponent(OWNER_EMAIL)}`,
         { method: "DELETE" }
       );
       onDelete(fb.id);
@@ -434,7 +435,7 @@ function AdminDashboard({ email, onLogout }: { email: string; onLogout: () => vo
   const fetchFeedbacks = async () => {
     try {
       const res = await fetch(
-        `http://localhost:9000/api/feedback/admin?email=${encodeURIComponent(OWNER_EMAIL)}`
+        `${KODO_API_ORIGIN}/api/feedback/admin?email=${encodeURIComponent(OWNER_EMAIL)}`
       );
       const data: AdminResponse = await res.json();
       if (data.ok) {

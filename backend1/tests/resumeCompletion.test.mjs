@@ -18,6 +18,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import fs from "fs/promises";
 import path from "path";
 import os from "os";
@@ -154,7 +155,7 @@ await test("markers are found from disk, with file and line", async () => {
   await withFiles(
     { "src/P.tsx": `export function P() {\n  // TODO: close on Escape\n  return <div/>;\n}\n` },
     async (dir) => {
-      const markers = await findUnresolvedMarkers(dir, ["src/P.tsx"]);
+      const markers = await findUnresolvedMarkers(new HostRuntime({ root: dir }), ["src/P.tsx"]);
       assert.strictEqual(markers.length, 1);
       assert.strictEqual(markers[0].file, "src/P.tsx");
       assert.strictEqual(markers[0].line, 2);
@@ -167,7 +168,7 @@ await test("FIXME, XXX and HACK all count; block comments too", async () => {
   await withFiles(
     { "a.ts": `/* FIXME: broken */\n// XXX: revisit\n# HACK: temporary\n/** TODO: finish */\n` },
     async (dir) => {
-      const markers = await findUnresolvedMarkers(dir, ["a.ts"]);
+      const markers = await findUnresolvedMarkers(new HostRuntime({ root: dir }), ["a.ts"]);
       assert.strictEqual(markers.length, 4, JSON.stringify(markers));
     }
   );
@@ -179,7 +180,7 @@ await test("durable pragmas are NOT unfinished work", async () => {
       "a.ts": `// eslint-disable-next-line no-console\n// @ts-expect-error legacy shim\n// prettier-ignore\nexport const x = 1;\n`,
     },
     async (dir) => {
-      assert.deepStrictEqual(await findUnresolvedMarkers(dir, ["a.ts"]), [],
+      assert.deepStrictEqual(await findUnresolvedMarkers(new HostRuntime({ root: dir }), ["a.ts"]), [],
         "config directives are permanent, not a record of unfinished work");
     }
   );
@@ -189,14 +190,14 @@ await test("a word merely containing 'todo' is not a marker", async () => {
   await withFiles(
     { "a.ts": `const todoList = [];\nexport function addTodo() { return todoList; }\n` },
     async (dir) => {
-      assert.deepStrictEqual(await findUnresolvedMarkers(dir, ["a.ts"]), []);
+      assert.deepStrictEqual(await findUnresolvedMarkers(new HostRuntime({ root: dir }), ["a.ts"]), []);
     }
   );
 });
 
 await test("a deleted or unreadable file is skipped, not thrown on", async () => {
   await withFiles({ "a.ts": "// TODO: x\n" }, async (dir) => {
-    const markers = await findUnresolvedMarkers(dir, ["a.ts", "gone.ts"]);
+    const markers = await findUnresolvedMarkers(new HostRuntime({ root: dir }), ["a.ts", "gone.ts"]);
     assert.strictEqual(markers.length, 1);
   });
 });
@@ -207,7 +208,7 @@ await test("a resume that leaves its markers behind is pushed back", async () =>
       "src/P.tsx": `export function P() {\n  // TODO: close on Escape\n  // TODO: run the selected command on Enter\n  return <div/>;\n}\n`,
     },
     async (dir) => {
-      const markers = await findUnresolvedMarkers(dir, ["src/P.tsx"]);
+      const markers = await findUnresolvedMarkers(new HostRuntime({ root: dir }), ["src/P.tsx"]);
       const c = createTaskController({ task: "Resume the palette work in src/P.tsx and wire it up so it actually works." });
       edits(c, "src/P.tsx", "src/App.tsx");
       const gate = c.canFinish({

@@ -7,6 +7,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
@@ -33,6 +34,9 @@ const tmpRoot = await fs.mkdtemp(path.join(os.tmpdir(), "kodo-agent-test-"));
 function makeCtx(overrides = {}) {
   return {
     root: tmpRoot,
+    // Tools execute through a runtime now; the host one is the default and
+    // behaves exactly as the direct fs/spawn calls it replaced.
+    runtime: new HostRuntime({ root: tmpRoot }),
     emit: null,
     sessionId: "sess_test",
     requestId: `req_test_${Date.now()}`,
@@ -520,26 +524,26 @@ await test("accepts an object (non-string) argument", () => {
 console.log("\n📦 runStopHook (project-declared verification)");
 
 await test("no stop hook configured → nothing runs, no claim is made", async () => {
-  const r = await runStopHook(tmpRoot, {}, null);
+  const r = await runStopHook(new HostRuntime({ root: tmpRoot }), {}, null);
   assert.strictEqual(r.ran, false);
   assert.strictEqual(r.passed, true);
 });
 
 await test("a passing stop command reports ran + passed", async () => {
-  const r = await runStopHook(tmpRoot, { stop: "true" }, null);
+  const r = await runStopHook(new HostRuntime({ root: tmpRoot }), { stop: "true" }, null);
   assert.strictEqual(r.ran, true);
   assert.strictEqual(r.passed, true);
 });
 
 await test("a failing stop command reports ran + not passed, with output captured", async () => {
-  const r = await runStopHook(tmpRoot, { stop: "echo 'type error on line 4' && test 1 = 2" }, null);
+  const r = await runStopHook(new HostRuntime({ root: tmpRoot }), { stop: "echo 'type error on line 4' && test 1 = 2" }, null);
   assert.strictEqual(r.ran, true);
   assert.strictEqual(r.passed, false);
   assert.ok(r.output.includes("type error on line 4"));
 });
 
 await test("a stop command that violates the bash safety policy is rejected, not silently run", async () => {
-  const r = await runStopHook(tmpRoot, { stop: "cat ~/.ssh/id_rsa" }, null);
+  const r = await runStopHook(new HostRuntime({ root: tmpRoot }), { stop: "cat ~/.ssh/id_rsa" }, null);
   assert.strictEqual(r.ran, false);
   assert.strictEqual(r.passed, true); // rejected hooks never block completion, same as postEdit
 });

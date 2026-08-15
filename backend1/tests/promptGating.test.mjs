@@ -16,6 +16,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
@@ -52,6 +53,7 @@ function ctxFor({ sessionId = "sess-1", permissions = { allow: [], ask: [], deny
   return {
     ctx: {
       root: tmp, emit: null, sessionId, requestId: "req-1",
+      runtime: new HostRuntime({ root: tmp }),
       hooks: {}, permissions, editedFiles: new Map(), readFiles: new Set(),
       todosRef: { current: [] }, workspaceSnapshot: [], permissionMode: "auto",
       mcpClients: new Map(), mcpRoutes: new Map(), bashCommands: [], askUser,

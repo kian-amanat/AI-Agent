@@ -13,7 +13,7 @@
 import OpenAI from "openai";
 import { readFile } from "fs/promises";
 import path from "path";
-import { chatWithTools, isAnthropicRoute } from "./agentChat.mjs";
+import { chatWithTools, isAnthropicRoute, supportsEnableThinking } from "./agentChat.mjs";
 
 const SETTINGS_PATH = path.join(process.cwd(), "data", "settings.json");
 
@@ -168,7 +168,16 @@ export async function callLLM({
   // Only meaningful when explicitly false here — the wantsThinking:true path
   // below always sends enable_thinking:true itself, and leaving `thinking`
   // unset preserves the old no-extra-body-at-all behavior for other models.
-  const extraBody = thinking === false ? { enable_thinking: false } : undefined;
+  // …and only for models that actually understand `enable_thinking`. OpenAI
+  // -family models don't ignore the unknown extension, they reject the whole
+  // request with `400 Unrecognized request argument supplied: extra_body`.
+  // agentChat.mjs already guards its own calls this way; this path did not, so
+  // every callLLM with thinking:false died on an OpenAI model behind an
+  // OpenAI-compatible gateway — including the router's intent classifier, which
+  // then silently fell back to "agent" for every ambiguous message.
+  const extraBody = thinking === false && supportsEnableThinking(creds.model)
+    ? { enable_thinking: false }
+    : undefined;
 
   // Give thinking models a longer socket timeout (10 min) so streaming doesn't drop.
   const client = makeClient(creds, wantsThinking ? 600_000 : 180_000);

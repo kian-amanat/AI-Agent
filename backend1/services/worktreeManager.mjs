@@ -30,6 +30,27 @@ const GIT_TIMEOUT_MS = 30_000;
 // worktreeId → record. Only ids present here may be removed.
 const registry = new Map();
 
+// repoRoot → tail of a promise chain, so `git worktree add` runs one at a time
+// per repository.
+//
+// Concurrent adds against the same repo race inside git itself: each one writes
+// its own .git/worktrees/<id>/ admin directory and reads the files back, and
+// under load a sibling's write is not yet visible when the read happens —
+//   fatal: failed to read .git/worktrees/<id>/commondir
+// which surfaced as roughly one spawn in forty failing for no reason the caller
+// could act on. git does not serialise this for us, so we do it here. Adds are
+// short and this is the only writer in the process, so the cost is negligible
+// next to a spawn that randomly fails.
+const repoLocks = new Map();
+
+function withRepoLock(repoRoot, fn) {
+  const prev = repoLocks.get(repoRoot) ?? Promise.resolve();
+  const next = prev.then(fn, fn);
+  // Keep the chain alive but never let it reject; each caller owns its result.
+  repoLocks.set(repoRoot, next.then(() => {}, () => {}));
+  return next;
+}
+
 function git(args, cwd) {
   return new Promise((resolve) => {
     execFile("git", args, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
@@ -49,8 +70,20 @@ export async function findRepoRoot(workspacePath) {
   return r.ok && r.stdout ? r.stdout : null;
 }
 
+// Whether git can do worktrees at all is a property of the git build, not of
+// this moment — but the probe (`git worktree list`) reads .git/worktrees, so it
+// fails transiently while a sibling add is writing there. Probing per create
+// therefore turned a concurrency blip into "your git does not support
+// worktrees", which is both wrong and unactionable. Probe once per repo and
+// remember the answer; only a real negative is worth reporting.
+const worktreeSupport = new Map();
+
 export async function gitSupportsWorktrees(cwd) {
+  if (worktreeSupport.has(cwd)) return worktreeSupport.get(cwd);
   const r = await git(["worktree", "list"], cwd);
+  // Only cache a definite yes. A failure under load is not evidence of absence,
+  // so leave it unrecorded and let the next call ask again.
+  if (r.ok) worktreeSupport.set(cwd, true);
   return r.ok;
 }
 
@@ -78,7 +111,20 @@ export async function createWorktree({ workspacePath, subagentId, sessionId = nu
 
   await fs.mkdir(WORKTREE_ROOT, { recursive: true });
 
-  const add = await git(["worktree", "add", "--detach", worktreePath, ref], repoRoot);
+  // Serialised per repo (see repoLocks). The retry covers the same race being
+  // lost to a writer outside this process — another Kodo, or the user's own
+  // git — which no in-process lock can order.
+  const add = await withRepoLock(repoRoot, async () => {
+    let last;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      last = await git(["worktree", "add", "--detach", worktreePath, ref], repoRoot);
+      if (last.ok) return last;
+      // Leave nothing half-made behind before trying again.
+      await git(["worktree", "prune"], repoRoot);
+      await new Promise((r) => setTimeout(r, 25 * (attempt + 1)));
+    }
+    return last;
+  });
   if (!add.ok) {
     return { ok: false, error: `git worktree add failed: ${add.stderr.slice(0, 300)}` };
   }

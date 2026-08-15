@@ -14,6 +14,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
@@ -333,6 +334,7 @@ function permCtx(hookRaw, { permissions, askUser } = {}) {
   const config = cfg(hookRaw);
   return {
     root: os.tmpdir(), emit: null, sessionId: "s", requestId: "r",
+    runtime: new HostRuntime({ root: os.tmpdir() }),
     hooks: {}, permissions, editedFiles: new Map(), readFiles: new Set(),
     todosRef: { current: [] }, workspaceSnapshot: [], permissionMode: "auto",
     mcpClients: new Map(), mcpRoutes: new Map(), askUser,
@@ -421,6 +423,7 @@ function subCtx(hookRaw, extra = {}) {
   const seen = [];
   const ctx = {
     root: os.tmpdir(), emit: null, sessionId: "parent-sess", requestId: "parent-req",
+    runtime: new HostRuntime({ root: os.tmpdir() }),
     hooks: {}, permissions: { allow: [], ask: [], deny: [] },
     editedFiles: new Map(), readFiles: new Set(), todosRef: { current: [] },
     workspaceSnapshot: [], permissionMode: "auto", askUser: null,

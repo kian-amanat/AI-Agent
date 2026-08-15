@@ -41,6 +41,52 @@ const ACTION_QUESTION_RE = /\b(run|start|serve|launch|host|deploy|install|build|
 
 const FILE_REF_RE = /\.(tsx?|jsx?|mjs|cjs|css|scss|json|md|ya?ml|html|py)\b|\b(src|app|components?|pages?|routes?|lib|hooks?|backend1?|chatbot)\//i;
 
+// ── Workspace queries ────────────────────────────────────────────────────────
+//
+// "where is the CLI stored?" is a QUESTION, so OBVIOUS_QUESTION_RE below used
+// to send it to the answer node — which has no file tools at all and would
+// reply "I don't have visibility into your actual project files". But its
+// answer depends entirely on this workspace, so it belongs on the tool path.
+//
+// These are deliberately semantic (a locator + a code/project noun, or an
+// explicit "this project / my repo" reference), not a list of phrasings, so
+// wording variations still classify correctly. General-knowledge questions
+// ("what is React?", "explain closures") match none of them and stay on the
+// cheap answer path.
+
+// "where is …", "which file …", "find …", "show me …" — asking for a location.
+const LOCATOR_RE = /\b(where(?:'s|\s+(?:is|are|does|do|can\s+i\s+find|should\s+i\s+look))?|which\s+(?:one\s+)?(?:file|files|folder|directory|module|component|function|class|route|endpoint|script|package|part)|what\s+(?:file|files|folder|directory|module|component|function|class|route|endpoint|script|package)|locate|find|show\s+me|list|inspect|search)\b/i;
+
+// Nouns that only exist inside a codebase/workspace.
+const CODE_NOUN_RE = /\b(cli|files?|folders?|director(?:y|ies)|repo|repository|codebase|code\s?base|workspace|project|package\.json|manifest|structure|entry\s*points?|modules?|components?|functions?|classe?s?|routes?|endpoints?|api|configs?|configuration|scripts?|tests?|imports?|dependenc(?:y|ies)|source|src|server|database|schema|migrations?|agent\s+loop|router|middleware|hooks?|env|environment\s+variables?|frontend|backend|stack|framework|logic|implementation|definition|handlers?|controllers?|services?|pages?|views?|screens?|layouts?|stores?|providers?|types?|interfaces?|constants?|styles?)\b/i;
+
+// "where is X implemented/defined/stored/configured" — a here-and-now question
+// about this codebase even when no code noun is named.
+const IMPL_RE = /\b(implemented|defined|declared|located|stored|configured|set\s*up|structured|organi[sz]ed|wired|registered|handled|rendered|exported|imported|installed|used\s+(?:here|in\s+this)|live[sd]?)\b/i;
+
+// Explicit deixis: "this project", "my repo", "in here", "does this app use".
+const PROJECT_DEIXIS_RE = /\b(my|our|this|the)\s+(project|repo|repository|codebase|code\s?base|workspace|app|application)\b|\b(this|my|our)\s+(file|folder|directory|component|module|function|route|server|frontend|backend)\b|\b(in|inside)\s+(here|this\s+(project|repo|repository|codebase|folder|directory))\b/i;
+
+// "how is the frontend structured?" — no locator word, still workspace-bound.
+const HOW_HERE_RE = /\bhow\s+(is|are|does|do|did)\b[^]*\b(structured|organi[sz]ed|implemented|configured|set\s*up|wired|laid\s*out|defined|arranged|split)\b/i;
+
+/**
+ * True when answering the message requires inspecting THIS workspace —
+ * its files, directories, source, config, structure, or repository state.
+ *
+ * Exported for direct unit testing (see tests/router.test.mjs) and so callers
+ * can log the classification without re-deriving it.
+ */
+export function isWorkspaceQuery(message) {
+  const msg = String(message || "").trim();
+  if (!msg) return false;
+  if (PROJECT_DEIXIS_RE.test(msg)) return true;
+  if (HOW_HERE_RE.test(msg)) return true;
+  if (FILE_REF_RE.test(msg)) return true;
+  if (LOCATOR_RE.test(msg) && (CODE_NOUN_RE.test(msg) || IMPL_RE.test(msg))) return true;
+  return false;
+}
+
 async function classifyWithLLM(message, modelRoute) {
   try {
     const { callLLM } = await import("../../services/llm.mjs");
@@ -78,6 +124,9 @@ export function classifyFastPath(cleanMsg) {
   if (!cleanMsg || GREETING_RE.test(cleanMsg)) return "answer";
   if (NO_ACTION_RE.test(cleanMsg)) return "answer";
   if (OBVIOUS_AGENT_RE.test(cleanMsg) || (FILE_REF_RE.test(cleanMsg) && !OBVIOUS_QUESTION_RE.test(cleanMsg))) return "agent";
+  // Before the question fast-path: a question whose ANSWER lives in the
+  // workspace needs file tools, which only the agent path has.
+  if (isWorkspaceQuery(cleanMsg)) return "agent";
   if (OBVIOUS_QUESTION_RE.test(cleanMsg) && !ACTION_QUESTION_RE.test(cleanMsg)) return "answer";
   // "i want /profile to have a feedback form" — a build request phrased as a wish.
   if (WANT_FEATURE_RE.test(cleanMsg)) return "agent";
@@ -100,7 +149,11 @@ export async function routerNode(state) {
     }
   }
 
-  console.log(`[Router] intent="${intent}" for: "${cleanMsg.slice(0, 80)}"`);
+  const workspaceQuery = intent === "agent" && isWorkspaceQuery(cleanMsg);
+  console.log(
+    `[Router] intent="${intent}"${workspaceQuery ? " kind=workspace_query" : ""} ` +
+    `workspace="${state.workspacePath || "(none)"}" for: "${cleanMsg.slice(0, 80)}"`,
+  );
   emit?.({
     type: "progress",
     stage: "routed",

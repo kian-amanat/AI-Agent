@@ -1,0 +1,138 @@
+# Build Kodo release artifacts, one per platform.
+#
+# Artifacts bundle their dependencies, including the native `better-sqlite3`
+# module, so each one MUST be built on the platform it targets. A tarball named
+# `linux-x64` produced on macOS would install cleanly and then fail to load
+# better-sqlite3 at first use — which is why the local build script defaults to
+# this machine's platform only, and why this matrix exists.
+#
+# Deliberately does NOT publish. Publishing is a decision with a blast radius
+# (a bad release is on people's machines within minutes), and this repository
+# has no release host configured. The job produces verified, checksummed
+# artifacts and stops; a human runs `docs/release-checklist.md` and publishes.
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (defaults to cli/package.json)"
+        required: false
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,      target: darwin-arm64 }
+          - { os: macos-13,      target: darwin-x64 }
+          - { os: ubuntu-24.04,  target: linux-x64 }
+          - { os: ubuntu-24.04-arm, target: linux-arm64 }
+          - { os: windows-2022,  target: win32-x64 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # Pinned: the bundled native module is compiled against a Node ABI,
+          # so the build and the documented minimum must not drift apart.
+          node-version: "20.12"
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          npm --prefix backend1 ci
+          npm --prefix chatbot/my-chatbot-ui ci
+
+      # The UI is platform-independent, but every artifact carries it, so it is
+      # built on each runner rather than passed between them.
+      - name: Build the production UI
+        shell: bash
+        run: npm run ui:build
+
+      - name: Test
+        shell: bash
+        env:
+          # No provider credential in CI: the live model suites skip loudly.
+          KODO_E2E_OPTIONAL: "1"
+        run: npm test
+
+      - name: Build the release artifact
+        shell: bash
+        run: |
+          node scripts/build-release.mjs \
+            --platform "${{ matrix.target }}" \
+            ${{ inputs.version && format('--version {0}', inputs.version) || '' }}
+
+      # Prove the artifact works BEFORE it is offered for download. A release
+      # that has only been built has not been tested.
+      - name: Verify the artifact installs and runs
+        if: runner.os != 'Windows'
+        shell: bash
+        run: sh scripts/test-clean-install.sh
+
+      - name: Verify the artifact (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # The POSIX clean-install harness does not run here. Do the
+          # equivalent inline so Windows is genuinely exercised rather than
+          # assumed — this is what would promote it from Experimental.
+          $ErrorActionPreference = 'Stop'
+          $work = Join-Path $env:RUNNER_TEMP "kodo-verify"
+          New-Item -ItemType Directory -Force -Path "$work\serve\releases\$(node -p "require('./cli/package.json').version")" | Out-Null
+          $ver = node -p "require('./cli/package.json').version"
+          Copy-Item dist\*.tar.gz "$work\serve\releases\$ver\"
+          Copy-Item dist\SHA256SUMS "$work\serve\releases\$ver\"
+          Copy-Item dist\latest.txt "$work\serve\releases\"
+          $job = Start-Job { param($d,$p) Set-Location $d; python -m http.server $p } -ArgumentList "$work\serve", 8753
+          Start-Sleep -Seconds 3
+          try {
+            & .\install.ps1 -BaseUrl "http://127.0.0.1:8753" -InstallDir "$work\bin"
+            & "$work\bin\kodo.cmd" --version
+            & "$work\bin\kodo.cmd" doctor
+          } finally {
+            Stop-Job $job -ErrorAction SilentlyContinue
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kodo-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 14
+
+  checksums:
+    name: combine checksums
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts }
+
+      # One SHA256SUMS covering every platform, which is what the installer
+      # fetches. Per-platform files would each list only their own artifact.
+      - name: Combine
+        run: |
+          mkdir -p dist
+          find artifacts -name '*.tar.gz' -exec cp {} dist/ \;
+          (cd dist && sha256sum *.tar.gz > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kodo-release
+          path: dist/
+          if-no-files-found: error

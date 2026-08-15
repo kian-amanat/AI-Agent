@@ -22,6 +22,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import path from "path";
 import os from "os";
 import fs from "fs/promises";
@@ -61,6 +62,7 @@ async function workspace(files = {}, task = "audit the repo") {
     root, emit: null, sessionId: "s", requestId: "r", hooks: {},
     editedFiles: new Map(), readFiles: new Set(), todosRef: { current: [] },
     workspaceSnapshot: [], permissionMode: "auto", taskController: controller,
+    runtime: new HostRuntime({ root }),
   };
   return { root, ctx, controller, cleanup: () => fs.rm(root, { recursive: true, force: true }) };
 }

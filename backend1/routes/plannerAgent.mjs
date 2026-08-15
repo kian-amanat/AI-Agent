@@ -69,7 +69,11 @@ import {
   createJob, emitToJob, subscribe, finishJob, cancelJob, getRunningJobs,
 } from "../services/jobs.mjs";
 
-const ALLOWED_ORIGIN = process.env.KODO_ALLOWED_ORIGIN || "http://localhost:3000";
+// Per-request, not a module constant: the UI's port is chosen by `kodo ui
+// start` after this server is already running, so the allowed origin has to be
+// computed from the request. See utils/cors.util.mjs.
+import { allowedOrigin } from "../utils/cors.util.mjs";
+import { resolveWorkspace } from "../config/workspace.mjs";
 
 // Per-session queue — two concurrent requests for the same session would
 // interleave their graph runs and corrupt each other's file edits, so a
@@ -173,8 +177,9 @@ function requireUserSession(request, reply) {
   return s;
 }
 
-function startSSE(reply) {
-  reply.raw.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+function startSSE(reply, request) {
+  reply.raw.setHeader("Vary", "Origin");
+  reply.raw.setHeader("Access-Control-Allow-Origin", allowedOrigin(request?.headers?.origin));
   reply.raw.setHeader("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   reply.raw.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
   reply.raw.writeHead(200, {
@@ -185,8 +190,9 @@ function startSSE(reply) {
   });
 }
 
-function setCors(reply) {
-  reply.header("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+function setCors(reply, request) {
+  reply.header("Vary", "Origin");
+  reply.header("Access-Control-Allow-Origin", allowedOrigin(request?.headers?.origin));
   reply.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   reply.header("Access-Control-Allow-Headers", "Content-Type, Authorization");
 }
@@ -824,7 +830,7 @@ export async function handleSlashCommand(message, { workspacePath, modelRoute })
 export default async function plannerAgentRoute(fastify) {
 
   fastify.get("/capabilities", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = getAuthSessionFromRequest(request);
     const settings = await loadSettings(authSession?.user_id);
     return { ok: true, ...getCapabilities(settings) };
@@ -832,7 +838,7 @@ export default async function plannerAgentRoute(fastify) {
 
   // POST /run — main chat endpoint (LangGraph)
   fastify.post("/run", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
 
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
@@ -861,19 +867,17 @@ export default async function plannerAgentRoute(fastify) {
       : body.permission_mode === "plan" ? "plan"
       : "auto";
 
-    const workspacePath = authSession.workspace_path || "";
+    // Session-bound (VS Code) first, then the workspace the CLI started this
+    // server for. Still never the server's own directory: the agent WRITES
+    // files, so an incidental cwd fallback would edit whichever project the
+    // server happened to be launched from. See config/workspace.mjs.
+    const workspacePath = resolveWorkspace(authSession) || "";
 
-    // No bound workspace = refuse, don't silently fall back to the server's
-    // own repo (agent_loop.mjs's PROJECT_ROOT fallback). Multiple accounts can
-    // share one running backend, and a fallback here isn't just a read-only
-    // view leak like the file tree — the agent WRITES files, so an unconfigured
-    // user would otherwise be editing whichever project the server happens to
-    // be running from.
     if (!workspacePath) {
       return reply.code(400).send({
         ok: false,
         error: "no_workspace",
-        message: "No project connected yet. Open Kodo from your project (via the extension) or pick one from the folder switcher before chatting.",
+        message: "No project connected yet. Start Kodo from your project with `kodo ui start`, or pick one from the folder switcher before chatting.",
       });
     }
 
@@ -1155,7 +1159,7 @@ export default async function plannerAgentRoute(fastify) {
       switchedTo:   modelRoute.switchedTo   || null,
     };
 
-    startSSE(reply);
+    startSSE(reply, request);
 
     const startEvent = {
       type:       "start",
@@ -1230,7 +1234,7 @@ export default async function plannerAgentRoute(fastify) {
   // Called on page load / session open so the UI can re-attach to a task that's
   // still running after a refresh.
   fastify.get("/jobs", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
     const sessionId = typeof request.query?.session_id === "string" ? request.query.session_id.trim() : null;
@@ -1240,7 +1244,7 @@ export default async function plannerAgentRoute(fastify) {
 
   // ── GET /run/:requestId/stream — reconnect to a running job's live stream ──
   fastify.get("/run/:requestId/stream", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
     const { requestId } = request.params;
@@ -1251,7 +1255,7 @@ export default async function plannerAgentRoute(fastify) {
       return reply.code(404).send({ ok: false, error: "No such job for this user" });
     }
 
-    startSSE(reply);
+    startSSE(reply, request);
     // subscribe replays buffered events then streams live ones; if the job is
     // already gone from memory (finished + GC'd), the stream just ends and the
     // client falls back to the saved session messages.
@@ -1261,7 +1265,7 @@ export default async function plannerAgentRoute(fastify) {
 
   // ── POST /cancel/:requestId — explicitly stop a running job ────────────────
   fastify.post("/cancel/:requestId", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
     const { requestId } = request.params;
@@ -1274,7 +1278,7 @@ export default async function plannerAgentRoute(fastify) {
   // ── Unchanged endpoints ────────────────────────────────────
 
   fastify.get("/plan/:filename", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const { filename } = request.params;
     if (!/^planner(_plan|\d+)\.json$/.test(filename)) {
       return reply.code(400).send({ ok: false, error: "Invalid filename format" });
@@ -1290,7 +1294,7 @@ export default async function plannerAgentRoute(fastify) {
   });
 
   fastify.get("/sessions", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
     try {
@@ -1301,7 +1305,7 @@ export default async function plannerAgentRoute(fastify) {
   });
 
   fastify.get("/sessions/:sessionId", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
     try {
@@ -1315,10 +1319,10 @@ export default async function plannerAgentRoute(fastify) {
   // Autocomplete for the composer's slash-command menu. Metadata only —
   // command bodies are never returned.
   fastify.get("/commands", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
-    const workspacePath = authSession.workspace_path || process.cwd();
+    const workspacePath = resolveWorkspace(authSession) || process.cwd();
     const { commands, aliases, conflicts, errors } = await loadCommandRegistry(workspacePath);
     const prefix = String(request.query?.q ?? "");
     return reply.send({
@@ -1335,7 +1339,7 @@ export default async function plannerAgentRoute(fastify) {
   // Nothing auto-answers: an interaction that is never answered times out as
   // "cancel", which is the safe outcome.
   fastify.get("/interactions", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
     const { interactions } = await import("../services/interactionManager.mjs");
@@ -1343,7 +1347,7 @@ export default async function plannerAgentRoute(fastify) {
   });
 
   fastify.post("/interactions/:id/respond", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
 
@@ -1359,7 +1363,7 @@ export default async function plannerAgentRoute(fastify) {
   });
 
   fastify.delete("/sessions/:sessionId", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
     try {
@@ -1369,7 +1373,7 @@ export default async function plannerAgentRoute(fastify) {
         await endSession({
           sessionId: request.params.sessionId,
           reason: String(request.query?.reason || "clear"),
-          fire: (await createHookRunner({ workspacePath: authSession.workspace_path || process.cwd() })).fire,
+          fire: (await createHookRunner({ workspacePath: resolveWorkspace(authSession) || process.cwd() })).fire,
           extra: { force: true },
         });
       } catch (err) {
@@ -1383,7 +1387,7 @@ export default async function plannerAgentRoute(fastify) {
   });
 
   fastify.post("/transcribe", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     try {
       if (typeof request.file !== "function") {
         return reply.code(400).send({ ok: false, error: "Multipart upload is not enabled." });
@@ -1417,7 +1421,7 @@ export default async function plannerAgentRoute(fastify) {
   });
 
   fastify.post("/undo", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
     try {
@@ -1436,7 +1440,7 @@ export default async function plannerAgentRoute(fastify) {
 
   // ── Plan approval (permission mode = "ask") ─────────────────
   fastify.post("/confirm/:requestId", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const { requestId } = request.params;
     const pending = pendingApprovals.get(requestId);
     if (!pending) {
@@ -1448,7 +1452,7 @@ export default async function plannerAgentRoute(fastify) {
   });
 
   fastify.post("/reject/:requestId", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const { requestId } = request.params;
     const pending = pendingApprovals.get(requestId);
     if (!pending) {
@@ -1461,7 +1465,7 @@ export default async function plannerAgentRoute(fastify) {
 
   // ── Answer a clarifying question (ask_user tool) ─────────────
   fastify.post("/answer/:requestId", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const { requestId } = request.params;
     const pending = pendingQuestions.get(requestId);
     if (!pending) {
@@ -1477,7 +1481,7 @@ export default async function plannerAgentRoute(fastify) {
   // Returns a plain-text summary of the session messages so the UI can
   // replace its message list with a compact placeholder.
   fastify.post("/compact", async (request, reply) => {
-    setCors(reply);
+    setCors(reply, request);
     const authSession = requireUserSession(request, reply);
     if (!authSession) return;
     try {

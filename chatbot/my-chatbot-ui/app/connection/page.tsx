@@ -3,11 +3,11 @@
 import { motion, AnimatePresence } from 'framer-motion';
 import Image from 'next/image';
 import { useRouter, useSearchParams } from 'next/navigation';
-import { useEffect, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { ArrowRight, Folder, Zap } from 'lucide-react';
 import { apiMe, stagePendingWorkspace } from '../lib/api';
 
-export default function ConnectPage() {
+function ConnectPageInner() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const [projectName, setProjectName] = useState('your project');
@@ -226,5 +226,20 @@ export default function ConnectPage() {
         </div>
       </motion.div>
     </div>
+  );
+}
+
+/**
+ * useSearchParams() opts a route into client-side rendering, and Next refuses
+ * to prerender it without a Suspense boundary — which failed the production
+ * build outright, so this UI could only ever run under `next dev`. Wrapping the
+ * reader in Suspense lets the shell prerender and the query-string-dependent
+ * part hydrate on the client, which is what the page already did in practice.
+ */
+export default function ConnectPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen bg-black" />}>
+      <ConnectPageInner />
+    </Suspense>
   );
 }

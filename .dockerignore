@@ -1,0 +1,45 @@
+# Keep the build context small, and keep secrets and local state out of the
+# image entirely. A .env or a memory.db copied into a layer is a credential and
+# a conversation history published to whoever pulls the image.
+.env
+*.env
+!.env.example
+
+node_modules
+**/node_modules
+
+# Local databases and runtime state
+*.db
+*.db-shm
+*.db-wal
+backend1/data
+backend1/uploads
+backend1/temp_audio
+backend1/.playwright-mcp
+.kodo/memory
+backend1/.kodo
+
+# Build and test artifacts
+.bench-runs
+.agent-history
+benchmarks
+backend1/bench-report
+**/.next
+**/tsconfig.tsbuildinfo
+.test-out
+
+# The Next.js UI is a separate deployable; the CLI image does not serve it.
+chatbot
+
+# VCS and editor
+.git
+.gitignore
+.vscode
+.idea
+**/.DS_Store
+
+# Docs and images are not needed at runtime
+kodo-landing-images
+docs
+*.md
+!KODO.md

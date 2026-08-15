@@ -101,6 +101,10 @@ export const KodoStateAnnotation = {
   // Appends a turn_events row so this run's tool calls/results become the next
   // turn's working memory — injected by graph_runner, never serialised.
   recordEvent:     { default: () => null },
+  // The ExecutionRuntime every tool executes through (core/runtime/). null
+  // means the host. Injected by graph_runner, never serialised — it holds live
+  // handles to a container and its background processes.
+  runtime:         { default: () => null },
 };
 
 // ── Error boundary ────────────────────────────────────────────────────────────
