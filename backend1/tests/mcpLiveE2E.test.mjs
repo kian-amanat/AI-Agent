@@ -88,11 +88,28 @@ if (EXPLICIT_PROVIDER && !VALID_PROVIDERS.has(EXPLICIT_PROVIDER)) {
   process.exit(1);
 }
 
-const INFERRED = /anthropic/i.test(process.env.KODO_E2E_BASE_URL || "")
-  || (!process.env.KODO_E2E_BASE_URL && /^sk-ant-/.test(API_KEY))
+// A configured base URL that is NOT one of the two first-party hosts means an
+// OpenAI-COMPATIBLE gateway, and inference has to say so.
+//
+// Without this, an environment holding a GapGPT key in OPENAI_API_KEY and
+// `OPENAI_BASE_URL=https://api.gapgpt.app/v1` inferred plain "openai", ignored
+// the base URL entirely, and POSTed that key to api.openai.com — which
+// naturally returned 401. The suite then reported "the API key was rejected",
+// which is true and completely misleading: the key is fine, it was simply sent
+// to the wrong company. The credential fallback already reads OPENAI_API_KEY,
+// so it must read OPENAI_BASE_URL from the same place or the pair is split
+// across two different providers.
+const CONFIGURED_BASE = process.env.KODO_E2E_BASE_URL
+  || LOCAL.textBaseUrl || LOCAL.baseUrl || process.env.OPENAI_BASE_URL || "";
+const IS_FIRST_PARTY_BASE = !CONFIGURED_BASE
+  || /(^|\/\/)(api\.)?openai\.com/i.test(CONFIGURED_BASE)
+  || /anthropic\.com/i.test(CONFIGURED_BASE);
+
+const INFERRED = /anthropic/i.test(CONFIGURED_BASE)
+  || (!CONFIGURED_BASE && /^sk-ant-/.test(API_KEY))
   || (!process.env.KODO_E2E_API_KEY && !process.env.OPENAI_API_KEY && !!process.env.ANTHROPIC_API_KEY)
   ? "anthropic"
-  : "openai";
+  : IS_FIRST_PARTY_BASE ? "openai" : "openai-compatible";
 
 const PROVIDER = EXPLICIT_PROVIDER || INFERRED;
 const IS_ANTHROPIC = PROVIDER === "anthropic";

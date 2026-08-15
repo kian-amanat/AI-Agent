@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from "react";
+import { KODO_API_ORIGIN } from "../lib/api";
 
 interface UseVoiceInputReturn {
   isRecording: boolean;
@@ -76,7 +77,7 @@ export function useVoiceInput(): UseVoiceInputReturn {
           formData.append("session_id", sessionId);
         }
 
-        const response = await fetch("http://localhost:9000/api/agent/transcribe", {
+        const response = await fetch(`${KODO_API_ORIGIN}/api/agent/transcribe`, {
           method: "POST",
           body: formData,
         });

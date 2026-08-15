@@ -33,11 +33,25 @@ const API_KEY = RAW_KEY === "dummy" ? "" : RAW_KEY;
 const OPTIONAL = process.env.KODO_E2E_OPTIONAL === "1";
 
 const EXPLICIT_PROVIDER = (process.env.KODO_E2E_PROVIDER || "").trim().toLowerCase();
+
+// The key fallback above reads OPENAI_API_KEY, so the base URL and model must
+// fall back to the SAME environment or the two halves describe different
+// providers. They previously did not: an environment configured for an
+// OpenAI-compatible gateway (a GapGPT key in OPENAI_API_KEY,
+// OPENAI_BASE_URL=https://api.gapgpt.app/v1) took the key from there and the
+// host from the hardcoded OpenAI default, POSTing that key to api.openai.com.
+// The 401 was then reported as "the real-model subagent flow is NOT verified",
+// which blamed the agent for what was purely a misrouted request.
+const ENV_BASE = process.env.KODO_E2E_BASE_URL || process.env.OPENAI_BASE_URL || "";
+const ENV_MODEL = process.env.KODO_E2E_MODEL || process.env.DEFAULT_MODEL || "";
+
 const IS_ANTHROPIC = EXPLICIT_PROVIDER === "anthropic"
-  || (!EXPLICIT_PROVIDER && !process.env.KODO_E2E_BASE_URL && /^sk-ant-/.test(API_KEY));
-const BASE_URL = (process.env.KODO_E2E_BASE_URL
+  || (!EXPLICIT_PROVIDER && !ENV_BASE && /^sk-ant-/.test(API_KEY))
+  || /anthropic\.com/i.test(ENV_BASE);
+
+const BASE_URL = (ENV_BASE
   || (IS_ANTHROPIC ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1")).replace(/\/$/, "");
-const MODEL = process.env.KODO_E2E_MODEL || (IS_ANTHROPIC ? "claude-sonnet-5" : "gpt-4o-mini");
+const MODEL = ENV_MODEL || (IS_ANTHROPIC ? "claude-sonnet-5" : "gpt-4o-mini");
 
 const HOWTO = [
   "  Supply credentials via the environment (never hardcoded):",
@@ -236,8 +250,23 @@ When you produce your audit report you MUST begin the report with the exact toke
     // the skill was genuinely injected into the subagent's prompt.
     const sawToken = String(out.finalAnswer || "").includes(TOKEN)
       || turnEvents.some((e) => String(e.content || "").includes(TOKEN));
+    // KNOWN FLAKY, and classified: this check spans two MODEL-dependent steps
+    // — the subagent must obey "begin your report with this token", and the
+    // parent must relay the report verbatim. A weak model fails either
+    // intermittently.
+    //
+    // The underlying plumbing is NOT in doubt:
+    // tests/subagentSkillInjection.test.mjs proves deterministically (against a
+    // recording HTTP provider, no model judgement) that the skill body reaches
+    // the subagent's system prompt. So a failure HERE is model
+    // nondeterminism, not a broken injection chain.
+    //
+    // Deliberately not weakened, retried or skipped: it is the only end-to-end
+    // check that a real model actually acts on an injected skill, and that is
+    // worth an occasional red run.
     check("skill content actually influenced the subagent", sawToken,
-      "the skill token never appeared — injection may not have reached the model");
+      "the skill token never appeared. NOTE: injection itself is covered offline by " +
+      "tests/subagentSkillInjection.test.mjs — if that passes, this is model behaviour, not a code bug");
   } finally { await fs.rm(repo, { recursive: true, force: true }); }
 }
 

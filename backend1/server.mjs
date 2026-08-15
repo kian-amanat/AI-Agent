@@ -6,9 +6,11 @@ import { createWriteStream } from "fs";
 import { pipeline } from "stream/promises";
 import settingsRoute from "./routes/settings.mjs";
 import plannerAgentRoute from "./routes/plannerAgent.mjs";
-import authRoute from "./routes/auth.mjs";
+import authRoute, { provisionCliSession } from "./routes/auth.mjs";
+import { CLI_WORKSPACE } from "./config/workspace.mjs";
 import workspaceRoute from "./routes/workspace.mjs";
 import feedbackRoute from "./routes/feedback.mjs";
+import { allowedOrigin, PINNED_ORIGIN, DEFAULT_ORIGIN } from "./utils/cors.util.mjs";
 
 
 const fastify = Fastify({
@@ -64,12 +66,13 @@ if (multipartAvailable && multipartPlugin) {
   });
 }
 
-// Lock CORS to the frontend origin; override with KODO_ALLOWED_ORIGIN for other setups.
-const ALLOWED_ORIGIN = process.env.KODO_ALLOWED_ORIGIN || "http://localhost:3000";
+// CORS — see utils/cors.util.mjs for the rule and why it is not "*".
+const ALLOWED_ORIGIN = PINNED_ORIGIN || DEFAULT_ORIGIN;
 
 fastify.addHook("onRequest", async (request, reply) => {
     reply.header("X-Request-ID", crypto.randomUUID());
-  reply.header("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
+  reply.header("Vary", "Origin");
+  reply.header("Access-Control-Allow-Origin", allowedOrigin(request.headers.origin));
   reply.header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS");
   reply.header(
     "Access-Control-Allow-Headers",
@@ -222,14 +225,35 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
   });
 }
 
+// Port and host are configurable so `kodo server start --port N` can place this
+// somewhere other than 9000 (which is routinely already taken) and so the E2E
+// tests can bind an ephemeral port.
+//
+// The default host is now LOOPBACK, not 0.0.0.0. This process exposes an agent
+// that edits files and runs shell commands; binding it to every interface by
+// default published that to the whole local network — including coffee-shop
+// Wi-Fi — with no authentication beyond a bearer token the UI hands out. Anyone
+// who genuinely needs a wider bind (a container with its own network boundary)
+// can still ask for it explicitly via KODO_HOST.
+const PORT = Number(process.env.PORT || process.env.KODO_PORT || 9000);
+const HOST = process.env.KODO_HOST || "127.0.0.1";
+
 async function start() {
   try {
-    await fastify.listen({
-      port: 9000,
-      host: "0.0.0.0",
-    });
+    // BEFORE listen, so that "the API is healthy" also means "the CLI can read
+    // the session token". The CLI polls /health and then builds the browser URL
+    // from the handshake file; provisioning after listen would race that.
+    if (CLI_WORKSPACE) provisionCliSession(CLI_WORKSPACE);
 
-    console.log("✅ Server running on http://localhost:9000");
+    await fastify.listen({ port: PORT, host: HOST });
+
+    if (HOST !== "127.0.0.1" && HOST !== "localhost" && HOST !== "::1") {
+      console.warn(
+        `⚠️  Kodo is bound to ${HOST} — the agent is reachable from outside this machine. ` +
+        "Anything that can reach this port can edit your files and run commands as you.",
+      );
+    }
+    console.log(`✅ Server running on http://${HOST}:${PORT}`);
     console.log("📁 Uploads directory:", UPLOAD_DIR);
   } catch (err) {
     fastify.log.error(err);

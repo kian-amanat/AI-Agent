@@ -1,0 +1,9 @@
+{
+  "$schema": "https://kodo.dev/schema/settings.json",
+  "kodo": {
+    "permission": "auto"
+  },
+  "permissions": {},
+  "hooks": {},
+  "mcpServers": {}
+}

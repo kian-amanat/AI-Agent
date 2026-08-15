@@ -50,12 +50,38 @@ export const OPENAI_BASE_URL =
 // Configure via the .env file (OPENAI_API_KEY) or the in-app Settings page.
 export const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 
-// Default client — GapGPT (used when no user settings configured)
-export const openai = new OpenAI({
-  apiKey: OPENAI_API_KEY,
-  baseURL: OPENAI_BASE_URL,
-  timeout: 30000,
-  maxRetries: 2,
+// Default client — GapGPT (used when no user settings configured).
+//
+// Constructed LAZILY. The OpenAI SDK throws from its constructor when no key is
+// present, and this module is reached transitively from utils/path.util.mjs →
+// agent_loop.mjs → basically the whole agent. Building the client eagerly meant
+// that merely IMPORTING the agent required credentials: `kodo --version`,
+// `kodo doctor` and the offline test suite all died at module load on a machine
+// that had simply not configured a key yet — which is exactly the machine those
+// commands exist to help. Deferring construction to first real use keeps the
+// failure where it belongs: at the call that actually needs the credential.
+let _defaultClient = null;
+function defaultClient() {
+  if (!_defaultClient) {
+    _defaultClient = new OpenAI({
+      apiKey: OPENAI_API_KEY,
+      baseURL: OPENAI_BASE_URL,
+      timeout: 30000,
+      maxRetries: 2,
+    });
+  }
+  return _defaultClient;
+}
+
+export const openai = new Proxy(Object.create(null), {
+  get(_target, prop) {
+    const client = defaultClient();
+    const value = client[prop];
+    return typeof value === "function" ? value.bind(client) : value;
+  },
+  has(_target, prop) {
+    return prop in defaultClient();
+  },
 });
 
 // =========================

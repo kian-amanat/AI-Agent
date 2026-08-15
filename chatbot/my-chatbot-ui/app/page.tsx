@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { v4 as uuidv4 } from "uuid";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -117,7 +117,7 @@ function getPreviewFromMessages(messages: Message[], fallback: string) {
   return fallback;
 }
 
-export default function MinimalChatComponent() {
+function MinimalChatComponent() {
   const [messageInput, setMessageInput]   = useState("");
   const [paletteOpen, setPaletteOpen]     = useState(false);
   const [isSending, setIsSending]         = useState(false);
@@ -1236,5 +1236,20 @@ export default function MinimalChatComponent() {
         )}
       </AnimatePresence>
     </AuthGuard>
+  );
+}
+
+/**
+ * useSearchParams() opts this route into client-side rendering, which Next
+ * refuses to prerender without a Suspense boundary — that failed the production
+ * build, so this app could only ever be served by `next dev`. The boundary lets
+ * the shell prerender while the query-string-dependent chat hydrates on the
+ * client, which is what actually happened at runtime anyway.
+ */
+export default function Page() {
+  return (
+    <Suspense fallback={<div className="min-h-full" />}>
+      <MinimalChatComponent />
+    </Suspense>
   );
 }

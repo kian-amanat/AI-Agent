@@ -11,6 +11,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import path from "path";
 import fs from "fs/promises";
 import os from "os";
@@ -310,6 +311,7 @@ function spawnCtx(root) {
   return {
     ctx: {
       root, emit: null, sessionId: "sess-x", requestId: "req-x",
+      runtime: new HostRuntime({ root }),
       hooks: {}, permissions: { allow: [], ask: [], deny: [] },
       editedFiles: new Map(), readFiles: new Set(), todosRef: { current: [] },
       workspaceSnapshot: [], permissionMode: "auto", mcpClients: new Map(), mcpRoutes: new Map(),

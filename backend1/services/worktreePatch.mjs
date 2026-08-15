@@ -24,7 +24,7 @@
 import crypto from "crypto";
 import path from "path";
 import { promises as fs } from "fs";
-import { execFile } from "child_process";
+import { shellQuote } from "../core/runtime/host.mjs";
 
 const GIT_TIMEOUT_MS = 30_000;
 const MAX_DIFF_CHARS = 400_000;
@@ -45,26 +45,45 @@ const PROTECTED_PATH_RE = [
 
 const patches = new Map(); // patchId → record
 
-function git(args, cwd) {
-  return new Promise((resolve) => {
-    execFile("git", args, { cwd, timeout: GIT_TIMEOUT_MS, maxBuffer: 32 * 1024 * 1024 }, (err, stdout, stderr) => {
-      resolve({ ok: !err, stdout: String(stdout || ""), stderr: String(stderr || err?.message || "") });
-    });
-  });
-}
+// The host `git()` helper that used to live here is gone.
+//
+// Every git invocation in this module now runs through the caller's
+// ExecutionRuntime (see extractWorktreeDiff and applyPatch). Leaving the old
+// helper behind as dead code would be a loaded gun: the next person needing
+// "just a quick git call" would find a working host-side one sitting right
+// there, and reintroduce the escape this module was fixed for.
 
 /**
  * Extract everything the subagent changed in its worktree as one patch —
  * tracked modifications AND new files (added to the index first so they appear
  * in the diff; the index is local to the worktree and discarded with it).
  */
-export async function extractWorktreeDiff(worktreePath) {
+/**
+ * Read a sub-agent's worktree as a patch.
+ *
+ * Takes a RUNTIME, not just a path. Under a sandbox the worktree lives inside
+ * the container, so a host `git` invocation would be pointed at a path that
+ * does not exist on the host — and before worktrees moved into the sandbox it
+ * was worse: host git ran against a host checkout that the sandboxed agent had
+ * never touched. Running git wherever the worktree actually is makes the two
+ * agree by construction.
+ */
+export async function extractWorktreeDiff(runtime, worktreePath) {
+  if (!runtime?.exec) throw new TypeError("extractWorktreeDiff requires an ExecutionRuntime");
+  const gitIn = async (args) => {
+    const res = await runtime.exec(
+      `cd ${shellQuote(worktreePath)} && git ${args.map(shellQuote).join(" ")}`,
+      { timeoutMs: GIT_TIMEOUT_MS },
+    );
+    return { ok: res.exit_code === 0, stdout: res.stdout || "", stderr: res.stderr || "" };
+  };
+
   // `git add -A` here stages inside the WORKTREE only. It never touches the
   // parent's index — separate worktrees have separate indexes.
-  const add = await git(["add", "-A"], worktreePath);
+  const add = await gitIn(["add", "-A"]);
   if (!add.ok) return { ok: false, error: `could not stage worktree changes: ${add.stderr.slice(0, 200)}` };
 
-  const diff = await git(["diff", "--cached", "--binary", "--no-color"], worktreePath);
+  const diff = await gitIn(["diff", "--cached", "--binary", "--no-color"]);
   if (!diff.ok) return { ok: false, error: `git diff failed: ${diff.stderr.slice(0, 200)}` };
 
   const patch = diff.stdout;
@@ -73,7 +92,7 @@ export async function extractWorktreeDiff(worktreePath) {
     return { ok: false, error: `diff is too large to review safely (${patch.length} chars, limit ${MAX_DIFF_CHARS})` };
   }
 
-  const stat = await git(["diff", "--cached", "--numstat"], worktreePath);
+  const stat = await gitIn(["diff", "--cached", "--numstat"]);
   const files = stat.stdout.split("\n").filter(Boolean).map((line) => {
     const [added, removed, file] = line.split("\t");
     return {
@@ -185,7 +204,16 @@ export function listPatches(sessionId = null) {
  * writes anything; a real apply that still fails is reversed with `git apply -R`
  * so the workspace is left as it was.
  */
-export async function applyPatch(patchId, { workspaceRoot } = {}) {
+/**
+ * Apply a reviewed patch to the workspace, THROUGH the runtime.
+ *
+ * This wrote a temp diff with host `fs` and ran host `git apply` against the
+ * host workspace. Under `--sandbox docker` that mutated the real host files
+ * while the agent believed every write was confined — the single most direct
+ * escape in the tool surface, because the agent explicitly asks for it.
+ */
+export async function applyPatch(patchId, { workspaceRoot, runtime } = {}) {
+  if (!runtime?.exec) throw new TypeError("applyPatch requires an ExecutionRuntime");
   const record = patches.get(patchId);
   if (!record) return { ok: false, error: `Unknown patch "${patchId}".` };
   if (record.status !== "pending") {
@@ -208,11 +236,20 @@ export async function applyPatch(patchId, { workspaceRoot } = {}) {
     };
   }
 
-  const tmp = path.join(root, `.kodo-patch-${patchId}.diff`);
-  try {
-    await fs.writeFile(tmp, record.patch, "utf-8");
+  // Workspace-relative: it must land wherever the runtime's workspace is.
+  const tmpRel = `.kodo-patch-${patchId}.diff`;
+  const gitApply = async (extra) => {
+    const res = await runtime.exec(
+      `git apply ${extra} --whitespace=nowarn ${shellQuote(tmpRel)}`,
+      { timeoutMs: GIT_TIMEOUT_MS },
+    );
+    return { ok: res.exit_code === 0, stdout: res.stdout || "", stderr: res.stderr || "" };
+  };
 
-    const check = await git(["apply", "--check", "--whitespace=nowarn", tmp], root);
+  try {
+    await runtime.writeFile(tmpRel, record.patch);
+
+    const check = await gitApply("--check");
     if (!check.ok) {
       record.status = "failed";
       record.decidedAt = Date.now();
@@ -220,10 +257,10 @@ export async function applyPatch(patchId, { workspaceRoot } = {}) {
       return { ok: false, error: `Patch does not apply cleanly to the workspace: ${check.stderr.slice(0, 300)}`, applied: false };
     }
 
-    const applied = await git(["apply", "--whitespace=nowarn", tmp], root);
+    const applied = await gitApply("");
     if (!applied.ok) {
       // Should be unreachable after --check, but reverse anything partial.
-      await git(["apply", "-R", "--whitespace=nowarn", tmp], root);
+      await gitApply("-R");
       record.status = "failed";
       record.decidedAt = Date.now();
       record.applyResult = { ok: false, stage: "apply", detail: applied.stderr.slice(0, 400) };
@@ -240,7 +277,8 @@ export async function applyPatch(patchId, { workspaceRoot } = {}) {
     record.applyResult = { ok: false, stage: "io", detail: String(err?.message || err) };
     return { ok: false, error: `Apply failed: ${String(err?.message || err)}`, applied: false };
   } finally {
-    await fs.rm(tmp, { force: true }).catch(() => {});
+    // Through the runtime too — the temp diff was written inside the sandbox.
+    await runtime.deleteFile(tmpRel).catch(() => {});
   }
 }
 

@@ -27,6 +27,7 @@ import {
   X,
   CheckCircle2,
 } from "lucide-react";
+import { KODO_API_ORIGIN } from "../../lib/api";
 
 /* ── Reduced-motion hook (shared with landing2) ── */
 function usePrefersReducedMotion() {
@@ -227,7 +228,7 @@ function FeedbackModal({ open, onClose }: { open: boolean; onClose: () => void }
     setError("");
     setStatus("submitting");
     try {
-      const res = await fetch("http://localhost:9000/api/feedback", {
+      const res = await fetch(`${KODO_API_ORIGIN}/api/feedback`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({

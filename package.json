@@ -1,14 +1,24 @@
 {
-  "name": "ai-sandbox",
-  "version": "2.0.0",
-  "description": "Kodo — AI coding agent. Backend in backend1/, UI in chatbot/my-chatbot-ui/",
-  "type": "module",
+  "name": "kodo-monorepo",
+  "version": "2.0.0-rc.4",
   "private": true,
+  "description": "Kodo monorepo — development only. The published package is built by scripts/build-npm-package.mjs into dist-npm/.",
+  "type": "module",
   "scripts": {
     "backend": "npm --prefix backend1 run dev",
     "frontend": "npm --prefix chatbot/my-chatbot-ui run dev",
-    "test": "npm --prefix backend1 test",
+    "kodo": "node cli/bin/kodo.mjs",
+    "test": "node scripts/test-all.mjs",
+    "test:core": "npm --prefix backend1 test",
+    "test:cli": "npm --prefix cli test",
     "test:e2e": "npm --prefix backend1 run test:e2e",
-    "bench": "npm --prefix backend1 run bench --"
+    "bench": "npm --prefix backend1 run bench --",
+    "ui:build": "npm --prefix chatbot/my-chatbot-ui run build",
+    "validate:docs": "node scripts/validate-docs.mjs",
+    "release:build": "node scripts/build-release.mjs",
+    "release:test": "sh scripts/test-release.sh",
+    "release:clean-test": "sh scripts/test-clean-install.sh",
+    "pkg:build": "node scripts/build-npm-package.mjs",
+    "pkg:test": "sh scripts/test-npm-install.sh"
   }
 }

@@ -1,0 +1,129 @@
+# Verify the npm package on every platform Kodo might claim to support.
+#
+# `npm install -g kodo-agent` is the primary user experience, so this is the
+# workflow that decides whether a platform may be called Supported. Each job
+# installs the PACKED TARBALL — not the source tree — and drives the installed
+# `kodo` from an unrelated directory.
+#
+# It does NOT publish. Publishing is an owner decision with a blast radius: a
+# bad `latest` reaches every new user within minutes. This produces a verified
+# tarball and stops.
+
+name: npm package
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "cli/**"
+      - "backend1/**"
+      - "chatbot/my-chatbot-ui/**"
+      - "scripts/build-npm-package.mjs"
+      - "scripts/test-npm-install.sh"
+      - ".github/workflows/npm-package.yml"
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: macos-14,         label: macOS arm64 }
+          - { os: macos-13,         label: macOS x64 }
+          - { os: ubuntu-24.04,     label: Linux x64 }
+          - { os: ubuntu-24.04-arm, label: Linux arm64 }
+          - { os: windows-2022,     label: Windows x64 }
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # The documented floor. Testing on newer Node only would let a
+          # 20.12-incompatible change ship against its own stated requirement.
+          node-version: "20.12"
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          npm --prefix backend1 ci
+          npm --prefix chatbot/my-chatbot-ui ci
+
+      - name: Build the production UI
+        shell: bash
+        run: npm run ui:build
+
+      - name: Build and pack the package
+        shell: bash
+        run: |
+          node scripts/build-npm-package.mjs
+          cd dist-npm && npm pack --pack-destination ..
+
+      # POSIX: the full harness — install the tarball into an isolated prefix,
+      # move the repository away, then drive the installed CLI and UI.
+      - name: Verify the installed package (POSIX)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: sh scripts/test-npm-install.sh
+
+      # Windows has no equivalent harness yet. This is deliberately a SUBSET and
+      # does not by itself justify calling Windows Supported — the UI lifecycle
+      # and process layer are what remain unproven there.
+      - name: Verify the installed package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $version = node -p "require('./cli/package.json').version"
+          $prefix = Join-Path $env:RUNNER_TEMP 'kodo-prefix'
+          New-Item -ItemType Directory -Force -Path $prefix | Out-Null
+
+          npm install -g --prefix $prefix ".\kodo-agent-$version.tgz"
+          $env:PATH = "$prefix;$prefix\bin;$env:PATH"
+
+          Push-Location $env:RUNNER_TEMP
+          try {
+            $reported = (& kodo --version).Trim()
+            if ($reported -ne $version) { throw "kodo --version reported '$reported', expected '$version'" }
+            & kodo --help    | Out-Null
+            & kodo doctor    | Out-Null
+            & kodo status    | Out-Null
+
+            New-Item -ItemType Directory -Force -Path 'kodo-win-test' | Out-Null
+            Set-Location 'kodo-win-test'
+            & kodo init --no-instructions | Out-Null
+            if (-not (Test-Path '.kodo\settings.json')) { throw 'kodo init did not create .kodo\settings.json' }
+
+            # UI lifecycle — this is the part that would promote Windows from
+            # Experimental, because it exercises netstat/tasklist/taskkill.
+            & kodo ui start --port 0 --api-port 0 --detach
+            & kodo ui status
+            & kodo ui stop
+            & kodo server stop 2>$null
+          } finally {
+            Pop-Location
+          }
+
+      - name: Report package size
+        shell: bash
+        run: |
+          ls -la kodo-agent-*.tgz
+          node -e "
+            const fs = require('fs');
+            const f = fs.readdirSync('.').find((n) => n.endsWith('.tgz'));
+            console.log('packed:', (fs.statSync(f).size / 1e6).toFixed(1), 'MB');
+          "
+
+      - uses: actions/upload-artifact@v4
+        if: matrix.label == 'Linux x64'
+        with:
+          name: kodo-agent-npm-tarball
+          path: kodo-agent-*.tgz
+          if-no-files-found: error

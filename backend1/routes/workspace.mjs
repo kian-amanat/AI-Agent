@@ -3,25 +3,40 @@ import { promises as fs } from "fs";
 import path from "path";
 import { promisify } from "util";
 import db from "../db.mjs";
+import { resolveWorkspace, workspaceSource } from "../config/workspace.mjs";
 
 const execAsync = promisify(exec);
 
-// Returns null when the session has no workspace bound yet — callers MUST
-// handle that explicitly (see NO_WORKSPACE below), never fall back to
-// PROJECT_ROOT here. Multiple accounts share one running backend (that's the
-// whole point of multi-user); defaulting an unbound session to the server's
-// own repo would hand every unconfigured user (a fresh signup, a family
-// member testing the app) a live view into whichever project the server
-// happens to be running from.
-function getWorkspacePath(request) {
+// Returns null when there is genuinely no workspace — callers MUST handle that
+// explicitly (see NO_WORKSPACE below).
+//
+// Resolution order lives in config/workspace.mjs: the session-bound path (what
+// the VS Code extension supplies) wins, then the workspace the CLI started this
+// server for. Still never falls back to PROJECT_ROOT or cwd — see that module
+// for why the CLI fallback does not reopen the multi-user leak this guarded.
+function sessionFor(request) {
   try {
     const auth = request.headers["authorization"];
     if (!auth?.startsWith("Bearer ")) return null;
     const token = auth.slice(7).trim();
-    const session = db
+    return db
       .prepare("SELECT workspace_path FROM auth_sessions WHERE token = ?")
-      .get(token);
-    return session?.workspace_path || null;
+      .get(token) || null;
+  } catch {
+    return null;
+  }
+}
+
+function getWorkspacePath(request) {
+  try {
+    // An authenticated session is still REQUIRED. The CLI fallback decides
+    // WHICH workspace a caller gets, never WHETHER an unauthenticated caller
+    // gets one: without this check, resolving straight to CLI_WORKSPACE would
+    // hand the file tree and git state of the current project to any local
+    // process that can reach the loopback port, with no token at all.
+    const session = sessionFor(request);
+    if (!session) return null;
+    return resolveWorkspace(session);
   } catch {
     return null;
   }
@@ -30,7 +45,7 @@ function getWorkspacePath(request) {
 const NO_WORKSPACE = {
   ok: false,
   error: "no_workspace",
-  message: "No project connected yet. Open Kodo from your project (via the extension) or pick one from the folder switcher.",
+  message: "No project connected yet. Start Kodo from your project with `kodo ui start`, or pick one from the folder switcher.",
 };
 
 const IGNORE = new Set([
@@ -86,6 +101,42 @@ async function buildPullRequestUrl(root, branch) {
 }
 
 export default async function workspaceRoute(fastify) {
+  // GET /api/workspace — which project is connected, and how it was chosen.
+  //
+  // This is how the browser learns the workspace. It deliberately does NOT come
+  // from the URL or from anything the page could set: `kodo ui start` tells the
+  // SERVER (WORKSPACE_PATH), and the page asks the server. A path in a query
+  // string or fragment would leak into history, logs and referrers, and would
+  // let anyone who can craft a link retarget the agent.
+  //
+  // Read-only by design. There is no POST here — see §11 of the workspace
+  // contract: the workspace chosen at startup is authoritative, and the
+  // extension's existing session-scoped binding (POST /api/auth/workspace,
+  // which requires a valid bearer token) remains the only way to change it.
+  fastify.get("/", async (request) => {
+    const root = getWorkspacePath(request);
+    if (!root) return NO_WORKSPACE;
+
+    const [branch, isRepository] = await Promise.all([
+      execAsync("git rev-parse --abbrev-ref HEAD", { cwd: root, timeout: 3000 })
+        .then((r) => r.stdout.trim())
+        .catch(() => null),
+      execAsync("git rev-parse --is-inside-work-tree", { cwd: root, timeout: 3000 })
+        .then((r) => r.stdout.trim() === "true")
+        .catch(() => false),
+    ]);
+
+    // Only what the UI actually renders: the project it is operating on and its
+    // git context. Nothing else about the host filesystem is exposed here.
+    return {
+      ok: true,
+      workspace: root,
+      name: path.basename(root) || root,
+      source: workspaceSource(sessionFor(request)),
+      git: { isRepository, branch: isRepository ? branch : null },
+    };
+  });
+
   // GET /api/workspace/git — current branch + dirty/ahead status
   fastify.get("/git", async (request) => {
     const root = getWorkspacePath(request);

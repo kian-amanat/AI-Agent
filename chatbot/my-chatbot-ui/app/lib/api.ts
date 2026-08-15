@@ -5,12 +5,132 @@
  * Everything else (auth, sessions, upload, settings) is identical.
  */
 
-const BASE_URL        = "http://localhost:9000/api/agent";
+/**
+ * Where the Kodo runtime API lives.
+ *
+ * Configurable rather than hardcoded because `kodo ui start` picks the API
+ * port at launch — it may not be 9000 if something else already holds it, and
+ * `--port 0` deliberately asks for whatever is free. A hardcoded origin here
+ * meant the UI could only ever talk to one specific server on one specific
+ * port, which is exactly what stopped the CLI from being able to serve it.
+ *
+ * NEXT_PUBLIC_ vars are inlined at BUILD time, so a rebuilt UI can be pinned to
+ * a fixed origin; the window override below is what lets a single prebuilt UI
+ * be served against whatever port the CLI chose at RUN time. Falls back to the
+ * historical default so an existing `npm run dev` setup is unaffected.
+ */
+declare global {
+  interface Window { __KODO_API_ORIGIN__?: string }
+}
+
+const API_ORIGIN_KEY = "kodo_api_origin";
+
+/**
+ * Resolution order, highest first:
+ *
+ *   1. `?kodoApi=<origin>` in the URL — what `kodo ui start` puts in the link
+ *      it prints, then remembered in localStorage so later navigations keep it.
+ *   2. A previously remembered origin.
+ *   3. A build-time value (NEXT_PUBLIC_/window global), for fixed deployments.
+ *   4. The historical default, so an existing `npm run dev` setup is unchanged.
+ *
+ * The query parameter exists because the pages here are statically prerendered:
+ * anything read from process.env is frozen at BUILD time, but `kodo ui start`
+ * picks the API port at LAUNCH time (and `--port 0` asks for whatever is free).
+ * Baking the origin in would have meant one prebuilt UI could only ever talk to
+ * one hardcoded port — which is precisely what stopped the CLI from serving it.
+ */
+function resolveApiOrigin(): string {
+  const buildTime =
+    (typeof window !== "undefined" && window.__KODO_API_ORIGIN__) ||
+    process.env.NEXT_PUBLIC_KODO_API_ORIGIN ||
+    "";
+
+  if (typeof window === "undefined") return buildTime || "http://localhost:9000";
+
+  try {
+    const fromQuery = new URLSearchParams(window.location.search).get("kodoApi");
+    if (fromQuery) {
+      // Only ever a loopback address. Honouring an arbitrary origin from the
+      // query string would let a crafted link point this UI — carrying the
+      // user's session — at an attacker's server.
+      const parsed = new URL(fromQuery);
+      if (["localhost", "127.0.0.1", "[::1]", "::1"].includes(parsed.hostname)) {
+        window.localStorage.setItem(API_ORIGIN_KEY, parsed.origin);
+        return parsed.origin;
+      }
+    }
+    const remembered = window.localStorage.getItem(API_ORIGIN_KEY);
+    if (remembered) return remembered;
+  } catch {
+    /* private-mode localStorage, malformed URL — fall through to the default */
+  }
+
+  return buildTime || "http://localhost:9000";
+}
+
+const API_ORIGIN = resolveApiOrigin();
+
+export const KODO_API_ORIGIN = API_ORIGIN;
+
+/**
+ * Adopt the session `kodo ui start` minted for this workspace.
+ *
+ * The CLI prints `…?kodoApi=…#token=<jwt>`. The origin half was already read
+ * above; the token half was not read by anything, so a CLI-launched UI opened
+ * on the sign-in wall and every authenticated call 401'd — while the CLI was
+ * printing the workspace it had just connected. The token is a real API session
+ * (backend1 provisionCliSession), so adopting it here is the same act as
+ * logging in, minus the password the local user has already implicitly given by
+ * running the command.
+ *
+ * In the FRAGMENT deliberately: fragments are never sent to a server, so the
+ * credential stays out of request logs and Referer headers. It is stripped from
+ * the address bar immediately so it does not linger in history or get pasted
+ * into a bug report.
+ *
+ * Runs at module load, before any request is issued — an adopt-on-mount effect
+ * would race the first authenticated call, which is the bug this fixes.
+ */
+function adoptCliSessionToken(): void {
+  if (typeof window === "undefined") return;
+  try {
+    const hash = window.location.hash;
+    if (!hash.startsWith("#")) return;
+    const token = new URLSearchParams(hash.slice(1)).get("token");
+    if (!token) return;
+
+    // Only ever for a loopback API. A crafted link cannot plant a session that
+    // would be sent to a remote origin, because resolveApiOrigin() has already
+    // refused any non-loopback target.
+    if (!/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|$)/.test(API_ORIGIN)) return;
+
+    window.localStorage.setItem("kodo_token", token);
+
+    // Strip the credential from the address bar — but not only once. This module
+    // runs before hydration, and the router restores the URL it was given when
+    // it hydrates, which put the token straight back (and therefore into
+    // history). Re-apply after hydration so it actually stays gone.
+    const strip = () => {
+      if (!window.location.hash.includes("token=")) return;
+      window.history.replaceState(null, "", window.location.pathname + window.location.search);
+    };
+    strip();
+    window.requestAnimationFrame(strip);
+    window.addEventListener("load", strip, { once: true });
+  } catch {
+    /* private-mode localStorage or a malformed fragment — stay signed out */
+  }
+}
+
+adoptCliSessionToken();
+
+const BASE_URL        = `${API_ORIGIN}/api/agent`;
 const UPLOAD_URL      = `${BASE_URL}/upload`;
 const TRANSCRIBE_URL  = `${BASE_URL}/transcribe`;
-const SETTINGS_URL    = "http://localhost:9000/api/settings";
-const AUTH_URL        = "http://localhost:9000/api/auth";
-const WORKSPACE_URL   = "http://localhost:9000/api/workspace";
+const SETTINGS_URL    = `${API_ORIGIN}/api/settings`;
+const AUTH_URL        = `${API_ORIGIN}/api/auth`;
+const WORKSPACE_URL   = `${API_ORIGIN}/api/workspace`;
 
 export interface Session {
   id:            string;

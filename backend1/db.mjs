@@ -3,7 +3,14 @@ import path from "path";
 import { fileURLToPath } from "url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const DB_PATH = path.resolve(__dirname, "memory.db");
+
+// KODO_DB_PATH lets a caller point the database somewhere else. Tests need it
+// to be hermetic: without it every run shares backend1/memory.db, so a test
+// that signs a user up passes once and then fails on "Email already
+// registered" — and worse, leaves real rows behind in the developer's database.
+const DB_PATH = process.env.KODO_DB_PATH
+  ? path.resolve(process.env.KODO_DB_PATH)
+  : path.resolve(__dirname, "memory.db");
 
 const db = new Database(DB_PATH);
 db.pragma("journal_mode = WAL");

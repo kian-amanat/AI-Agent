@@ -22,6 +22,7 @@
  */
 
 import assert from "assert";
+import { HostRuntime } from "../core/runtime/host.mjs";
 import path from "path";
 import os from "os";
 import fs from "fs/promises";
@@ -54,6 +55,7 @@ async function workspace(task, files = {}) {
   const controller = createTaskController({ task });
   const ctx = {
     root, emit: null, sessionId: "s", requestId: "r", hooks: {},
+    runtime: new HostRuntime({ root }),
     editedFiles: new Map(), readFiles: new Set(), todosRef: { current: [] },
     workspaceSnapshot: [], permissionMode: "auto",
     taskController: controller,
