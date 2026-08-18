@@ -272,6 +272,27 @@ export function isTestPath(p) {
 }
 
 /**
+ * Files that decide HOW the project is checked, rather than what it does:
+ * the test files themselves and the manifests/configs that define the runner.
+ *
+ * Editing these is entirely legitimate — a user may ask for exactly that, and
+ * "write a regression test first" requires it. The distinction exists only so
+ * that a check which went green can be asked *why*: if the sole thing that
+ * changed since the last check was the harness, the green says something about
+ * the harness, not about the implementation.
+ */
+export function isTestInfraPath(p) {
+  const s = String(p || "");
+  if (isTestPath(s)) return true;
+  const base = s.split("/").pop()?.toLowerCase() || "";
+  return base === "package.json" || base === "package-lock.json"
+    || /^tsconfig(\.\w+)?\.json$/.test(base)
+    || /^(jest|vitest|vite|karma|playwright|cypress|mocha|babel|rollup|webpack)\.config\.[cm]?[jt]s$/.test(base)
+    || /^\.mocharc(\.\w+)?$/.test(base)
+    || base === "pytest.ini" || base === "tox.ini" || base === "setup.cfg" || base === "pyproject.toml";
+}
+
+/**
  * Classify the request into a shape, plus the standalone requirements it
  * implies. Pure and deterministic — the same string always yields the same
  * shape, so a misclassification is reproducible from the prompt alone.
@@ -626,13 +647,45 @@ export function isVacuousTestRun(output) {
   return VACUOUS_TEST_RUN_RE.test(s);
 }
 
-export function verificationOutcome(ok, output) {
+/**
+ * A command whose exit code cannot report failure.
+ *
+ * `npm test || echo 'no test script'` always exits 0: the `||` fallback runs
+ * precisely when the test command failed, and its success becomes the exit
+ * code of the whole line. An agent that reads that 0 as "tests passed" has
+ * inverted the evidence — the fallback fired *because* the check broke.
+ *
+ * Deliberately narrow. `&&` chains are untouched (they propagate failure),
+ * pipelines are untouched, and the command still runs normally; it simply
+ * stops being accepted as proof. `|| exit 1` and `|| false` re-raise the
+ * failure themselves, so they are not masks.
+ */
+export function masksFailure(command) {
+  const c = String(command || "");
+  if (/\|\|\s*(exit\s+[1-9]|false\b|return\s+[1-9])/.test(c)) return false;
+  return /\|\|/.test(c) || /;\s*(true|exit\s+0)\s*$/.test(c) || /\bset\s+\+e\b/.test(c);
+}
+
+export function verificationOutcome(ok, output, command = "") {
   const p = parsePayload(output);
+  // Checked before anything reads an exit code: when the command carries a
+  // failure mask the exit code is not evidence either way, so it must not be
+  // able to certify the workspace. Reported as a failed verification with the
+  // reason attached, which is what pushes the agent to run a real check.
+  if (command && masksFailure(command)) {
+    return {
+      passed: false,
+      why: "the command's exit code is masked by a `||` fallback, so a 0 exit proves nothing — re-run the check on its own",
+    };
+  }
   if (p) {
     if (p.timed_out === true) return { passed: false, why: "timed out" };
     // Checked BEFORE exit_code: a vacuous test run's whole problem is that it
     // exits 0 while proving nothing.
     if (isVacuousTestRun(output)) return { passed: false, why: "the test command ran zero tests" };
+    if (MISSING_SCRIPT_RE.test([p.stdout, p.stderr, p.output, p.error].filter(Boolean).join("\n"))) {
+      return { passed: false, why: "the project has no such script — verification did not run" };
+    }
     // `exit_code` is the authority. A process that exited 0 passed, whatever
     // words it printed on the way.
     if (typeof p.exit_code === "number") return { passed: p.exit_code === 0 };
@@ -646,8 +699,20 @@ export function verificationOutcome(ok, output) {
   if (!ok) return { passed: false };
   const raw = String(output || "");
   if (isVacuousTestRun(raw)) return { passed: false, why: "the test command ran zero tests" };
+  if (MISSING_SCRIPT_RE.test(raw)) {
+    return { passed: false, why: "the project has no such script — verification did not run" };
+  }
   return { passed: !textShowsFailure(raw) };
 }
+
+/**
+ * "npm test" against a project that has no test script. npm exits non-zero, but
+ * an agent that wraps it in a `||` fallback (or reads only the tail of the
+ * output) can mistake "there is nothing to run" for "there was nothing wrong".
+ * An absent suite is missing verification, never passing verification.
+ */
+const MISSING_SCRIPT_RE =
+  /\bMissing script\b|\bno test specified\b|\bscript not found\b|\bcommand not found\b/i;
 
 function textShowsFailure(text) {
   return Boolean(extractErrorSignature(text)) || COUNTED_FAILURE_RE.test(text)
@@ -803,6 +868,9 @@ export function createTaskController({
   let discoveryTurns = 0;     // turns spent reading before any real work
   let discoveryCapped = false;
   let discoveryGraceUsed = false;  // the one-time reprieve in the first pass
+  // The one-time reprieve at the OTHER end of the run: the work is done and
+  // nothing has been checked. See the verification reprieve in endIteration().
+  let verificationGraceUsed = false;
 
   // Whether this task obliges the agent to change the workspace. Computed once
   // from the request, deterministically — never re-derived from the model's
@@ -819,6 +887,11 @@ export function createTaskController({
   // this is stale: it certifies a workspace that no longer exists.
   let lastMutationAt = -1;
   const mutatedPaths = new Set();  // every path changed, including via write_file
+  // Split by what the change was TO, so a passing check can be asked whether
+  // anything it was supposed to be testing actually moved. See
+  // onlyTestInfraChangedSinceLastVerification().
+  let lastImplMutationAt = -1;
+  let lastInfraMutationAt = -1;
 
   // Snapshot of the counters as of the end of the previous iteration. Progress
   // is a DELTA against this, which is what makes "did this turn accomplish
@@ -919,7 +992,13 @@ export function createTaskController({
           writeAttempts.set(args.path, (writeAttempts.get(args.path) || 0) + 1);
         }
       }
-      if (ok) { mutations++; lastMutationAt = entry.at; }
+      if (ok) {
+        mutations++; lastMutationAt = entry.at;
+        if (args?.path) {
+          if (isTestInfraPath(args.path)) lastInfraMutationAt = entry.at;
+          else lastImplMutationAt = entry.at;
+        } else lastImplMutationAt = entry.at;
+      }
       enter("patch");
     } else if (ok && PATCH_TOOLS.has(tool)) {
       // Changes the tree without carrying a `path` argument.
@@ -1002,8 +1081,13 @@ export function createTaskController({
     // told "you have not verified your changes".
     const isVerifyBash = tool === "bash" && VERIFY_COMMAND_RE.test(String(args?.command || ""));
     if (isVerifyBash || tool === "verify_ui") {
-      const { passed } = verificationOutcome(ok, output);
       const command = isVerifyBash ? String(args.command) : `verify_ui ${args?.url || ""}`.trim();
+      let { passed } = verificationOutcome(ok, output, isVerifyBash ? command : "");
+      // A pass that arrives after the test harness itself was edited, with no
+      // implementation file touched since, is not evidence about the
+      // implementation — the agent may simply have moved the goalposts until
+      // the command exited 0. It stays recorded, but it cannot certify.
+      if (passed && onlyTestInfraChangedSinceLastVerification()) passed = false;
       verifications.push({ command, passed, at: history.length });
       // Fall back to the general signature when there is no compiler
       // diagnostic: "vitest: command not found" is a wall worth naming, and
@@ -1235,6 +1319,27 @@ export function createTaskController({
   }
 
   /**
+   * The one wording for "you changed files and checked nothing".
+   *
+   * Extracted so the finish gate and the no-progress reprieve issue the
+   * IDENTICAL instruction. Two call sites paraphrasing the same requirement is
+   * how a second, subtly different verification policy gets born.
+   */
+  function unverifiedDirective(edited) {
+    return [
+      "You have not verified your changes, so you cannot finish yet.",
+      `Files you edited: ${edited.join(", ")}`,
+      "",
+      "Run the check that actually applies to what you changed:",
+      "- Frontend/TS edits → the project's typecheck (and lint, if it has one)",
+      "- Backend edits → the project's test command, or `node --check <file>` at minimum",
+      "- A route or endpoint → start it and `curl` the real endpoint",
+      "Discover the real command from the project's own manifest — do not guess a script name.",
+      "Run it now, then report what it output.",
+    ].join("\n");
+  }
+
+  /**
    * Called once per tool-executing turn. This is the termination policy: the
    * single place that decides a task should end early, and the only source of
    * a structured stop reason.
@@ -1389,6 +1494,44 @@ export function createTaskController({
         };
       }
 
+      // ── The verification reprieve ─────────────────────────────────────────
+      // The mirror image of the reprieve above, at the far end of the run: the
+      // work is done and nothing has been checked.
+      //
+      // The agent's own instructions say to VERIFY by re-reading the edited
+      // region and the project's manifest before running its check. Re-reading
+      // a file already inspected scores nothing in IMPLEMENTATION — correctly,
+      // that is what catches a read loop — so an agent following the procedure
+      // accumulates a no-progress streak BY COMPLYING, and used to be killed at
+      // the threshold, often before it reached the bash call the step exists to
+      // produce. The stop then bypassed canFinish() entirely, so the mandatory
+      // verification directive was never issued: the run ended unverified
+      // without ever having been ASKED to verify.
+      //
+      // So spend the streak on the request instead of on a stop. Granted ONCE
+      // per run, only when there is real work to check and nothing checking it.
+      // If the agent verifies, the normal completion path takes over. If it
+      // ignores the directive, the streak rebuilds and the next trip through
+      // lands on the unchanged no_progress stop below — the reprieve is gone
+      // and cannot be granted again.
+      //
+      // This asks for verification; it never supplies it. Only a real
+      // verification event recorded through recordToolCall/recordVerification
+      // can satisfy verificationRan(), and every existing check on the quality
+      // of that evidence — masked commands, vacuous runs, missing scripts,
+      // test-infrastructure edits — still applies untouched.
+      if (requiresMutation && !verificationGraceUsed && !verificationRan()
+          && mutations >= minMutatedFiles && editedPaths.size > 0) {
+        verificationGraceUsed = true;
+        noProgressStreak = 0;
+        return {
+          ...base,
+          noProgressStreak: 0,
+          directiveKind: "verification_grace",
+          directive: unverifiedDirective([...editedPaths]),
+        };
+      }
+
       // Past the reprieve. For an action task that never touched the workspace,
       // name that specifically — "I explored and never changed anything" is a
       // far more useful blocker than "steps changed nothing".
@@ -1486,6 +1629,22 @@ export function createTaskController({
     verifications.length > 0 &&
     verifications[verifications.length - 1].passed &&
     verifications[verifications.length - 1].at <= lastMutationAt;
+
+  /**
+   * Did the harness move while the implementation stood still?
+   *
+   * Function declaration, not a const arrow: record() runs long after the
+   * factory body, but keeping it hoisted means the call site cannot be broken
+   * by later reordering.
+   */
+  function onlyTestInfraChangedSinceLastVerification() {
+    const since = verifications.length ? verifications[verifications.length - 1].at : -1;
+    // Nothing about the harness changed since the last check — ordinary case.
+    if (lastInfraMutationAt <= since) return false;
+    // The harness changed AND some implementation file changed too: the check
+    // still has something real to certify.
+    return lastImplMutationAt <= since;
+  }
 
   /**
    * "Progress" separates a retry from a loop. A same-class attempt counts as
@@ -1791,17 +1950,7 @@ export function createTaskController({
       verifyPushbacks++;
       return {
         allowed: false,
-        directive: [
-          "You have not verified your changes, so you cannot finish yet.",
-          `Files you edited: ${edited.join(", ")}`,
-          "",
-          "Run the check that actually applies to what you changed:",
-          "- Frontend/TS edits → the project's typecheck (and lint, if it has one)",
-          "- Backend edits → the project's test command, or `node --check <file>` at minimum",
-          "- A route or endpoint → start it and `curl` the real endpoint",
-          "Discover the real command from the project's own manifest — do not guess a script name.",
-          "Run it now, then report what it output.",
-        ].join("\n"),
+        directive: unverifiedDirective(edited),
         kind: "unverified",
         reason: "no verification has run",
       };
@@ -1903,6 +2052,7 @@ export function createTaskController({
         discoveryTurns,
         discoveryCapped,
         discoveryGraceUsed,
+        verificationGraceUsed,
         planRevisions,
         iterations,
         noProgressStreak,

@@ -104,12 +104,20 @@ export function validateSyntax(content, absPath) {
     return null;
   }
 
-  if (![".tsx", ".jsx", ".ts", ".js"].includes(ext)) return null;
+  // .mjs/.cjs are plain JavaScript and .mts/.cts plain TypeScript — the module
+  // flavour in the extension changes nothing the parser cares about. Omitting
+  // them meant validateSyntax returned "clean" for every ESM source file, so
+  // edit_file's and write_file's syntax gates silently no-opped on exactly the
+  // files a Node project is mostly made of. A single edit that replaced a
+  // construct's opening line while its new text re-closed the construct left
+  // the original body orphaned, and the corrupted file reached disk with the
+  // tool reporting success.
+  if (![".tsx", ".jsx", ".ts", ".js", ".mjs", ".cjs", ".mts", ".cts"].includes(ext)) return null;
   const ts = loadTypeScript();
   if (!ts) return null;
   const scriptKind = ext === ".tsx" ? ts.ScriptKind.TSX
                    : ext === ".jsx" ? ts.ScriptKind.JSX
-                   : ext === ".ts"  ? ts.ScriptKind.TS
+                   : (ext === ".ts" || ext === ".mts" || ext === ".cts") ? ts.ScriptKind.TS
                    : ts.ScriptKind.JS;
   try {
     const srcFile = ts.createSourceFile("validate" + ext, content, ts.ScriptTarget.ESNext, true, scriptKind);
@@ -292,6 +300,77 @@ function checkJsxStructuralIssues(ts, srcFile) {
     return `components used but never imported or declared: ${list} — add ALL missing imports in one edit (icon names usually come from 'lucide-react').`;
   }
   return null;
+}
+
+/**
+ * Top-level exported names in a module, via the parser rather than a regex so
+ * `export { a as b }`, `export default`, and multi-declarator statements are
+ * all counted the way the module system counts them.
+ *
+ * Returns null when the file type isn't parseable here — the caller must treat
+ * that as "cannot tell", never as "nothing is exported".
+ */
+export function exportedNames(content, absPath) {
+  const ext = path.extname(absPath).toLowerCase();
+  if (![".tsx", ".jsx", ".ts", ".js", ".mjs", ".cjs", ".mts", ".cts"].includes(ext)) return null;
+  const ts = loadTypeScript();
+  if (!ts) return null;
+  const scriptKind = ext === ".tsx" ? ts.ScriptKind.TSX
+                   : ext === ".jsx" ? ts.ScriptKind.JSX
+                   : (ext === ".ts" || ext === ".mts" || ext === ".cts") ? ts.ScriptKind.TS
+                   : ts.ScriptKind.JS;
+  let src;
+  try {
+    src = ts.createSourceFile("exports" + ext, content, ts.ScriptTarget.ESNext, true, scriptKind);
+  } catch { return null; }
+  // A file that does not parse cannot be compared against — the syntax gate
+  // owns that failure, and guessing at exports here would double-report it.
+  if (Array.isArray(src.parseDiagnostics) && src.parseDiagnostics.length > 0) return null;
+
+  const names = new Set();
+  const hasExportMod = (n) =>
+    n.modifiers?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
+
+  for (const stmt of src.statements) {
+    if (ts.isExportAssignment(stmt)) { names.add("default"); continue; }
+    if (ts.isExportDeclaration(stmt)) {
+      if (stmt.exportClause && ts.isNamedExports(stmt.exportClause)) {
+        for (const el of stmt.exportClause.elements) names.add(el.name.text);
+      }
+      continue;
+    }
+    if (!hasExportMod(stmt)) continue;
+    // `export default function d() {}` exposes "default"; `d` stays local, so
+    // counting it too would report a phantom export as deleted on any rewrite
+    // that renamed it.
+    if (stmt.modifiers?.some((m) => m.kind === ts.SyntaxKind.DefaultKeyword)) {
+      names.add("default");
+      continue;
+    }
+    if ((ts.isFunctionDeclaration(stmt) || ts.isClassDeclaration(stmt)) && stmt.name) {
+      names.add(stmt.name.text);
+    } else if (ts.isVariableStatement(stmt)) {
+      for (const d of stmt.declarationList.declarations) {
+        if (ts.isIdentifier(d.name)) names.add(d.name.text);
+      }
+    } else if (stmt.name?.text) {
+      names.add(stmt.name.text);
+    }
+  }
+  return [...names];
+}
+
+/**
+ * Exports present before an overwrite and absent after it.
+ *
+ * Returns [] when either side cannot be parsed — "cannot tell" must never
+ * escalate into a false accusation that code was dropped.
+ */
+export function removedExports(before, after, absPath) {
+  const a = exportedNames(before, absPath);
+  const b = exportedNames(after, absPath);
+  if (!a || !b) return [];
+  return a.filter((n) => !b.includes(n));
 }
 
 async function ensureParentDir(absPath) {
