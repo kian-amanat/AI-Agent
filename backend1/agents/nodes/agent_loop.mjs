@@ -79,7 +79,7 @@ import OpenAI from "openai";
 
 import { chatWithTools, isTransientTransportError } from "../../services/agentChat.mjs";
 import { readMemoryTopic, listMemoryTopics, loadMemoryIndex } from "../../services/agentMemory.mjs";
-import { validateSyntax } from "../../utils/syntax.util.mjs";
+import { validateSyntax, removedExports } from "../../utils/syntax.util.mjs";
 import { HostRuntime, shellQuote, IGNORE_DIRS, CODE_EXTENSIONS } from "../../core/runtime/host.mjs";
 import { assertRuntime } from "../../core/runtime/contract.mjs";
 import { isSensitiveFilePath } from "../../utils/path.util.mjs";
@@ -483,6 +483,22 @@ export function splitBashSegments(cmd) {
     }
     if (ch === "'" || ch === '"') { quote = ch; current += ch; continue; }
     if (ch === ";" || ch === "|" || ch === "&") {
+      // Not every `&` separates commands. Bash's redirection operators embed
+      // one: `>&`/`<&` duplicate a file descriptor (`2>&1`, `>&2`, `<&0`) and
+      // `&>`/`&>>` redirect both streams at once. Splitting there invented a
+      // command out of the descriptor number — `npm test 2>&1` became
+      // ["npm test 2>", "1"], and the allowlist then rejected a command called
+      // "1". Since `2>&1` is punctuation on nearly every verification command,
+      // this silently blocked the agent from checking its own work.
+      //
+      // Adjacency is required, matching bash: `>&` is one token only when the
+      // characters touch, so a deliberate background-then-redirect (`foo & >x`)
+      // still separates. This narrows what counts as a separator; it grants no
+      // command anything, and every surviving segment is still validated.
+      if (ch === "&" && (current.endsWith(">") || current.endsWith("<") || raw[i + 1] === ">")) {
+        current += ch;
+        continue;
+      }
       // Consume the doubled forms (`&&`, `||`) as one separator.
       if ((ch === "|" || ch === "&") && raw[i + 1] === ch) i++;
       segments.push(current);
@@ -1325,7 +1341,10 @@ export async function runStopHook(runtime, hooks, emit) {
 
 // ── Tool schema ───────────────────────────────────────────────────────────────
 
-const AGENT_TOOLS = [
+// Exported read-only so a test can assert what the model is actually offered.
+// The write_file guard is only trustworthy if the schema exposes no override
+// argument; that is a property of this list, so the list has to be inspectable.
+export const AGENT_TOOLS = [
   {
     type: "function",
     function: {
@@ -1363,7 +1382,7 @@ const AGENT_TOOLS = [
     type: "function",
     function: {
       name: "write_file",
-      description: "Create a new file or fully overwrite an existing one. For partial changes to an existing file, prefer edit_file.",
+      description: "Create a new file or fully overwrite an existing one. For partial changes to an existing file, prefer edit_file. Overwriting an existing file must include everything you are not changing — a rewrite that drops existing exports is always rejected. To delete an export on purpose, use edit_file on that declaration.",
       parameters: {
         type: "object",
         properties: {
@@ -2469,6 +2488,36 @@ export async function executeTool(name, args, ctx) {
             success: false,
             error: `Write rejected — content is broken: ${syntaxErr}. ${existing !== null ? "The file is unchanged on disk (your new content was NOT written)" : "The file was NOT created"} — fix the content and send the complete file again with write_file.`,
           };
+        }
+
+        // A full-file rewrite is the usual move after a targeted edit is
+        // rejected, and it is where pre-existing code silently disappears: the
+        // model reconstructs the file from memory and omits exports it was
+        // never asked to touch. The syntax gate cannot see this — dropping an
+        // export leaves the file perfectly parseable. Observed three times in
+        // the fullstack reproductions (`setTransport`+`request`, then `handle`
+        // twice).
+        //
+        // UNCONDITIONAL, and deliberately so. The first version of this guard
+        // offered the model an `allow_removals` opt-out; across five benchmark
+        // runs the model answered two of the three rejections by re-issuing the
+        // identical write with the flag set, and both rewrites destroyed
+        // handle(). An escape hatch reachable from `args` is not a trust
+        // boundary — `args` is model-controlled by definition, so the flag only
+        // converted a hard stop into a one-token retry.
+        //
+        // Deliberate deletion is still available, through edit_file: removing
+        // an export there requires quoting its exact current text, which is
+        // precisely the property a from-memory rewrite lacks. So this closes
+        // the lossy path without closing the intentional one.
+        if (existing !== null) {
+          const dropped = removedExports(existing, content, absPath);
+          if (dropped.length) {
+            return {
+              success: false,
+              error: `Write rejected — this rewrite would delete ${dropped.length} existing export(s) from ${relPath}: ${dropped.join(", ")}. The file is unchanged on disk. Re-read it and send the COMPLETE file including everything you are not changing. To remove an export on purpose, use edit_file on that specific declaration instead — a full rewrite cannot be used to delete exports.`,
+            };
+          }
         }
 
         await snapshotForUndo(root, sessionId, requestId, relPath, absPath);
@@ -3670,6 +3719,9 @@ export async function agentLoopNode(state) {
           recovery:         { stage: "executing", message: "🔁 That keeps failing — trying a different approach..." },
           discovery_grace:  { stage: "planning",  message: "📋 Going in circles — committing to a plan..." },
           discovery_budget: { stage: "planning",  message: "📋 Enough exploring — time to implement..." },
+          // Without this the default below would announce "time to implement"
+          // at the exact moment the work is finished and being checked.
+          verification_grace: { stage: "verifying", message: "🔍 Edits made but nothing checked — verifying..." },
         }[verdict.directiveKind] ?? { stage: "planning", message: "📋 Enough exploring — time to implement..." };
         emit?.({ type: "progress", ...NUDGE });
         conversation.push({ role: "user", content: verdict.directive });
